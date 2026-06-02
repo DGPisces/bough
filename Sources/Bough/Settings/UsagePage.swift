@@ -715,25 +715,38 @@ private struct UsageDebugSection: View {
 
     private var presetBinding: Binding<UsageDebugPresets.Preset?> {
         Binding(
-            get: { usageStore.debugPreset },
-            set: { newValue in
-                // Always clear refresh override before applying a new
-                // preset; the refreshing case re-sets it below.
-                UsageDebugPresets.clearOverrides(store: usageStore)
-                guard let newValue else {
-                    usageStore.debugPreset = nil
-                    return
+            get: {
+                MainActor.assumeIsolated {
+                    usageStore.debugPreset
                 }
-                switch newValue {
-                case .refreshing:
-                    UsageDebugPresets.applyRefreshing(store: usageStore)
-                case .justDepleted:
-                    Task { await UsageDebugPresets.applyJustDepletedSequence(store: usageStore) }
-                default:
-                    usageStore.debugPreset = newValue
+            },
+            set: { newValue in
+                MainActor.assumeIsolated {
+                    setPreset(newValue)
                 }
             }
         )
+    }
+
+    @MainActor
+    private func setPreset(_ newValue: UsageDebugPresets.Preset?) {
+        // Always clear refresh override before applying a new preset; the
+        // refreshing case re-sets it below.
+        UsageDebugPresets.clearOverrides(store: usageStore)
+        guard let newValue else {
+            usageStore.debugPreset = nil
+            return
+        }
+        switch newValue {
+        case .refreshing:
+            UsageDebugPresets.applyRefreshing(store: usageStore)
+        case .justDepleted:
+            Task { @MainActor in
+                await UsageDebugPresets.applyJustDepletedSequence(store: usageStore)
+            }
+        default:
+            usageStore.debugPreset = newValue
+        }
     }
 }
 #endif

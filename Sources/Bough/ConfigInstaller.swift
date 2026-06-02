@@ -904,10 +904,29 @@ struct ConfigInstaller {
     }
 
     private static func isCodexGUIAppBinary(_ path: String) -> Bool {
-        URL(fileURLWithPath: path)
+        let guiBinaryPath = "/Applications/Codex.app/Contents/MacOS/Codex"
+        if URL(fileURLWithPath: path)
             .resolvingSymlinksInPath()
             .standardizedFileURL
-            .path == "/Applications/Codex.app/Contents/MacOS/Codex"
+            .path == guiBinaryPath {
+            return true
+        }
+
+        guard let symlinkDestination = try? FileManager.default.destinationOfSymbolicLink(atPath: path) else {
+            return false
+        }
+        let destinationPath: String
+        if symlinkDestination.hasPrefix("/") {
+            destinationPath = symlinkDestination
+        } else {
+            destinationPath = URL(fileURLWithPath: path)
+                .deletingLastPathComponent()
+                .appendingPathComponent(symlinkDestination)
+                .path
+        }
+        return URL(fileURLWithPath: destinationPath)
+            .standardizedFileURL
+            .path == guiBinaryPath
     }
 
     private static func shellResolvedCodexPath() -> String? {
