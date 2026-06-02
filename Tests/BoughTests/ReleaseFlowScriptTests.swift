@@ -1,0 +1,294 @@
+import XCTest
+
+final class ReleaseFlowScriptTests: XCTestCase {
+    func testAssetAPIURLFlagIsRemoved() throws {
+        let result = try Self.run([
+            "update-appcast",
+            "--tag", "v1.0.0",
+            "--dmg", "/tmp/Bough.dmg",
+            "--asset-api-url", "https://api.github.com/repos/example/not-public/releases/assets/1",
+            "--dry-run"
+        ])
+
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stderr.contains("--asset-api-url is no longer supported; use --download-url"))
+    }
+
+    func testUpdateAppcastDryRunRejectsPrivateAssetURL() throws {
+        let result = try Self.run([
+            "update-appcast",
+            "--tag", "v1.0.0",
+            "--dmg", "/tmp/Bough.dmg",
+            "--download-url", "https://api.github.com/repos/example/not-public/releases/assets/1",
+            "--dry-run"
+        ])
+
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stderr.contains("--download-url must be a public GitHub Release download URL"))
+    }
+
+    func testUpdateAppcastDryRunAcceptsPublicDownloadURL() throws {
+        let downloadURL = "https://github.com/DGPisces/bough/releases/download/v1.0.0/Bough-v1.0.0.dmg"
+        let result = try Self.run([
+            "update-appcast",
+            "--tag", "v1.0.0",
+            "--dmg", "/tmp/Bough.dmg",
+            "--download-url", downloadURL,
+            "--dry-run"
+        ])
+
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("BOUGH_DMG_DOWNLOAD_URL=\(downloadURL)"))
+        XCTAssertTrue(result.stdout.contains("Tools/Release/update-appcast.sh /tmp/Bough.dmg"))
+        XCTAssertFalse(result.stdout.contains("BOUGH_DMG_ASSET_API_URL"))
+        XCTAssertFalse(result.stdout.contains(Self.legacyRepoName))
+    }
+
+    func testPrepareAcceptsPublicRCMetadata() throws {
+        let result = try Self.run([
+            "prepare",
+            "--version", "1.0.0",
+            "--build", "1",
+            "--tag", "v1.0.0-rc.1"
+        ])
+
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("export BOUGH_RELEASE_TAG=v1.0.0-rc.1"))
+        XCTAssertTrue(result.stdout.contains("export BOUGH_RELEASE_LABEL=v1.0.0-rc.1"))
+    }
+
+    func testUpdateAppcastRejectsPrereleaseTags() throws {
+        let result = try Self.run([
+            "update-appcast",
+            "--tag", "v1.0.0-rc.1",
+            "--dmg", "/tmp/Bough.dmg",
+            "--download-url", "https://github.com/DGPisces/bough/releases/download/v1.0.0-rc.1/Bough.dmg",
+            "--dry-run"
+        ])
+
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stderr.contains("stable appcast updates only support stable tags"))
+    }
+
+    func testVerifyDryRunForStableChecksAppcastDownloadURL() throws {
+        let downloadURL = "https://github.com/DGPisces/bough/releases/download/v1.0.0/Bough.dmg"
+        let result = try Self.run([
+            "verify",
+            "--tag", "v1.0.0",
+            "--dmg", "/tmp/Bough.dmg",
+            "--download-url", downloadURL,
+            "--dry-run"
+        ])
+
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("xmllint --noout Tools/Release/appcast.xml"))
+        XCTAssertTrue(result.stdout.contains("Tools/Release/release-flow.sh _assert-stable-appcast-url --download-url \(downloadURL)"))
+    }
+
+    func testVerifyDryRunForRCDoesNotTouchDefaultAppcast() throws {
+        let result = try Self.run([
+            "verify",
+            "--tag", "v1.0.0-rc.1",
+            "--dmg", "/tmp/Bough.dmg",
+            "--download-url", "https://github.com/DGPisces/bough/releases/download/v1.0.0-rc.1/Bough.dmg",
+            "--dry-run"
+        ])
+
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("Tools/Release/check-version-consistency.sh --with-dmg /tmp/Bough.dmg"))
+        XCTAssertFalse(result.stdout.contains("xmllint"))
+        XCTAssertFalse(result.stdout.contains("_assert-stable-appcast-url"))
+    }
+
+    func testPublishAssetDefaultsToPublicRepoAndDownloadURL() throws {
+        let result = try Self.run([
+            "publish-asset",
+            "--tag", "v1.0.0-rc.1",
+            "--asset", "/tmp/Bough.dmg",
+            "--dry-run"
+        ])
+
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("--repo DGPisces/bough"))
+        XCTAssertTrue(result.stdout.contains(".browserDownloadUrl"))
+        XCTAssertFalse(result.stdout.contains("DGPisces/\(Self.legacyRepoName)"))
+        XCTAssertFalse(result.stdout.contains(".apiUrl"))
+    }
+
+    func testCloseoutCommandRemoved() throws {
+        let result = try Self.run(["closeout", "--dry-run"])
+
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stderr.contains("unknown command 'closeout'"))
+    }
+
+    func testVerifyRemoteDryRunUsesPublicStableFeed() throws {
+        let result = try Self.run([
+            "verify-remote",
+            "--tag", "v1.0.0",
+            "--version", "1.0.0",
+            "--build", "1",
+            "--dry-run"
+        ])
+
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("feed=https://raw.githubusercontent.com/DGPisces/bough/appcast/appcast.xml"))
+        XCTAssertFalse(result.stdout.contains(Self.legacyRepoName))
+    }
+
+    func testVerifyRemoteRCRequiresExplicitFeedURL() throws {
+        let result = try Self.run([
+            "verify-remote",
+            "--tag", "v1.0.0-rc.1",
+            "--version", "1.0.0",
+            "--build", "1",
+            "--dry-run"
+        ])
+
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stderr.contains("prerelease verify-remote requires --feed-url"))
+    }
+
+    func testVerifyRemoteRejectsUnsafeFeedURL() throws {
+        let result = try Self.run([
+            "verify-remote",
+            "--tag", "v1.0.0",
+            "--version", "1.0.0",
+            "--build", "1",
+            "--feed-url", "https://raw.githubusercontent.com/example/not-public/main/Tools/Release/appcast.xml",
+            "--dry-run"
+        ])
+
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stderr.contains("remote feed URL is not allowed"))
+    }
+
+    func testVerifyRemoteUsesNoAuthHeadersForPublicFeedAndAsset() throws {
+        let fakeCurl = try Self.makeFakeCurl()
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "\(fakeCurl.binDirectory.path):\(environment["PATH"] ?? "/usr/bin:/bin")"
+        environment["CURL_LOG"] = fakeCurl.logFile.path
+
+        let result = try Self.run([
+            "verify-remote",
+            "--tag", "v1.0.0",
+            "--version", "1.0.0",
+            "--build", "1",
+            "--asset-sha256", "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+            "--asset-bytes", "5",
+            "--attempts", "1",
+            "--sleep", "0"
+        ], environment: environment)
+
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("Remote update feed OK"))
+        let curlLog = try String(contentsOf: fakeCurl.logFile, encoding: .utf8)
+        XCTAssertFalse(curlLog.contains("Authorization"))
+        XCTAssertFalse(curlLog.contains("Bearer"))
+        XCTAssertFalse(curlLog.contains("--header"))
+        XCTAssertFalse(curlLog.contains("-H"))
+    }
+
+    private struct RunResult {
+        let exitCode: Int32
+        let stdout: String
+        let stderr: String
+    }
+
+    private struct FakeCurl {
+        let binDirectory: URL
+        let logFile: URL
+    }
+
+    private static var legacyRepoName: String {
+        ["bough", "internal"].joined(separator: "-")
+    }
+
+    private static func run(
+        _ args: [String],
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> RunResult {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [repoRoot.appendingPathComponent("Tools/Release/release-flow.sh").path] + args
+        process.environment = environment
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        return RunResult(
+            exitCode: process.terminationStatus,
+            stdout: String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
+            stderr: String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        )
+    }
+
+    private static func makeFakeCurl() throws -> FakeCurl {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BoughReleaseFlowCurl-\(UUID().uuidString)")
+        let bin = root.appendingPathComponent("bin")
+        let curl = bin.appendingPathComponent("curl")
+        let log = root.appendingPathComponent("curl.log")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        try "".write(to: log, atomically: true, encoding: .utf8)
+
+        let script = """
+        #!/usr/bin/env bash
+        set -euo pipefail
+        printf '%s\\n' "$*" >> "${CURL_LOG}"
+        out=""
+        url=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            -o) out="$2"; shift 2 ;;
+            --max-time) shift 2 ;;
+            -*) shift ;;
+            *) url="$1"; shift ;;
+          esac
+        done
+        if [[ -z "$out" ]]; then
+          exit 22
+        fi
+        case "$url" in
+          *appcast.xml)
+            cat > "$out" <<'FEED'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+          <channel>
+            <title>Bough</title>
+            <item>
+              <title>Version 1.0.0</title>
+              <sparkle:version>1</sparkle:version>
+              <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+              <enclosure
+                url="https://github.com/DGPisces/bough/releases/download/v1.0.0/Bough.dmg"
+                length="5"
+                type="application/octet-stream" />
+            </item>
+          </channel>
+        </rss>
+        FEED
+            ;;
+          *Bough.dmg)
+            printf 'hello' > "$out"
+            ;;
+          *)
+            exit 22
+            ;;
+        esac
+        """
+        try script.write(to: curl, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: curl.path)
+        return FakeCurl(binDirectory: bin, logFile: log)
+    }
+
+    private static let repoRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+}

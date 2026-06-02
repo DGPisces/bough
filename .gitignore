@@ -1,0 +1,34 @@
+# macOS
+.DS_Store
+
+# SwiftPM / build output
+.build/
+.swiftpm/
+DerivedData/
+*.xcresult
+dist/
+
+# Editors
+.vscode/
+.cursor/
+.idea/
+
+# Local logs and temp files
+*.log
+*.tmp
+
+# Local tool caches and agent config
+.codex/
+.agents/
+.claude/
+.superpowers/
+skills-lock.json
+HANDOFF.md
+dev.sh
+
+# Local signing material
+*.p12
+*.cer
+*.keychain
+*.keychain-db
+*.mobileprovision

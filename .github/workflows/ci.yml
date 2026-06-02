@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: /bin/bash --noprofile --norc -eo pipefail {0}
+
+jobs:
+  build-and-test:
+    name: ci / build-and-test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show Swift version
+        run: swift --version
+      - name: Build
+        run: swift build
+      - name: Test
+        run: swift test --parallel
+      - name: Version consistency
+        run: Tools/Release/check-version-consistency.sh
+
+  unsigned-packaging-smoke:
+    name: ci / unsigned-packaging-smoke
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show Swift version
+        run: swift --version
+      - name: Install create-dmg
+        run: |
+          if ! command -v create-dmg >/dev/null 2>&1; then
+            brew install create-dmg
+          fi
+      - name: Build unsigned arm64 DMG
+        run: BUILD_ARCH=arm64 SKIP_SIGN=1 SKIP_NOTARIZE=1 Tools/Build/build-dmg.sh
+      - name: Packaged usage monitor smoke
+        run: Tools/Smoke/smoke-packaged-usage-monitor.sh

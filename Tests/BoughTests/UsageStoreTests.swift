@@ -1,0 +1,1057 @@
+import XCTest
+import Observation
+@testable import Bough
+@testable import BoughCore
+
+@MainActor
+final class UsageStoreTests: XCTestCase {
+    private var defaults: UserDefaults!
+
+    override func setUp() {
+        let suiteName = "UsageStoreTests-\(name)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testSelectedProviderPersistsAndRestoresSupportedProvider() {
+        var now = Date(timeIntervalSince1970: 100)
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { now })
+        store.selectedTool = .codex
+        XCTAssertEqual(defaults.string(forKey: SettingsKey.usageSelectedProvider), "codex")
+
+        now = Date(timeIntervalSince1970: 101)
+        let restored = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { now })
+        XCTAssertEqual(restored.selectedTool, .codex)
+    }
+
+    func testPersistedClaudeSelectionRestoresAsUnavailableProvider() {
+        defaults.set("claudeCode", forKey: SettingsKey.usageSelectedProvider)
+
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 100) })
+
+        XCTAssertEqual(store.selectedTool, .claudeCode)
+        XCTAssertEqual(defaults.string(forKey: SettingsKey.usageSelectedProvider), "claudeCode")
+        XCTAssertEqual(store.snapshot(for: .claudeCode).availability, .unavailable(reason: "No reliable local quota source"))
+    }
+
+    func testSelectableToolsIncludesClaudeCodeWithUnavailableSnapshot() {
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 100) })
+
+        XCTAssertEqual(store.selectableTools, [.codex, .claudeCode])
+    }
+
+    func testUsageDisplayToggleRemovesProviderFromSelectableTools() {
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 100) })
+
+        store.setUsageDisplayEnabled(tool: .claudeCode, isEnabled: false)
+
+        XCTAssertEqual(store.displayableTools, [.codex])
+        XCTAssertEqual(store.selectableTools, [.codex])
+    }
+
+    func testDisablingSelectedDisplayProviderMovesSelectionToRemainingProvider() {
+        defaults.set("claudeCode", forKey: SettingsKey.usageSelectedProvider)
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 100) })
+
+        store.setUsageDisplayEnabled(tool: .claudeCode, isEnabled: false)
+
+        XCTAssertEqual(store.selectedTool, .codex)
+        XCTAssertEqual(store.selectedDisplayTool, .codex)
+    }
+
+    func testPersistedHiddenSelectedDisplayProviderRestoresToVisibleProvider() {
+        defaults.set("claudeCode", forKey: SettingsKey.usageSelectedProvider)
+        defaults.set(false, forKey: SettingsKey.usageDisplayEnabled("claudeCode"))
+
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 100) })
+
+        XCTAssertEqual(store.selectedTool, .codex)
+        XCTAssertEqual(store.selectedDisplayTool, .codex)
+    }
+
+    func testAllDisplayProvidersCanBeHidden() {
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 100) })
+
+        store.setUsageDisplayEnabled(tool: .codex, isEnabled: false)
+        store.setUsageDisplayEnabled(tool: .claudeCode, isEnabled: false)
+
+        XCTAssertEqual(store.displayableTools, [])
+        XCTAssertEqual(store.selectableTools, [])
+        XCTAssertNil(store.selectedDisplayTool)
+    }
+
+    func testEnablingOnlyDisplayProviderMovesSelectionToEnabledProvider() {
+        defaults.set(false, forKey: SettingsKey.usageDisplayEnabled("codex"))
+        defaults.set(false, forKey: SettingsKey.usageDisplayEnabled("claudeCode"))
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 100) })
+
+        store.setUsageDisplayEnabled(tool: .claudeCode, isEnabled: true)
+
+        XCTAssertEqual(store.selectedTool, .claudeCode)
+        XCTAssertEqual(store.selectedDisplayTool, .claudeCode)
+    }
+
+    func testClaudeSnapshotIsUnavailable() {
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 100) })
+        XCTAssertEqual(store.snapshot(for: .claudeCode).availability, .unavailable(reason: "No reliable local quota source"))
+    }
+
+    func testManualRefreshAppliesResultAndBuildsForecast() async {
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+        let reader = FakeUsageRateLimitReader(result: Self.codexResult(weeklyReset: 100_000))
+
+        await store.refreshCodex(using: reader)
+
+        XCTAssertEqual(reader.readCount, 1)
+        XCTAssertEqual(store.snapshot(for: .codex).weekly.snapshot?.usedPercent, 20)
+        XCTAssertNotNil(store.snapshot(for: .codex).today)
+    }
+
+    func testSnapshotAvailabilityChangeIsObservable() async {
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+        let observed = expectation(description: "snapshot update observed")
+        withObservationTracking({
+            _ = store.snapshot(for: .codex).availability
+        }, onChange: {
+            observed.fulfill()
+        })
+
+        store.applyCodexRateLimitResult(Self.codexResult(weeklyReset: 100_000))
+        await Task.yield()
+        await fulfillment(of: [observed], timeout: 1)
+    }
+
+    func testTimerRefreshUsesActiveOneMinuteAndCanBeFiredInTests() async {
+        let scheduler = RecordingUsageRefreshScheduler()
+        let reader = FakeUsageRateLimitReader(result: Self.codexResult(weeklyReset: 100_000))
+        let store = UsageStore(defaults: defaults, scheduler: scheduler, now: { Date(timeIntervalSince1970: 1_000) })
+
+        store.startCodexRefreshLoop(using: reader)
+        XCTAssertEqual(scheduler.interval, 60)
+        for _ in 0..<5 { await Task.yield() }
+        let readsAfterInitialRefresh = reader.readCount
+        scheduler.fire()
+        for _ in 0..<5 { await Task.yield() }
+        XCTAssertGreaterThan(reader.readCount, readsAfterInitialRefresh)
+    }
+
+    func testIdleRefreshUsesFiveMinutes() {
+        let scheduler = RecordingUsageRefreshScheduler()
+        let reader = FakeUsageRateLimitReader(result: Self.codexResult(weeklyReset: 100_000))
+        let store = UsageStore(defaults: defaults, scheduler: scheduler, now: { Date(timeIntervalSince1970: 1_000) })
+
+        store.startCodexRefreshLoop(using: reader)
+        store.setCodexRefreshActivity(.idle)
+
+        XCTAssertEqual(scheduler.interval, 300)
+    }
+
+    func testStaleAfterFifteenMinutes() {
+        var current = Date(timeIntervalSince1970: 1_000)
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { current })
+        store.applyCodexRateLimitResult(Self.codexResult(weeklyReset: 100_000))
+
+        current = Date(timeIntervalSince1970: 1_901)
+        store.evaluateStaleness()
+
+        let snapshot = store.snapshot(for: .codex)
+        XCTAssertEqual(snapshot.availability, .stale(reason: "Usage data is stale"))
+        XCTAssertEqual(snapshot.weekly.staleReason, "Usage data is stale")
+    }
+
+    func testRequestFailureRetainsLastGoodAsStale() async {
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+        store.applyCodexRateLimitResult(Self.codexResult(weeklyReset: 100_000))
+
+        await store.refreshCodex(using: FakeUsageRateLimitReader(error: UsageStoreTestError.failed))
+
+        let snapshot = store.snapshot(for: .codex)
+        XCTAssertEqual(snapshot.availability, .stale(reason: "Refresh failed"))
+        XCTAssertEqual(snapshot.weekly.snapshot?.usedPercent, 20)
+        XCTAssertNil(snapshot.today)
+    }
+
+    func testMalformedRefreshPreservesLastGoodSnapshot() async {
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+        store.applyCodexRateLimitResult(Self.codexResult(weeklyReset: 100_000))
+
+        await store.refreshCodex(using: FakeUsageRateLimitReader(result: ["rateLimitsByLimitId": .object([:])]))
+
+        XCTAssertEqual(store.snapshot(for: .codex).weekly.snapshot?.usedPercent, 20)
+    }
+
+    func testInitialMalformedRefreshMarksCodexUnavailable() async {
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+
+        await store.refreshCodex(using: FakeUsageRateLimitReader(result: ["rateLimitsByLimitId": .object([:])]))
+
+        XCTAssertEqual(store.snapshot(for: .codex).availability, .unavailable(reason: "Refresh failed"))
+    }
+
+    func testPastWeeklyResetTriggersRefreshAndRestoresForecast() async {
+        let reader = ControllableUsageRateLimitReader()
+        let scheduler = RecordingUsageRefreshScheduler()
+        let store = UsageStore(defaults: defaults, scheduler: scheduler, now: { Date(timeIntervalSince1970: 2_000) })
+        reader.enqueue(.success(Self.codexResult(weeklyReset: 1_999, fiveHourUsedPercent: 10, weeklyUsedPercent: 20)))
+        reader.enqueue(.success(Self.codexResult(weeklyReset: 100_000, fiveHourUsedPercent: 30, weeklyUsedPercent: 40)))
+
+        store.startCodexRefreshLoop(using: reader)
+        await reader.waitForReadStart()
+        await reader.waitForReadCompletion()
+
+        let snapshot = store.snapshot(for: .codex)
+        XCTAssertNil(snapshot.today)
+        XCTAssertEqual(snapshot.availability, .stale(reason: "Usage data is stale"))
+        XCTAssertEqual(snapshot.fiveHour.snapshot?.usedPercent, 10)
+
+        let readsAfterPastReset = reader.readCount
+        await Task.yield()
+        XCTAssertEqual(reader.readCount, readsAfterPastReset)
+
+        scheduler.fire()
+        await reader.waitForReadStart()
+        XCTAssertGreaterThan(reader.readCount, readsAfterPastReset)
+        await reader.waitForReadCompletion()
+
+        let refreshed = store.snapshot(for: .codex)
+        XCTAssertEqual(refreshed.availability, .available)
+        XCTAssertEqual(refreshed.fiveHour.snapshot?.usedPercent, 30)
+        XCTAssertEqual(refreshed.weekly.snapshot?.usedPercent, 40)
+        XCTAssertNotNil(refreshed.today)
+    }
+
+    func testCodexAcceptedSamplesCarryForwardExplicitReset() throws {
+        var current = Date(timeIntervalSince1970: 1_000)
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { current })
+
+        store.applyCodexRateLimitResult(Self.codexResult(weeklyReset: 1_500, weeklyUsedPercent: 80))
+        current = Date(timeIntervalSince1970: 1_600)
+        store.applyCodexRateLimitResult(Self.codexResult(weeklyReset: 100_000, weeklyUsedPercent: 5))
+
+        let today = store.snapshot(for: .codex).today
+        XCTAssertEqual(today?.basis.resetProvenance, .explicitReset)
+        XCTAssertEqual(today?.basis.weeklyResetAlreadyFiredToday, true)
+        let basis = try XCTUnwrap(today?.basis)
+        let todayUsed = (100.0 - basis.weeklyUsedAtDayStart) + basis.weeklyUsedNow
+        let expectedPct = ((basis.todayAllowanceOfWeek - todayUsed) / basis.todayAllowanceOfWeek) * 100.0
+        XCTAssertEqual(today?.pct ?? 999, expectedPct, accuracy: 0.001)
+    }
+
+    func testCodexAcceptedSamplesCarryForwardImplicitReset() {
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+
+        store.applyCodexRateLimitResult(Self.codexResult(weeklyReset: 100_000, weeklyUsedPercent: 82))
+        store.applyCodexRateLimitResult(Self.codexResult(weeklyReset: 200_000, weeklyUsedPercent: 4))
+
+        let today = store.snapshot(for: .codex).today
+        XCTAssertEqual(today?.basis.resetProvenance, .implicitReset)
+        XCTAssertEqual(today?.basis.weeklyResetAlreadyFiredToday, true)
+    }
+
+    func testFailedRefreshPreservedStaleSampleDoesNotTriggerResetCarryForward() async {
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+
+        store.applyCodexRateLimitResult(Self.codexResult(weeklyReset: 100_000, weeklyUsedPercent: 80))
+        await store.refreshCodex(using: FakeUsageRateLimitReader(error: UsageStoreTestError.failed))
+        store.applyCodexRateLimitResult(Self.codexResult(weeklyReset: 200_000, weeklyUsedPercent: 4))
+
+        let today = store.snapshot(for: .codex).today
+        XCTAssertEqual(today?.basis.resetProvenance, .ordinaryProgress)
+        XCTAssertEqual(today?.basis.weeklyResetAlreadyFiredToday, false)
+        XCTAssertEqual(today?.pct ?? -1, 100.0, accuracy: 0.001)
+    }
+
+    func testContinuityWriterModeFollowsDefaultsAfterHelperToggle() throws {
+        let path = Self.temporaryContinuityPath()
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        let continuityStore = try UsageContinuityStore(path: path.path)
+        var current = Date(timeIntervalSince1970: 1_000)
+        let store = UsageStore(
+            defaults: defaults,
+            scheduler: RecordingUsageRefreshScheduler(),
+            now: { current },
+            continuityStore: continuityStore
+        )
+
+        store.applyCodexRateLimitResult(Self.codexResult(weeklyReset: 100_000, weeklyUsedPercent: 20))
+        XCTAssertEqual(try continuityStore.acceptedSampleCount(tool: .codex), 1)
+
+        defaults.set(UsageContinuityWriterOwner.helper.rawValue, forKey: SettingsKey.usageContinuityWriterOwner)
+        current = Date(timeIntervalSince1970: 1_100)
+        store.applyCodexRateLimitResult(Self.codexResult(weeklyReset: 100_000, weeklyUsedPercent: 21))
+
+        XCTAssertEqual(try continuityStore.acceptedSampleCount(tool: .codex), 1)
+    }
+
+    func testContinuityWriterModeOverrideRemainsFixedForInjectedHelperMode() throws {
+        let path = Self.temporaryContinuityPath()
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        let continuityStore = try UsageContinuityStore(path: path.path)
+        var current = Date(timeIntervalSince1970: 1_000)
+        let store = UsageStore(
+            defaults: defaults,
+            scheduler: RecordingUsageRefreshScheduler(),
+            now: { current },
+            continuityStore: continuityStore,
+            continuityWriteMode: .helperOwned
+        )
+
+        store.applyCodexRateLimitResult(Self.codexResult(weeklyReset: 100_000, weeklyUsedPercent: 20))
+        defaults.set(UsageContinuityWriterOwner.app.rawValue, forKey: SettingsKey.usageContinuityWriterOwner)
+        current = Date(timeIntervalSince1970: 1_100)
+        store.applyCodexRateLimitResult(Self.codexResult(weeklyReset: 100_000, weeklyUsedPercent: 21))
+
+        XCTAssertEqual(try continuityStore.acceptedSampleCount(tool: .codex), 0)
+    }
+
+    func testStatisticsDisabledPreventsAppContinuityWrites() throws {
+        let path = Self.temporaryContinuityPath()
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        let continuityStore = try UsageContinuityStore(path: path.path)
+        let store = UsageStore(
+            defaults: defaults,
+            scheduler: RecordingUsageRefreshScheduler(),
+            now: { Date(timeIntervalSince1970: 1_000) },
+            continuityStore: continuityStore
+        )
+
+        store.setUsageStatisticsEnabled(tool: .codex, isEnabled: false)
+        store.applyCodexRateLimitResult(Self.codexResult(weeklyReset: 100_000, weeklyUsedPercent: 20))
+
+        XCTAssertEqual(try continuityStore.acceptedSampleCount(tool: .codex), 0)
+        XCTAssertEqual(store.snapshot(for: .codex).weekly.snapshot?.usedPercent, 20)
+    }
+
+    func testStatisticsToggleWritesHelperCommandFile() throws {
+        let commandURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("UsageStoreTests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("usage-monitor-command.json")
+        defer { try? FileManager.default.removeItem(at: commandURL.deletingLastPathComponent()) }
+        let store = UsageStore(
+            defaults: defaults,
+            scheduler: RecordingUsageRefreshScheduler(),
+            usageMonitorCommandPath: commandURL.path,
+            now: { Date(timeIntervalSince1970: 1_000) }
+        )
+
+        store.setUsageStatisticsEnabled(tool: .claudeCode, isEnabled: false)
+
+        let data = try Data(contentsOf: commandURL)
+        let command = try JSONDecoder().decode(UsageMonitorCommand.self, from: data)
+        XCTAssertEqual(command.enabledTools, [.codex])
+    }
+
+    func testDisabledCodingSessionsPauseStopsRefreshAndPreservesPreferences() async throws {
+        let commandURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("UsageStoreTests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("usage-monitor-command.json")
+        defer { try? FileManager.default.removeItem(at: commandURL.deletingLastPathComponent()) }
+        let scheduler = RecordingUsageRefreshScheduler()
+        defaults.set("claudeCode", forKey: SettingsKey.usageSelectedProvider)
+        defaults.set(false, forKey: SettingsKey.usageStatisticsEnabled("claudeCode"))
+        let store = UsageStore(
+            defaults: defaults,
+            scheduler: scheduler,
+            usageMonitorCommandPath: commandURL.path,
+            now: { Date(timeIntervalSince1970: 1_000) }
+        )
+        let reader = FakeUsageRateLimitReader(result: Self.codexResult(weeklyReset: 100_000))
+
+        store.startCodexRefreshLoop(using: reader)
+        await Task.yield()
+        store.applyClaudeCodePayload(Self.claudePayload(weeklyUsedPercent: 12, weeklyReset: 100_000), receivedAt: Date(timeIntervalSince1970: 1_000))
+        XCTAssertNotNil(store.snapshots[.codex])
+        XCTAssertNotNil(store.snapshots[.claudeCode])
+
+        store.pauseCodingSessionCollectionForDisabledMode()
+        let readsAfterPause = reader.readCount
+        scheduler.fire()
+        await Task.yield()
+
+        XCTAssertEqual(reader.readCount, readsAfterPause)
+        XCTAssertNil(store.snapshots[.codex])
+        XCTAssertNil(store.snapshots[.claudeCode])
+        XCTAssertEqual(defaults.string(forKey: SettingsKey.usageSelectedProvider), "claudeCode")
+        XCTAssertEqual(defaults.object(forKey: SettingsKey.usageStatisticsEnabled("claudeCode")) as? Bool, false)
+
+        var command = try JSONDecoder().decode(UsageMonitorCommand.self, from: Data(contentsOf: commandURL))
+        XCTAssertEqual(command.enabledTools, [])
+
+        store.resumeCodingSessionCollectionForEnabledMode(monitorClaudeCode: false)
+        command = try JSONDecoder().decode(UsageMonitorCommand.self, from: Data(contentsOf: commandURL))
+        XCTAssertEqual(command.enabledTools, [.codex])
+    }
+
+    func testDisabledCodingSessionsInitDoesNotSeedUsageSnapshots() throws {
+        let commandURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("UsageStoreTests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("usage-monitor-command.json")
+        defer { try? FileManager.default.removeItem(at: commandURL.deletingLastPathComponent()) }
+
+        let store = UsageStore(
+            defaults: defaults,
+            scheduler: RecordingUsageRefreshScheduler(),
+            usageMonitorCommandPath: commandURL.path,
+            now: { Date(timeIntervalSince1970: 1_000) },
+            codingSessionsEnabled: false
+        )
+
+        XCTAssertNil(store.snapshots[.codex])
+        XCTAssertNil(store.snapshots[.claudeCode])
+        let command = try JSONDecoder().decode(UsageMonitorCommand.self, from: Data(contentsOf: commandURL))
+        XCTAssertEqual(command.enabledTools, [])
+    }
+
+    func testThresholdNotificationsMasterEnabledWrapsSQLiteMasterPreference() throws {
+        let path = Self.temporaryContinuityPath()
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        let continuityStore = try UsageContinuityStore(path: path.path)
+        let store = UsageStore(
+            defaults: defaults,
+            scheduler: RecordingUsageRefreshScheduler(),
+            now: { Date(timeIntervalSince1970: 1_000) },
+            continuityStore: continuityStore
+        )
+
+        XCTAssertFalse(store.thresholdNotificationsMasterEnabled())
+
+        try continuityStore.setThresholdNotificationsMasterEnabled(
+            isEnabled: true,
+            updatedAt: Date(timeIntervalSince1970: 1_100)
+        )
+        XCTAssertTrue(store.thresholdNotificationsMasterEnabled())
+
+        try continuityStore.setThresholdNotificationsMasterEnabled(
+            isEnabled: false,
+            updatedAt: Date(timeIntervalSince1970: 1_200)
+        )
+        XCTAssertFalse(store.thresholdNotificationsMasterEnabled())
+    }
+
+    func testCodexPriorSampleDoesNotAffectClaudeCodeResetProvenance() {
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+
+        store.applyCodexRateLimitResult(Self.codexResult(weeklyReset: 100_000, weeklyUsedPercent: 90))
+        store.applyClaudeCodePayload(Self.claudePayload(weeklyUsedPercent: 4, weeklyReset: 200_000), receivedAt: Date(timeIntervalSince1970: 1_000))
+
+        let today = store.snapshot(for: .claudeCode).today
+        XCTAssertEqual(today?.basis.resetProvenance, .ordinaryProgress)
+        XCTAssertEqual(today?.basis.weeklyResetAlreadyFiredToday, false)
+    }
+
+    func testLoopRefreshInFlightDoesNotOverwriteAfterStop() async {
+        let reader = ControllableUsageRateLimitReader()
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+
+        store.startCodexRefreshLoop(using: reader)
+        await reader.waitForReadStart()
+        store.stopCodexRefreshLoop()
+
+        reader.enqueue(.success(Self.codexResult(weeklyReset: 100_000)))
+        await reader.waitForReadCompletion()
+
+        XCTAssertEqual(store.snapshot(for: .codex).availability, .unavailable(reason: "Codex app-server unavailable"))
+    }
+
+    func testStopCancelsLoopRefreshTaskForHangingReader() async {
+        let reader = HangingUsageRateLimitReader()
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+
+        store.startCodexRefreshLoop(using: reader)
+        await reader.waitForReadStart()
+
+        store.stopCodexRefreshLoop()
+        await reader.waitForCancellation()
+
+        XCTAssertEqual(reader.readCount, 1)
+        XCTAssertTrue(reader.cancellationObserved)
+        XCTAssertEqual(store.snapshot(for: .codex).availability, .unavailable(reason: "Codex app-server unavailable"))
+    }
+
+    func testReplacingReaderCancelsPreviousLoopTaskBeforeNewReaderApplies() async {
+        let readerA = HangingUsageRateLimitReader()
+        let readerB = ControllableUsageRateLimitReader()
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+
+        readerB.enqueue(.success(Self.codexResult(weeklyReset: 100_000, fiveHourUsedPercent: 12, weeklyUsedPercent: 22)))
+
+        store.startCodexRefreshLoop(using: readerA)
+        await readerA.waitForReadStart()
+
+        store.startCodexRefreshLoop(using: readerB)
+        await readerB.waitForReadStart()
+        await readerB.waitForReadCompletion()
+        await readerA.waitForCancellation()
+
+        let snapshot = store.snapshot(for: .codex)
+        XCTAssertEqual(snapshot.fiveHour.snapshot?.usedPercent, 12)
+        XCTAssertEqual(snapshot.weekly.snapshot?.usedPercent, 22)
+    }
+
+    func testReplacingReaderPreventsStaleResultFromOverwriting() async {
+        let readerA = ControllableUsageRateLimitReader()
+        let readerB = ControllableUsageRateLimitReader()
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+
+        store.startCodexRefreshLoop(using: readerA)
+        await readerA.waitForReadStart()
+
+        store.startCodexRefreshLoop(using: readerB)
+        await readerB.waitForReadStart()
+
+        readerB.enqueue(.success(Self.codexResult(weeklyReset: 100_000, fiveHourUsedPercent: 10, weeklyUsedPercent: 20)))
+        await readerB.waitForReadCompletion()
+
+        readerA.enqueue(.success(Self.codexResult(weeklyReset: 100_000, fiveHourUsedPercent: 80, weeklyUsedPercent: 90)))
+        await readerA.waitForReadCompletion()
+
+        let snapshot = store.snapshot(for: .codex)
+        XCTAssertEqual(snapshot.fiveHour.snapshot?.usedPercent, 10)
+        XCTAssertEqual(snapshot.weekly.snapshot?.usedPercent, 20)
+    }
+
+    func testManualRefreshRespectsLoopLifecycleAndGeneration() async {
+        let reader = HangingUsageRateLimitReader()
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+
+        store.startCodexRefreshLoop(using: reader)
+        await reader.waitForReadStart()
+
+        let manualRefreshTask = Task {
+            await store.refreshCodex(using: reader)
+        }
+        await Task.yield()
+        XCTAssertEqual(reader.readCount, 1)
+
+        store.stopCodexRefreshLoop()
+
+        await reader.waitForCancellation()
+        await manualRefreshTask.value
+
+        XCTAssertEqual(reader.readCount, 1)
+        XCTAssertEqual(store.snapshot(for: .codex).availability, .unavailable(reason: "Codex app-server unavailable"))
+    }
+
+    func testManualRefreshUsingCurrentReaderIgnoredAfterReplacement() async {
+        let readerA = HangingUsageRateLimitReader()
+        let readerB = ControllableUsageRateLimitReader()
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+
+        store.startCodexRefreshLoop(using: readerA)
+        await readerA.waitForReadStart()
+
+        let manualRefreshTask = Task {
+            await store.refreshCodex(using: readerA)
+        }
+        await Task.yield()
+        XCTAssertEqual(readerA.readCount, 1)
+
+        readerB.enqueue(.success(Self.codexResult(weeklyReset: 100_000, fiveHourUsedPercent: 12, weeklyUsedPercent: 22)))
+        store.startCodexRefreshLoop(using: readerB)
+        await readerB.waitForReadStart()
+        await readerB.waitForReadCompletion()
+        await readerA.waitForCancellation()
+        await manualRefreshTask.value
+
+        let snapshot = store.snapshot(for: .codex)
+        XCTAssertEqual(snapshot.fiveHour.snapshot?.usedPercent, 12)
+        XCTAssertEqual(snapshot.weekly.snapshot?.usedPercent, 22)
+    }
+
+    func testMissingReaderMarksCodexUnavailable() {
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+        store.startCodexRefreshLoop(using: nil)
+        XCTAssertEqual(store.snapshot(for: .codex).availability, .unavailable(reason: "Codex app-server unavailable"))
+    }
+
+    func testApplyClaudeCodePayloadBuildsSnapshotAndForecast() {
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+
+        XCTAssertTrue(store.applyClaudeCodePayload(Self.claudePayload(), receivedAt: Date(timeIntervalSince1970: 1_000)))
+
+        let snapshot = store.snapshot(for: .claudeCode)
+        XCTAssertEqual(snapshot.availability, .available)
+        XCTAssertEqual(snapshot.planName, "Claude Sonnet 4")
+        XCTAssertEqual(snapshot.fiveHour.snapshot?.usedPercent, 12)
+        XCTAssertEqual(snapshot.weekly.snapshot?.usedPercent, 24)
+        XCTAssertNotNil(snapshot.today)
+    }
+
+    func testClaudePayloadMissingRateLimitsMarksUnavailable() {
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+
+        XCTAssertFalse(store.applyClaudeCodePayload(Data(#"{"model":"Claude"}"#.utf8), receivedAt: Date(timeIntervalSince1970: 1_000)))
+
+        XCTAssertEqual(
+            store.snapshot(for: .claudeCode).availability,
+            .unavailable(reason: "Claude Code payload-missing-rate-limits")
+        )
+    }
+
+    func testClaudeMalformedPayloadMarksParseFailure() {
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+
+        XCTAssertFalse(store.applyClaudeCodePayload(Data(#"{"rate_limits":"#.utf8), receivedAt: Date(timeIntervalSince1970: 1_000)))
+
+        XCTAssertEqual(
+            store.snapshot(for: .claudeCode).availability,
+            .unavailable(reason: "Claude Code parse-failure")
+        )
+    }
+
+    func testClaudeUsageFileMissingWithoutInstalledHookMarksHookNotInstalled() {
+        let paths = Self.temporaryClaudePaths()
+        let store = UsageStore(
+            defaults: defaults,
+            scheduler: RecordingUsageRefreshScheduler(),
+            monitorClaudeCode: false,
+            claudeUsageFilePath: paths.usage.path,
+            claudeSettingsFilePath: paths.settings.path,
+            now: { Date(timeIntervalSince1970: 1_000) }
+        )
+
+        XCTAssertFalse(store.refreshClaudeCodeUsageFromDisk())
+
+        XCTAssertEqual(
+            store.snapshot(for: .claudeCode).availability,
+            .unavailable(reason: "Claude Code statusLine hook-not-installed")
+        )
+    }
+
+    func testClaudeUsageFileMissingWithInstalledHookMarksInstalledNotTriggered() throws {
+        let paths = Self.temporaryClaudePaths()
+        try FileManager.default.createDirectory(
+            at: paths.settings.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data(#"{"statusLine":{"command":"/Applications/Bough.app/Contents/Resources/bough-statusline-bridge.sh"}}"#.utf8)
+            .write(to: paths.settings)
+        let store = UsageStore(
+            defaults: defaults,
+            scheduler: RecordingUsageRefreshScheduler(),
+            monitorClaudeCode: false,
+            claudeUsageFilePath: paths.usage.path,
+            claudeSettingsFilePath: paths.settings.path,
+            now: { Date(timeIntervalSince1970: 1_000) }
+        )
+
+        XCTAssertFalse(store.refreshClaudeCodeUsageFromDisk())
+
+        XCTAssertEqual(
+            store.snapshot(for: .claudeCode).availability,
+            .unavailable(reason: "Claude Code statusLine hook-installed-not-triggered")
+        )
+    }
+
+    func testClaudeUsageDiskRefreshUsesFileMTimeForAutomaticAndManualAttempt() throws {
+        let paths = Self.temporaryClaudePaths()
+        try FileManager.default.createDirectory(
+            at: paths.usage.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Self.claudePayload().write(to: paths.usage)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 900)],
+            ofItemAtPath: paths.usage.path
+        )
+        var current = Date(timeIntervalSince1970: 1_000)
+        let store = UsageStore(
+            defaults: defaults,
+            scheduler: RecordingUsageRefreshScheduler(),
+            monitorClaudeCode: false,
+            claudeUsageFilePath: paths.usage.path,
+            claudeSettingsFilePath: paths.settings.path,
+            now: { current }
+        )
+
+        XCTAssertTrue(store.refreshClaudeCodeUsageFromDisk())
+        XCTAssertEqual(store.snapshot(for: .claudeCode).lastRefresh, Date(timeIntervalSince1970: 900))
+
+        current = Date(timeIntervalSince1970: 1_050)
+        XCTAssertTrue(store.refreshClaudeCodeUsageFromDisk(markRefreshAttempt: true))
+        XCTAssertEqual(store.snapshot(for: .claudeCode).lastRefresh, Date(timeIntervalSince1970: 900))
+    }
+
+    func testClaudeUsageDiskRefreshMarksOldPayloadStaleImmediately() throws {
+        let paths = Self.temporaryClaudePaths()
+        try FileManager.default.createDirectory(
+            at: paths.usage.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Self.claudePayload().write(to: paths.usage)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 100)],
+            ofItemAtPath: paths.usage.path
+        )
+        let store = UsageStore(
+            defaults: defaults,
+            scheduler: RecordingUsageRefreshScheduler(),
+            monitorClaudeCode: false,
+            claudeUsageFilePath: paths.usage.path,
+            claudeSettingsFilePath: paths.settings.path,
+            now: { Date(timeIntervalSince1970: 2_000) }
+        )
+
+        XCTAssertTrue(store.refreshClaudeCodeUsageFromDisk(markRefreshAttempt: true))
+        let snapshot = store.snapshot(for: .claudeCode)
+        XCTAssertEqual(snapshot.availability, .stale(reason: "Usage data is stale"))
+        XCTAssertEqual(snapshot.fiveHour.staleReason, "Usage data is stale")
+        XCTAssertEqual(snapshot.weekly.staleReason, "Usage data is stale")
+        XCTAssertNil(snapshot.today)
+    }
+
+    func testClaudeSnapshotStalesAfterFifteenMinutes() {
+        var current = Date(timeIntervalSince1970: 1_000)
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { current })
+        store.applyClaudeCodePayload(Self.claudePayload(), receivedAt: current)
+
+        current = Date(timeIntervalSince1970: 1_901)
+        store.evaluateStaleness()
+
+        let snapshot = store.snapshot(for: .claudeCode)
+        XCTAssertEqual(snapshot.availability, .stale(reason: "Claude Code usage data is stale"))
+        XCTAssertEqual(snapshot.weekly.staleReason, "Claude Code usage data is stale")
+        XCTAssertNil(snapshot.today)
+    }
+
+    private static func codexResult(
+        weeklyReset: Int64,
+        fiveHourUsedPercent: Int64 = 10,
+        weeklyUsedPercent: Int64 = 20
+    ) -> [String: AnyCodableLike] {
+        [
+            "rateLimitsByLimitId": .object([
+                "codex": .object([
+                    "limitId": .string("codex"),
+                    "primary": .object(["usedPercent": .int(fiveHourUsedPercent), "windowDurationMins": .int(300), "resetsAt": .int(2_000)]),
+                    "secondary": .object(["usedPercent": .int(weeklyUsedPercent), "windowDurationMins": .int(10_080), "resetsAt": .int(weeklyReset)]),
+                    "planType": .string("prolite")
+                ])
+            ])
+        ]
+    }
+
+    private static func claudePayload(
+        fiveHourUsedPercent: Int = 12,
+        weeklyUsedPercent: Int = 24,
+        weeklyReset: Int64 = 100_000
+    ) -> Data {
+        Data(
+            """
+            {
+              "version": 1,
+              "model": {"display_name": "Claude Sonnet 4"},
+              "rate_limits": {
+                "five_hour": {
+                  "used_percent": \(fiveHourUsedPercent),
+                  "resets_at": 2000,
+                  "window_duration_mins": 300
+                },
+                "seven_day": {
+                  "used_percent": \(weeklyUsedPercent),
+                  "resets_at": \(weeklyReset),
+                  "window_duration_mins": 10080
+                }
+              }
+            }
+            """.utf8
+        )
+    }
+
+    private static func temporaryClaudePaths() -> (root: URL, usage: URL, settings: URL) {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("UsageStoreTests-\(UUID().uuidString)")
+        return (
+            root,
+            root.appendingPathComponent(".bough/claude-usage.json"),
+            root.appendingPathComponent(".claude/settings.json")
+        )
+    }
+
+    private static func temporaryContinuityPath() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("UsageStoreTests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("usage-continuity.sqlite")
+    }
+}
+
+private enum UsageStoreTestError: Error { case failed }
+
+private final class FakeUsageRateLimitReader: UsageRateLimitReading {
+    private let result: [String: AnyCodableLike]?
+    private let error: Error?
+    private(set) var readCount = 0
+
+    init(result: [String: AnyCodableLike]) {
+        self.result = result
+        self.error = nil
+    }
+
+    init(error: Error) {
+        self.result = nil
+        self.error = error
+    }
+
+    func readRateLimits() async throws -> [String: AnyCodableLike] {
+        readCount += 1
+        if let error { throw error }
+        return result ?? [:]
+    }
+}
+
+private final class ControllableUsageRateLimitReader: UsageRateLimitReading {
+    enum ReadResult {
+        case success([String: AnyCodableLike])
+        case failure(Error)
+    }
+
+    private var queuedResults: [ReadResult] = []
+    private var readWaiters: [CheckedContinuation<ReadResult, Never>] = []
+    private var readStartWaiters: [CheckedContinuation<Void, Never>] = []
+    private var readCompletionWaiters: [CheckedContinuation<Void, Never>] = []
+    private var pendingReadStarts = 0
+    private var pendingReadCompletions = 0
+
+    private(set) var readCount = 0
+
+    func enqueue(_ result: ReadResult) {
+        if let waiter = readWaiters.first {
+            readWaiters.removeFirst()
+            waiter.resume(returning: result)
+            return
+        }
+
+        queuedResults.append(result)
+    }
+
+    func waitForReadStart() async {
+        if pendingReadStarts > 0 {
+            pendingReadStarts -= 1
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            readStartWaiters.append(continuation)
+        }
+    }
+
+    func waitForReadCompletion() async {
+        if pendingReadCompletions > 0 {
+            pendingReadCompletions -= 1
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            readCompletionWaiters.append(continuation)
+        }
+    }
+
+    func readRateLimits() async throws -> [String: AnyCodableLike] {
+        readCount += 1
+        signalReadStart()
+        defer { signalReadCompletion() }
+
+        let result = await popQueuedResult()
+        switch result {
+        case .success(let value): return value
+        case .failure(let error): throw error
+        }
+    }
+
+    private func popQueuedResult() async -> ReadResult {
+        if !queuedResults.isEmpty {
+            return queuedResults.removeFirst()
+        }
+
+        return await withCheckedContinuation { continuation in
+            readWaiters.append(continuation)
+        }
+    }
+
+    private func signalReadStart() {
+        if !readStartWaiters.isEmpty {
+            readStartWaiters.removeFirst().resume()
+            return
+        }
+
+        pendingReadStarts += 1
+    }
+
+    private func signalReadCompletion() {
+        if !readCompletionWaiters.isEmpty {
+            readCompletionWaiters.removeFirst().resume()
+            return
+        }
+
+        pendingReadCompletions += 1
+    }
+}
+
+private final class HangingUsageRateLimitReader: UsageRateLimitReading {
+    private var readStartWaiters: [CheckedContinuation<Void, Never>] = []
+    private var readCancelWaiters: [CheckedContinuation<Void, Never>] = []
+    private var pendingReadStarts = 0
+    private var pendingReadCancellations = 0
+
+    private(set) var readCount = 0
+    private(set) var cancellationObserved = false
+
+    func waitForReadStart() async {
+        if pendingReadStarts > 0 {
+            pendingReadStarts -= 1
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            readStartWaiters.append(continuation)
+        }
+    }
+
+    func waitForCancellation() async {
+        if pendingReadCancellations > 0 {
+            pendingReadCancellations -= 1
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            readCancelWaiters.append(continuation)
+        }
+    }
+
+    func readRateLimits() async throws -> [String: AnyCodableLike] {
+        readCount += 1
+        signalReadStart()
+
+        do {
+            while true {
+                try await Task.sleep(nanoseconds: 60_000_000_000)
+            }
+        } catch {
+            cancellationObserved = true
+            signalReadCancellation()
+            throw error
+        }
+    }
+
+    private func signalReadStart() {
+        if !readStartWaiters.isEmpty {
+            readStartWaiters.removeFirst().resume()
+            return
+        }
+
+        pendingReadStarts += 1
+    }
+
+    private func signalReadCancellation() {
+        if !readCancelWaiters.isEmpty {
+            readCancelWaiters.removeFirst().resume()
+            return
+        }
+
+        pendingReadCancellations += 1
+    }
+}
+
+private final class RecordingUsageRefreshScheduler: UsageRefreshScheduling {
+    private(set) var interval: TimeInterval?
+    private var action: (@MainActor () -> Void)?
+
+    func start(every interval: TimeInterval, action: @escaping @MainActor () -> Void) {
+        self.interval = interval
+        self.action = action
+    }
+
+    func stop() {
+        action = nil
+    }
+
+    @MainActor
+    func fire() {
+        action?()
+    }
+}
+
+private extension UsageWindowSlot {
+    var snapshot: UsageWindowSnapshot? {
+        switch self {
+        case .available(let snapshot), .stale(let snapshot, _): return snapshot
+        case .loading, .unavailable: return nil
+        }
+    }
+
+    var staleReason: String? {
+        if case .stale(_, let reason) = self { return reason }
+        return nil
+    }
+}
+
+@MainActor
+final class UsageStoreRefreshTrackingTests: XCTestCase {
+    /// Per-test isolated UserDefaults to avoid polluting the developer's
+    /// .standard suite during local `swift test` runs. Mirrors the pattern
+    /// already used by UsageStoreTests in this file.
+    private var defaults: UserDefaults!
+
+    override func setUp() {
+        let suiteName = "UsageStoreRefreshTrackingTests-\(name)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    /// Stub reader that lets the test observe the in-flight counter mid-flight
+    /// (via beforeReturn) and choose between successful return vs throwing.
+    @MainActor
+    final class StubReader: UsageRateLimitReading {
+        enum Mode {
+            case succeed(payload: [String: AnyCodableLike])
+            case throwError
+        }
+        var mode: Mode = .succeed(payload: [:])
+        var beforeReturn: (() async -> Void)?
+
+        func readRateLimits() async throws -> [String: AnyCodableLike] {
+            await beforeReturn?()
+            switch mode {
+            case .succeed(let payload):
+                return payload
+            case .throwError:
+                throw NSError(domain: "test", code: 1)
+            }
+        }
+    }
+
+    /// Asserts the success path: counter is true mid-flight, false after.
+    /// `await refreshCodex(...)` blocks until the function's defer runs,
+    /// so a post-await `XCTAssertFalse` alone doesn't witness the toggle —
+    /// the mid-flight `beforeReturn` hook is what proves enterRefresh fired.
+    func testRefreshingObservedTrueMidFlightAndFalseAfterSuccess() async {
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler())
+        let reader = StubReader()
+        let midFlight = expectation(description: "isRefreshing observed as true mid-flight")
+        reader.beforeReturn = { @MainActor in
+            if store.isRefreshing { midFlight.fulfill() }
+        }
+
+        await store.refreshCodex(using: reader)
+
+        await fulfillment(of: [midFlight], timeout: 1.0)
+        XCTAssertFalse(store.isRefreshing, "must drop to false after success — defer { exitRefresh() } fired")
+    }
+
+    /// Same proof pattern, but the reader throws. Verifies the defer cleans
+    /// up on the catch path — the AC #5 invariant most likely to regress.
+    func testRefreshingObservedTrueMidFlightAndFalseAfterThrownError() async {
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler())
+        let reader = StubReader()
+        reader.mode = .throwError
+        let midFlight = expectation(description: "isRefreshing observed as true mid-flight (error path)")
+        reader.beforeReturn = { @MainActor in
+            if store.isRefreshing { midFlight.fulfill() }
+        }
+
+        await store.refreshCodex(using: reader)
+
+        await fulfillment(of: [midFlight], timeout: 1.0)
+        XCTAssertFalse(store.isRefreshing, "must drop to false after thrown error — defer fired in catch")
+    }
+}

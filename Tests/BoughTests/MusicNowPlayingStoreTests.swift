@@ -1,0 +1,497 @@
+import Foundation
+import XCTest
+@testable import Bough
+
+@MainActor
+final class MusicNowPlayingStoreTests: XCTestCase {
+    private var defaults: UserDefaults!
+
+    override func setUp() {
+        let suiteName = "MusicNowPlayingStoreTests-\(name)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testPollingStartsOnlyWhenEnabledAndNeeded() {
+        let scheduler = RecordingMusicPollingScheduler()
+        let store = MusicNowPlayingStore(defaults: defaults, service: FakeMusicNowPlayingService(), scheduler: scheduler)
+
+        store.setPresentationNeeded(false)
+        XCTAssertNil(scheduler.interval)
+
+        store.setPresentationNeeded(true)
+        XCTAssertEqual(scheduler.interval, 1)
+
+        defaults.set(false, forKey: SettingsKey.showMusicControls)
+        store.refreshControlsEnabled()
+        XCTAssertNil(scheduler.interval)
+        XCTAssertEqual(scheduler.stopCount, 2)
+        XCTAssertEqual(store.state, .disabled)
+    }
+
+    func testPollingPolicyUsesActiveOneSecondThenBacksOffAfterConsecutiveFailures() async {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        service.readResults = [
+            .failure(MusicNowPlayingServiceError.unavailable),
+            .failure(MusicNowPlayingServiceError.unavailable),
+        ]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler)
+
+        store.setPresentationNeeded(true)
+        XCTAssertEqual(scheduler.interval, 1)
+
+        await store.refreshNow()
+        XCTAssertEqual(scheduler.interval, 1)
+        XCTAssertEqual(scheduler.startCount, 1)
+
+        await store.refreshNow()
+        XCTAssertEqual(scheduler.interval, 5)
+        XCTAssertEqual(scheduler.startCount, 2)
+        XCTAssertEqual(store.settingsAbnormalMessage, "Music service unavailable")
+    }
+
+    func testPollingDoesNotRestartTimerWhenIntervalIsUnchanged() async {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        service.readResults = [.success(nil), .success(nil)]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler)
+
+        store.setPresentationNeeded(true)
+        XCTAssertEqual(scheduler.interval, 1)
+        XCTAssertEqual(scheduler.startCount, 1)
+
+        await store.refreshNow()
+        await store.refreshNow()
+
+        XCTAssertEqual(scheduler.interval, 1)
+        XCTAssertEqual(scheduler.startCount, 1)
+    }
+
+    func testPollingUsesFallbackIntervalWhenNoAllowedPlayerIsRunning() {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        service.pollingLikelyUseful = false
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler)
+
+        store.setPresentationNeeded(true)
+
+        XCTAssertEqual(scheduler.interval, 60)
+        XCTAssertEqual(scheduler.startCount, 1)
+    }
+
+    func testPollingReturnsToActiveIntervalWhenPlayerAvailabilityChanges() {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        service.pollingLikelyUseful = false
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler)
+
+        store.setPresentationNeeded(true)
+        XCTAssertEqual(scheduler.interval, 60)
+
+        service.setPollingLikelyUseful(true)
+
+        XCTAssertEqual(scheduler.interval, 1)
+        XCTAssertEqual(scheduler.startCount, 2)
+    }
+
+    func testPlayerUnavailableChangeClearsSnapshotImmediately() async {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        service.readResults = [.success(Self.snapshot(title: "Song", capturedAt: 1))]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler)
+
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+        XCTAssertNotNil(store.snapshot)
+        let revisionAfterSnapshot = store.publishRevision
+
+        service.setPollingLikelyUseful(false)
+
+        XCTAssertNil(store.snapshot)
+        XCTAssertEqual(store.state, .available(nil))
+        XCTAssertEqual(scheduler.interval, 60)
+        XCTAssertEqual(store.publishRevision, revisionAfterSnapshot + 1)
+    }
+
+    func testRefreshSkipsServiceReadWhenPlayerUnavailable() async {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        service.pollingLikelyUseful = false
+        service.readResults = [.success(Self.snapshot(title: "Stale Song", capturedAt: 1))]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler)
+
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+
+        XCTAssertNil(store.snapshot)
+        XCTAssertEqual(service.readCount, 0)
+        XCTAssertEqual(scheduler.interval, 60)
+    }
+
+    func testRefreshClearsSnapshotAndBacksOffIfPlayerQuitsDuringRead() async {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        service.readResults = [.success(Self.snapshot(title: "Song", capturedAt: 1))]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler)
+
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+        XCTAssertNotNil(store.snapshot)
+
+        service.readResults = [.success(Self.snapshot(title: "Stale Song", capturedAt: 2))]
+        service.beforeReturningReadResult = {
+            service.pollingLikelyUseful = false
+        }
+        await store.refreshNow()
+
+        XCTAssertNil(store.snapshot)
+        XCTAssertEqual(scheduler.interval, 60)
+    }
+
+    func testTurningControlsOffStopsPollingAndClearsSnapshot() async {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        service.readResults = [.success(Self.snapshot(title: "Song", capturedAt: 1))]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler)
+
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+        XCTAssertNotNil(store.snapshot)
+
+        defaults.set(false, forKey: SettingsKey.showMusicControls)
+        store.refreshControlsEnabled()
+
+        XCTAssertNil(scheduler.interval)
+        XCTAssertEqual(store.state, .disabled)
+        XCTAssertNil(store.snapshot)
+        XCTAssertNil(store.settingsAbnormalMessage)
+    }
+
+    func testUnchangedSnapshotsDoNotPublish() async {
+        let service = FakeMusicNowPlayingService()
+        service.readResults = [
+            .success(Self.snapshot(title: "Same Song", capturedAt: 1)),
+            .success(Self.snapshot(title: "Same Song", capturedAt: 2)),
+        ]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: RecordingMusicPollingScheduler())
+
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+        let revisionAfterFirstRefresh = store.publishRevision
+
+        await store.refreshNow()
+
+        XCTAssertEqual(store.publishRevision, revisionAfterFirstRefresh)
+    }
+
+    func testPublishedSnapshotPostsStoreChangeNotification() async {
+        let service = FakeMusicNowPlayingService()
+        service.readResults = [.success(Self.snapshot(title: "Song", capturedAt: 1))]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: RecordingMusicPollingScheduler())
+        let recorder = NotificationRecorder()
+        let observer = NotificationCenter.default.addObserver(
+            forName: MusicNowPlayingStore.didChangeNotification,
+            object: store,
+            queue: nil
+        ) { notification in
+            recorder.record(notification)
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+
+        XCTAssertEqual(recorder.count, 1)
+        XCTAssertTrue(recorder.lastObject === store)
+    }
+
+    func testUnchangedSnapshotDoesNotPostStoreChangeNotification() async {
+        let service = FakeMusicNowPlayingService()
+        service.readResults = [
+            .success(Self.snapshot(title: "Same Song", capturedAt: 1)),
+            .success(Self.snapshot(title: "Same Song", capturedAt: 2)),
+        ]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: RecordingMusicPollingScheduler())
+        let recorder = NotificationRecorder()
+        let observer = NotificationCenter.default.addObserver(
+            forName: MusicNowPlayingStore.didChangeNotification,
+            object: store,
+            queue: nil
+        ) { _ in
+            recorder.record()
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+        await store.refreshNow()
+
+        XCTAssertEqual(recorder.count, 1)
+    }
+
+    func testSuccessfulCommandRefreshesImmediately() async {
+        let service = FakeMusicNowPlayingService()
+        service.readResults = [.success(Self.snapshot(title: "After Command", capturedAt: 3))]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: RecordingMusicPollingScheduler())
+
+        store.setPresentationNeeded(true)
+        await store.send(.playPause)
+
+        XCTAssertEqual(service.sentCommands, [.playPause])
+        XCTAssertEqual(service.readCount, 1)
+        XCTAssertEqual(service.scriptBackoffBypassRequests, [true])
+        XCTAssertEqual(store.snapshot?.track?.title, "After Command")
+        XCTAssertNil(store.softFailure)
+    }
+
+    func testNextCommandBypassesScriptBackoffForImmediateRefresh() async {
+        let service = FakeMusicNowPlayingService()
+        service.readResults = [.success(Self.snapshot(title: "Next Song", capturedAt: 4))]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: RecordingMusicPollingScheduler())
+
+        store.setPresentationNeeded(true)
+        await store.send(.next)
+
+        XCTAssertEqual(service.sentCommands, [.next])
+        XCTAssertEqual(service.readCount, 1)
+        XCTAssertEqual(service.scriptBackoffBypassRequests, [true])
+        XCTAssertEqual(store.snapshot?.track?.title, "Next Song")
+    }
+
+    func testPlayPauseCommandFlipsPlaybackStateOptimistically() async {
+        let service = FakeMusicNowPlayingService()
+        service.readResults = [.success(Self.snapshot(title: "Song", capturedAt: 1, playbackState: .playing))]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: RecordingMusicPollingScheduler())
+
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+        let revisionAfterRefresh = store.publishRevision
+
+        await store.send(.playPause)
+
+        XCTAssertEqual(service.sentCommands, [.playPause])
+        XCTAssertEqual(service.readCount, 1)
+        XCTAssertEqual(store.snapshot?.playbackState, .paused)
+        XCTAssertEqual(store.publishRevision, revisionAfterRefresh + 1)
+        XCTAssertNil(store.softFailure)
+    }
+
+    func testFailedPlayPauseCommandRevertsOptimisticPlaybackState() async {
+        let service = FakeMusicNowPlayingService()
+        service.readResults = [.success(Self.snapshot(title: "Song", capturedAt: 1, playbackState: .playing))]
+        service.commandError = MusicNowPlayingServiceError.commandUnavailable
+        let store = MusicNowPlayingStore(
+            defaults: defaults,
+            service: service,
+            scheduler: RecordingMusicPollingScheduler(),
+            now: { Date(timeIntervalSince1970: 123) }
+        )
+
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+
+        await store.send(.playPause)
+
+        XCTAssertEqual(service.sentCommands, [.playPause])
+        XCTAssertEqual(store.snapshot?.playbackState, .playing)
+        XCTAssertEqual(store.softFailure?.command, .playPause)
+        XCTAssertEqual(store.softFailure?.message, "Music command unavailable")
+    }
+
+    func testFailedCommandSetsSoftFailureWithoutThrowing() async {
+        let service = FakeMusicNowPlayingService()
+        service.commandError = MusicNowPlayingServiceError.commandUnavailable
+        let store = MusicNowPlayingStore(
+            defaults: defaults,
+            service: service,
+            scheduler: RecordingMusicPollingScheduler(),
+            now: { Date(timeIntervalSince1970: 123) }
+        )
+
+        store.setPresentationNeeded(true)
+        await store.send(.next)
+
+        XCTAssertEqual(service.sentCommands, [.next])
+        XCTAssertEqual(store.softFailure?.command, .next)
+        XCTAssertEqual(store.softFailure?.message, "Music command unavailable")
+        XCTAssertEqual(store.softFailure?.occurredAt, Date(timeIntervalSince1970: 123))
+        XCTAssertEqual(store.settingsAbnormalMessage, "Music command unavailable")
+    }
+
+    func testSuccessfulRefreshClearsSoftFailureWhenSnapshotIsUnchanged() async {
+        let unchangedSnapshot = Self.snapshot(title: "Same Song", capturedAt: 1)
+        let service = FakeMusicNowPlayingService()
+        service.readResults = [
+            .success(unchangedSnapshot),
+            .success(Self.snapshot(title: "Same Song", capturedAt: 2)),
+        ]
+        service.commandError = MusicNowPlayingServiceError.commandUnavailable
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: RecordingMusicPollingScheduler())
+
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+        await store.send(.next)
+        XCTAssertNotNil(store.softFailure)
+        let revisionAfterFailure = store.publishRevision
+
+        await store.refreshNow()
+
+        XCTAssertNil(store.softFailure)
+        XCTAssertEqual(store.publishRevision, revisionAfterFailure + 1)
+    }
+
+    func testNoopServiceDoesNotExposeReadyMessage() async {
+        let store = MusicNowPlayingStore(defaults: defaults, service: NoopMusicNowPlayingService(), scheduler: RecordingMusicPollingScheduler())
+
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+
+        XCTAssertNil(store.snapshot)
+        XCTAssertNil(store.settingsAbnormalMessage)
+    }
+
+    func testSettingsSourceShowsOnlyAbnormalMusicMessage() throws {
+        let source = try sourceFile("Sources/Bough/SettingsView.swift")
+        let page = try XCTUnwrap(source.slice(from: "private struct MusicPage: View", to: "// MARK: - Session Display Page"))
+
+        XCTAssertTrue(source.contains("case .music:"))
+        XCTAssertTrue(source.contains("MusicPage("))
+        XCTAssertTrue(page.contains("let musicStore: MusicNowPlayingStore"))
+        XCTAssertTrue(page.contains("if let message = musicStore.settingsAbnormalMessage"))
+        XCTAssertTrue(page.contains(".foregroundStyle(.secondary)"))
+        XCTAssertFalse(page.contains("music_ready"))
+        XCTAssertFalse(page.contains("Retry"))
+    }
+
+    private static func snapshot(
+        title: String,
+        capturedAt: TimeInterval,
+        playbackState: MusicPlaybackState = .playing
+    ) -> MusicNowPlayingSnapshot {
+        MusicNowPlayingSnapshot(
+            player: MusicPlayerIdentity(bundleIdentifier: "com.tencent.QQMusicMac", displayName: "QQ Music"),
+            track: MusicTrackSnapshot(title: title, artist: "Artist", album: "Album", lyricLine: nil, artwork: nil),
+            playbackState: playbackState,
+            commands: MusicCommandAvailability(canPlayPause: true, canSkipPrevious: true, canSkipNext: true),
+            capturedAt: Date(timeIntervalSince1970: capturedAt)
+        )
+    }
+
+    private func sourceFile(_ relativePath: String) throws -> String {
+        let url = TestHelpers.repoRoot(from: #filePath).appendingPathComponent(relativePath)
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+}
+
+private final class RecordingMusicPollingScheduler: MusicPollingScheduling {
+    private(set) var interval: TimeInterval?
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
+    private var action: (@MainActor () -> Void)?
+
+    func start(every interval: TimeInterval, action: @escaping @MainActor () -> Void) {
+        startCount += 1
+        self.interval = interval
+        self.action = action
+    }
+
+    func stop() {
+        interval = nil
+        action = nil
+        stopCount += 1
+    }
+
+    func fire() {
+        action?()
+    }
+}
+
+private final class FakeMusicNowPlayingService: MusicNowPlayingServicing {
+    enum ReadResult {
+        case success(MusicNowPlayingSnapshot?)
+        case failure(Error)
+    }
+
+    var readResults: [ReadResult] = [.success(nil)]
+    var commandError: Error?
+    var pollingLikelyUseful = true
+    private(set) var readCount = 0
+    private(set) var sentCommands: [MusicCommand] = []
+    private(set) var scriptBackoffBypassRequests: [Bool] = []
+    var beforeReturningReadResult: (() -> Void)?
+    private var pollingAvailabilityDidChangeHandler: (@MainActor () -> Void)?
+
+    var isNowPlayingPollingLikelyUseful: Bool {
+        pollingLikelyUseful
+    }
+
+    func setPollingAvailabilityDidChangeHandler(_ handler: (@MainActor () -> Void)?) {
+        pollingAvailabilityDidChangeHandler = handler
+    }
+
+    @MainActor
+    func setPollingLikelyUseful(_ useful: Bool) {
+        pollingLikelyUseful = useful
+        pollingAvailabilityDidChangeHandler?()
+    }
+
+    func currentSnapshot() async throws -> MusicNowPlayingSnapshot? {
+        try await currentSnapshot(bypassingScriptBackoff: false)
+    }
+
+    func currentSnapshot(bypassingScriptBackoff: Bool) async throws -> MusicNowPlayingSnapshot? {
+        scriptBackoffBypassRequests.append(bypassingScriptBackoff)
+        readCount += 1
+        let result = readResults.isEmpty ? .success(nil) : readResults.removeFirst()
+        beforeReturningReadResult?()
+        switch result {
+        case .success(let snapshot):
+            return snapshot
+        case .failure(let error):
+            throw error
+        }
+    }
+
+    func send(_ command: MusicCommand) async throws {
+        sentCommands.append(command)
+        if let commandError {
+            throw commandError
+        }
+    }
+}
+
+private final class NotificationRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var receivedCount = 0
+    private var receivedLastObject: AnyObject?
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return receivedCount
+    }
+
+    var lastObject: AnyObject? {
+        lock.lock()
+        defer { lock.unlock() }
+        return receivedLastObject
+    }
+
+    func record(_ notification: Notification? = nil) {
+        lock.lock()
+        receivedCount += 1
+        receivedLastObject = notification?.object as AnyObject
+        lock.unlock()
+    }
+}
+
+private extension String {
+    func slice(from start: String, to end: String) -> String? {
+        guard let lower = range(of: start)?.lowerBound,
+              let upper = self[lower...].range(of: end)?.lowerBound else {
+            return nil
+        }
+        return String(self[lower..<upper])
+    }
+}

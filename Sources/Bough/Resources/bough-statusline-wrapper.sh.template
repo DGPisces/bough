@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# === BOUGH STATUSLINE WRAPPER ===
+# RESTORE: __BOUGH_PREV_CMD_B64__
+# ================================
+#
+# This wrapper is owned by Bough (D-03). It is installed at
+# `~/.bough/bough-statusline-wrapper.sh` whenever the user already had a
+# non-Bough `statusLine.command` in `~/.claude/settings.json`. The wrapper
+# preserves the user's previous statusLine for visual fidelity and invokes
+# the Bough bridge silently for `rate_limits` data ingestion on the same
+# Claude turn cadence (Phase 21 / D-02 chain-safe install pattern).
+#
+# The `RESTORE:` sentinel above carries the base64-encoded original
+# `statusLine.command`. Bough's uninstall path parses this line and writes
+# the decoded value back into `~/.claude/settings.json`. If you edit this
+# file by hand and corrupt the sentinel, Bough's uninstall will REFUSE to
+# touch your settings (D-02 trust-boundary-2 mitigation) — re-run install
+# from Bough's Settings → Hooks page to regenerate it.
+
+set -euo pipefail
+
+# Capture stdin once — Claude Code passes the status payload via stdin and
+# we want to feed it to both the previous command and the Bough bridge.
+INPUT=$(cat)
+
+# Decode the user's previous statusLine command from the RESTORE sentinel.
+# `base64 -D` (macOS) and `base64 -d` (Linux/coreutils) are both tried so the
+# same template works on both platforms.
+PREV_CMD=$(printf '%s' '__BOUGH_PREV_CMD_B64__' | base64 -D 2>/dev/null || printf '%s' '__BOUGH_PREV_CMD_B64__' | base64 -d 2>/dev/null || true)
+
+# Run the user's previous statusLine command. Apply a 500ms watchdog so a
+# slow prev_cmd cannot stall Claude Code's status refresh. macOS does NOT
+# ship GNU `timeout` by default (D-05 Phase 21 hot-fix: regression showed
+# `timeout` returning 127 → `|| true` swallowed the failure → user's
+# gsd-statusline never ran). Resolution order:
+#   1. `gtimeout` — Homebrew coreutils alias (most common macOS install).
+#   2. `timeout`  — GNU coreutils proper (Linux, or macOS w/ coreutils on PATH).
+#   3. Background + `kill` watchdog — pure bash fallback, no external deps.
+# Failures are swallowed (`|| true`) so a broken prev_cmd never breaks Claude
+# Code's status refresh. Stderr is silenced AFTER the watchdog selection so
+# any "command not found" from the watchdog itself surfaces only via exit
+# code, never the visible statusLine.
+if command -v gtimeout >/dev/null 2>&1; then
+    printf '%s' "$INPUT" | gtimeout 0.5s bash -c "$PREV_CMD" 2>/dev/null || true
+elif command -v timeout >/dev/null 2>&1; then
+    printf '%s' "$INPUT" | timeout 0.5s bash -c "$PREV_CMD" 2>/dev/null || true
+else
+    # Pure-bash watchdog: run prev_cmd in background, kill it after 0.5s if
+    # still alive. `wait` returns the child's exit status; the sleeper is
+    # cleaned up unconditionally. Stdin piping is preserved via process
+    # substitution so prev_cmd still receives Claude's payload.
+    (
+        printf '%s' "$INPUT" | bash -c "$PREV_CMD" 2>/dev/null &
+        prev_pid=$!
+        ( sleep 0.5; kill "$prev_pid" 2>/dev/null ) &
+        watchdog_pid=$!
+        wait "$prev_pid" 2>/dev/null || true
+        kill "$watchdog_pid" 2>/dev/null || true
+        wait "$watchdog_pid" 2>/dev/null || true
+    ) || true
+fi
+
+# Run the Bough bridge silently (D-04). The bridge writes
+# `~/.bough/claude-usage.json` atomically and emits nothing visible.
+# Failures here must not break the wrapper for the same reason as above.
+printf '%s' "$INPUT" | "__BOUGH_BRIDGE_PATH__" >/dev/null 2>&1 || true

@@ -1,0 +1,180 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: /bin/bash --noprofile --norc -eo pipefail {0}
+
+jobs:
+  release:
+    runs-on: macos-14
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release tag
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]*)?$ ]]
+          VERSION="$(plutil -extract CFBundleShortVersionString raw Platform/Apple/Info.plist)"
+          BUILD="$(plutil -extract CFBundleVersion raw Platform/Apple/Info.plist)"
+          Tools/Release/release-flow.sh prepare --version "$VERSION" --build "$BUILD" --tag "$TAG"
+          {
+            echo "BOUGH_RELEASE_TAG=$TAG"
+            echo "BOUGH_RELEASE_VERSION=$VERSION"
+            echo "BOUGH_RELEASE_BUILD=$BUILD"
+            echo "BOUGH_DMG_NAME=Bough-${TAG}.dmg"
+            echo "BOUGH_DMG_PATH=$PWD/.build/Bough-${TAG}.dmg"
+          } >> "$GITHUB_ENV"
+
+      - name: Install create-dmg
+        run: |
+          if ! command -v create-dmg >/dev/null 2>&1; then
+            brew install create-dmg
+          fi
+
+      - name: Import signing material
+        env:
+          APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+        run: |
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          KEYCHAIN_PATH="$RUNNER_TEMP/bough-signing.keychain-db"
+          CERTIFICATE_PATH="$RUNNER_TEMP/developer-id-application.p12"
+          NOTARY_PROFILE="Bough"
+
+          printf '%s' "$APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -P "$APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security add-generic-password \
+            -a ed25519 \
+            -s https://sparkle-project.org \
+            -w "$SPARKLE_EDDSA_PRIVATE_KEY" \
+            -U "$KEYCHAIN_PATH"
+          xcrun notarytool store-credentials "$NOTARY_PROFILE" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --keychain "$KEYCHAIN_PATH"
+
+          SIGN_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | /usr/bin/awk -F\" '/Developer ID Application/ { print $2; exit }')"
+          [[ -n "$SIGN_IDENTITY" ]]
+          {
+            echo "BOUGH_KEYCHAIN_PATH=$KEYCHAIN_PATH"
+            echo "BOUGH_NOTARY_PROFILE=$NOTARY_PROFILE"
+            echo "SIGN_IDENTITY=$SIGN_IDENTITY"
+          } >> "$GITHUB_ENV"
+
+      - name: Build signed universal DMG
+        run: |
+          BUILD_ARCH=universal \
+          SIGN_IDENTITY="$SIGN_IDENTITY" \
+          NOTARY_PROFILE="$BOUGH_NOTARY_PROFILE" \
+            Tools/Build/build-dmg.sh
+          mv .build/Bough.dmg "$BOUGH_DMG_PATH"
+          echo "BOUGH_DMG_DOWNLOAD_URL=https://github.com/DGPisces/bough/releases/download/${BOUGH_RELEASE_TAG}/${BOUGH_DMG_NAME}" >> "$GITHUB_ENV"
+
+      - name: Create release notes
+        run: |
+          Tools/Release/extract-changelog.sh "$BOUGH_RELEASE_TAG" > "$RUNNER_TEMP/release-notes.md"
+
+      - name: Prepare stable appcast
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          Tools/Release/release-flow.sh update-appcast \
+            --tag "$BOUGH_RELEASE_TAG" \
+            --dmg "$BOUGH_DMG_PATH" \
+            --download-url "$BOUGH_DMG_DOWNLOAD_URL"
+
+      - name: Verify release artifact
+        run: |
+          Tools/Release/release-flow.sh verify \
+            --tag "$BOUGH_RELEASE_TAG" \
+            --dmg "$BOUGH_DMG_PATH" \
+            --download-url "$BOUGH_DMG_DOWNLOAD_URL"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=(
+            "$BOUGH_RELEASE_TAG"
+            "$BOUGH_DMG_PATH"
+            --repo DGPisces/bough
+            --title "Bough ${BOUGH_RELEASE_TAG}"
+            --notes-file "$RUNNER_TEMP/release-notes.md"
+          )
+          if [[ "$BOUGH_RELEASE_TAG" == *-* ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"
+          DOWNLOAD_URL="$(gh release view "$BOUGH_RELEASE_TAG" \
+            --repo DGPisces/bough \
+            --json assets \
+            --jq ".assets[] | select(.name == \"$BOUGH_DMG_NAME\") | .browserDownloadUrl")"
+          [[ "$DOWNLOAD_URL" == "$BOUGH_DMG_DOWNLOAD_URL" ]]
+
+      - name: Publish stable appcast branch
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APPCAST_STAGING="$RUNNER_TEMP/appcast-branch"
+          if git ls-remote --exit-code --heads origin appcast >/dev/null 2>&1; then
+            git fetch origin appcast
+            git worktree add "$APPCAST_STAGING" origin/appcast
+          else
+            git worktree add --detach "$APPCAST_STAGING"
+            git -C "$APPCAST_STAGING" switch --orphan appcast
+            git -C "$APPCAST_STAGING" rm -rf . || true
+          fi
+          cp Tools/Release/appcast.xml "$APPCAST_STAGING/appcast.xml"
+          git -C "$APPCAST_STAGING" add appcast.xml
+          git -C "$APPCAST_STAGING" \
+            -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -m "Update appcast for ${BOUGH_RELEASE_TAG}" || exit 0
+          git -C "$APPCAST_STAGING" push origin HEAD:appcast
+
+      - name: Verify stable remote feed
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          ASSET_SHA256="$(shasum -a 256 "$BOUGH_DMG_PATH" | awk '{print $1}')"
+          ASSET_BYTES="$(stat -f %z "$BOUGH_DMG_PATH")"
+          Tools/Release/release-flow.sh verify-remote \
+            --tag "$BOUGH_RELEASE_TAG" \
+            --version "$BOUGH_RELEASE_VERSION" \
+            --build "$BOUGH_RELEASE_BUILD" \
+            --asset-sha256 "$ASSET_SHA256" \
+            --asset-bytes "$ASSET_BYTES"
+
+      - name: Cleanup temporary keychain
+        if: ${{ always() }}
+        run: |
+          if [[ -n "${BOUGH_KEYCHAIN_PATH:-}" ]]; then
+            security delete-keychain "$BOUGH_KEYCHAIN_PATH" || true
+          fi

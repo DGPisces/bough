@@ -1,0 +1,850 @@
+[
+  {
+    "semantic_category": "forest_ink_bounds",
+    "x": 0,
+    "y": 0,
+    "expected": [
+      26,
+      31,
+      24
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255
+    },
+    "actual": [
+      26,
+      31,
+      24,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "forest_ink_bounds",
+    "x": 799,
+    "y": 0,
+    "expected": [
+      26,
+      31,
+      24
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255
+    },
+    "actual": [
+      26,
+      31,
+      24,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "forest_ink_bounds",
+    "x": 1599,
+    "y": 0,
+    "expected": [
+      26,
+      31,
+      24
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255
+    },
+    "actual": [
+      26,
+      31,
+      24,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "forest_ink_bounds",
+    "x": 0,
+    "y": 199,
+    "expected": [
+      26,
+      31,
+      24
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255
+    },
+    "actual": [
+      26,
+      31,
+      24,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "forest_ink_bounds",
+    "x": 1599,
+    "y": 199,
+    "expected": [
+      26,
+      31,
+      24
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255
+    },
+    "actual": [
+      26,
+      31,
+      24,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "forest_ink_bounds",
+    "x": 0,
+    "y": 399,
+    "expected": [
+      26,
+      31,
+      24
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255
+    },
+    "actual": [
+      26,
+      31,
+      24,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "forest_ink_bounds",
+    "x": 799,
+    "y": 399,
+    "expected": [
+      26,
+      31,
+      24
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255
+    },
+    "actual": [
+      26,
+      31,
+      24,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "forest_ink_bounds",
+    "x": 1599,
+    "y": 399,
+    "expected": [
+      26,
+      31,
+      24
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255
+    },
+    "actual": [
+      26,
+      31,
+      24,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "forest_ink_bounds",
+    "x": 650,
+    "y": 200,
+    "expected": [
+      26,
+      31,
+      24
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255
+    },
+    "actual": [
+      26,
+      31,
+      24,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "forest_ink_bounds",
+    "x": 1400,
+    "y": 200,
+    "expected": [
+      26,
+      31,
+      24
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255
+    },
+    "actual": [
+      26,
+      31,
+      24,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "amber_wordmark",
+    "x": 711,
+    "y": 168,
+    "expected": [
+      232,
+      156,
+      58
+    ],
+    "tolerance": {
+      "rgb_max_delta": 2,
+      "alpha": 255
+    },
+    "actual": [
+      232,
+      156,
+      58,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "amber_wordmark",
+    "x": 744,
+    "y": 140,
+    "expected": [
+      232,
+      156,
+      58
+    ],
+    "tolerance": {
+      "rgb_max_delta": 2,
+      "alpha": 255
+    },
+    "actual": [
+      232,
+      156,
+      58,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "amber_wordmark",
+    "x": 777,
+    "y": 156,
+    "expected": [
+      232,
+      156,
+      58
+    ],
+    "tolerance": {
+      "rgb_max_delta": 2,
+      "alpha": 255
+    },
+    "actual": [
+      232,
+      156,
+      58,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "amber_wordmark",
+    "x": 858,
+    "y": 185,
+    "expected": [
+      232,
+      156,
+      58
+    ],
+    "tolerance": {
+      "rgb_max_delta": 2,
+      "alpha": 255
+    },
+    "actual": [
+      232,
+      156,
+      58,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "amber_wordmark",
+    "x": 923,
+    "y": 166,
+    "expected": [
+      232,
+      156,
+      58
+    ],
+    "tolerance": {
+      "rgb_max_delta": 2,
+      "alpha": 255
+    },
+    "actual": [
+      232,
+      156,
+      58,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "amber_wordmark",
+    "x": 1033,
+    "y": 204,
+    "expected": [
+      232,
+      156,
+      58
+    ],
+    "tolerance": {
+      "rgb_max_delta": 2,
+      "alpha": 255
+    },
+    "actual": [
+      232,
+      156,
+      58,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "amber_wordmark",
+    "x": 1123,
+    "y": 204,
+    "expected": [
+      232,
+      156,
+      58
+    ],
+    "tolerance": {
+      "rgb_max_delta": 2,
+      "alpha": 255
+    },
+    "actual": [
+      232,
+      156,
+      58,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "amber_wordmark",
+    "x": 1167,
+    "y": 168,
+    "expected": [
+      232,
+      156,
+      58
+    ],
+    "tolerance": {
+      "rgb_max_delta": 2,
+      "alpha": 255
+    },
+    "actual": [
+      232,
+      156,
+      58,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "amber_wordmark",
+    "x": 1207,
+    "y": 175,
+    "expected": [
+      232,
+      156,
+      58
+    ],
+    "tolerance": {
+      "rgb_max_delta": 2,
+      "alpha": 255
+    },
+    "actual": [
+      232,
+      156,
+      58,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "amber_wordmark",
+    "x": 1263,
+    "y": 110,
+    "expected": [
+      232,
+      156,
+      58
+    ],
+    "tolerance": {
+      "rgb_max_delta": 2,
+      "alpha": 255
+    },
+    "actual": [
+      232,
+      156,
+      58,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "amber_wordmark",
+    "x": 1324,
+    "y": 144,
+    "expected": [
+      232,
+      156,
+      58
+    ],
+    "tolerance": {
+      "rgb_max_delta": 2,
+      "alpha": 255
+    },
+    "actual": [
+      232,
+      156,
+      58,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "amber_wordmark",
+    "x": 756,
+    "y": 89,
+    "expected": [
+      232,
+      156,
+      58
+    ],
+    "tolerance": {
+      "rgb_max_delta": 2,
+      "alpha": 255
+    },
+    "actual": [
+      232,
+      156,
+      58,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "amber_wordmark",
+    "x": 1243,
+    "y": 130,
+    "expected": [
+      232,
+      156,
+      58
+    ],
+    "tolerance": {
+      "rgb_max_delta": 2,
+      "alpha": 255
+    },
+    "actual": [
+      232,
+      156,
+      58,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "amber_wordmark",
+    "x": 1123,
+    "y": 221,
+    "expected": [
+      232,
+      156,
+      58
+    ],
+    "tolerance": {
+      "rgb_max_delta": 2,
+      "alpha": 255
+    },
+    "actual": [
+      232,
+      156,
+      58,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "closed_glyph_counters",
+    "x": 731,
+    "y": 99,
+    "expected": [
+      26,
+      31,
+      24
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255,
+      "luminance_max": 59.43
+    },
+    "actual": [
+      26,
+      31,
+      24,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "closed_glyph_counters",
+    "x": 761,
+    "y": 109,
+    "expected": [
+      26,
+      31,
+      24
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255,
+      "luminance_max": 59.43
+    },
+    "actual": [
+      26,
+      31,
+      24,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "closed_glyph_counters",
+    "x": 784,
+    "y": 136,
+    "expected": [
+      26,
+      31,
+      24
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255,
+      "luminance_max": 59.43
+    },
+    "actual": [
+      26,
+      31,
+      24,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "closed_glyph_counters",
+    "x": 1153,
+    "y": 136,
+    "expected": [
+      26,
+      31,
+      24
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255,
+      "luminance_max": 59.43
+    },
+    "actual": [
+      26,
+      31,
+      24,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "closed_glyph_counters",
+    "x": 720,
+    "y": 137,
+    "expected": [
+      26,
+      31,
+      24
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255,
+      "luminance_max": 59.43
+    },
+    "actual": [
+      26,
+      31,
+      24,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "closed_glyph_counters",
+    "x": 864,
+    "y": 137,
+    "expected": [
+      26,
+      31,
+      24
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255,
+      "luminance_max": 59.43
+    },
+    "actual": [
+      26,
+      31,
+      24,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "closed_glyph_counters",
+    "x": 895,
+    "y": 139,
+    "expected": [
+      26,
+      31,
+      24
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255,
+      "luminance_max": 59.43
+    },
+    "actual": [
+      26,
+      31,
+      24,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "closed_glyph_counters",
+    "x": 1161,
+    "y": 200,
+    "expected": [
+      26,
+      31,
+      24
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255,
+      "luminance_max": 59.43
+    },
+    "actual": [
+      26,
+      31,
+      24,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "chick_rim",
+    "x": 271,
+    "y": 200,
+    "expected": [
+      20,
+      26,
+      18
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255
+    },
+    "actual": [
+      22,
+      29,
+      20,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "chick_rim",
+    "x": 283,
+    "y": 259,
+    "expected": [
+      20,
+      26,
+      18
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255
+    },
+    "actual": [
+      22,
+      28,
+      20,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "chick_rim",
+    "x": 327,
+    "y": 324,
+    "expected": [
+      20,
+      26,
+      18
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255
+    },
+    "actual": [
+      21,
+      27,
+      19,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "chick_rim",
+    "x": 368,
+    "y": 44,
+    "expected": [
+      20,
+      26,
+      18
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255
+    },
+    "actual": [
+      21,
+      28,
+      20,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "chick_rim",
+    "x": 432,
+    "y": 54,
+    "expected": [
+      20,
+      26,
+      18
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255
+    },
+    "actual": [
+      21,
+      27,
+      20,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "chick_rim",
+    "x": 535,
+    "y": 310,
+    "expected": [
+      20,
+      26,
+      18
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255
+    },
+    "actual": [
+      20,
+      27,
+      20,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "chick_rim",
+    "x": 563,
+    "y": 111,
+    "expected": [
+      20,
+      26,
+      18
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255
+    },
+    "actual": [
+      21,
+      28,
+      20,
+      255
+    ],
+    "pass": true
+  },
+  {
+    "semantic_category": "chick_rim",
+    "x": 590,
+    "y": 247,
+    "expected": [
+      20,
+      26,
+      18
+    ],
+    "tolerance": {
+      "rgb_max_delta": 5,
+      "alpha": 255
+    },
+    "actual": [
+      22,
+      28,
+      20,
+      255
+    ],
+    "pass": true
+  }
+]
