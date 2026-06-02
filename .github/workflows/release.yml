@@ -121,21 +121,33 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          args=(
+          release_args=(
             "$BOUGH_RELEASE_TAG"
-            "$BOUGH_DMG_PATH"
             --repo DGPisces/bough
             --title "Bough ${BOUGH_RELEASE_TAG}"
             --notes-file "$RUNNER_TEMP/release-notes.md"
           )
+          upload_args=(
+            "$BOUGH_RELEASE_TAG"
+            "$BOUGH_DMG_PATH"
+            --repo DGPisces/bough
+            --clobber
+          )
           if [[ "$BOUGH_RELEASE_TAG" == *-* ]]; then
-            args+=(--prerelease)
+            release_args+=(--prerelease)
+          else
+            release_args+=(--latest)
           fi
-          gh release create "${args[@]}"
+          if gh release view "$BOUGH_RELEASE_TAG" --repo DGPisces/bough >/dev/null 2>&1; then
+            gh release edit "${release_args[@]}"
+            gh release upload "${upload_args[@]}"
+          else
+            gh release create "${release_args[@]}" "$BOUGH_DMG_PATH"
+          fi
           DOWNLOAD_URL="$(gh release view "$BOUGH_RELEASE_TAG" \
             --repo DGPisces/bough \
             --json assets \
-            --jq ".assets[] | select(.name == \"$BOUGH_DMG_NAME\") | .browserDownloadUrl")"
+            --jq ".assets[] | select(.name == \"$BOUGH_DMG_NAME\") | (.browserDownloadUrl // .url)")"
           [[ "$DOWNLOAD_URL" == "$BOUGH_DMG_DOWNLOAD_URL" ]]
 
       - name: Publish stable appcast branch
