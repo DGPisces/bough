@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"
+     xmlns:dc="http://purl.org/dc/elements/1.1/"
+     version="2.0">
+  <channel>
+    <title>Bough</title>
+    <link>https://raw.githubusercontent.com/DGPisces/bough/appcast/appcast.xml</link>
+    <description>Stable Bough updates</description>
+    <language>en</language>
+  </channel>
+</rss>
