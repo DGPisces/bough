@@ -23,8 +23,9 @@ final class SettingsViewDurationTests: XCTestCase {
 
     func testWindowDurationFullDHMFormatRows() {
         let now = Date(timeIntervalSince1970: 1_000)
+        let oneDayTwoHoursThreeMinutes: TimeInterval = 93_780
 
-        XCTAssertEqual(windowDuration(resetIn: 24 * 3600 + 2 * 3600 + 3 * 60, now: now, format: .fullDHM), "1d 2h 3m")
+        XCTAssertEqual(windowDuration(resetIn: oneDayTwoHoursThreeMinutes, now: now, format: .fullDHM), "1d 2h 3m")
         XCTAssertEqual(windowDuration(resetIn: 5 * 60, now: now, format: .fullDHM), "0d 0h 5m")
         XCTAssertEqual(windowDuration(resetIn: 6 * 24 * 3600, now: now, format: .fullDHM), "6d 0h 0m")
     }

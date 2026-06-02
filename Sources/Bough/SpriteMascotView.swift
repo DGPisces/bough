@@ -219,7 +219,7 @@ final class SpriteMascotNSView: NSView {
         let center = NotificationCenter.default
         for (name, object) in playbackVisibilityNotifications() {
             let observer = center.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in
-                Task { @MainActor in
+                MainActor.assumeIsolated {
                     self?.syncPlayback()
                 }
             }

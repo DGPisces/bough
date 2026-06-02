@@ -935,7 +935,7 @@ private struct WelcomeGuideBrandIcon: View {
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
     }
 
-    private static var image: NSImage {
+    @MainActor private static var image: NSImage {
         if let url = Bundle.appModule.url(forResource: "AppIcon", withExtension: "icns"),
            let image = NSImage(contentsOf: url) {
             return image
