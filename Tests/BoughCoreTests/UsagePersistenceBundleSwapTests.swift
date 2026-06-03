@@ -124,17 +124,14 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
         // path contains ".app/Contents/Resources" to represent the old app bundle
         // location. This dir is a sibling of tempHome (PITFALL-03), never inside it.
         // The store must not reference it; we just confirm its existence is harmless.
-        let fakeBundleDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("FakeBough-\(UUID().uuidString).app/Contents/Resources",
-                                    isDirectory: true)
+        let fakeBundleRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FakeBough-\(UUID().uuidString).app", isDirectory: true)
+        let fakeBundleDir = fakeBundleRoot
+            .appendingPathComponent("Contents/Resources", isDirectory: true)
         try FileManager.default.createDirectory(at: fakeBundleDir,
                                                 withIntermediateDirectories: true)
         defer {
-            try? FileManager.default.removeItem(
-                at: fakeBundleDir.deletingLastPathComponent()
-                    .deletingLastPathComponent()
-                    .deletingLastPathComponent()
-            )
+            try? FileManager.default.removeItem(at: fakeBundleRoot)
         }
 
         // Step 3: Open a fresh accumulator backed by .live. $HOME still points at
@@ -220,16 +217,13 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
         XCTAssertTrue(storePath.hasPrefix(tempHome.appendingPathComponent(".bough").path))
         XCTAssertFalse(storePath.contains(".app/Contents"))
 
-        let fakeBundleDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("FakeBough-\(UUID().uuidString).app/Contents/Resources",
-                                    isDirectory: true)
+        let fakeBundleRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FakeBough-\(UUID().uuidString).app", isDirectory: true)
+        let fakeBundleDir = fakeBundleRoot
+            .appendingPathComponent("Contents/Resources", isDirectory: true)
         try FileManager.default.createDirectory(at: fakeBundleDir, withIntermediateDirectories: true)
         defer {
-            try? FileManager.default.removeItem(
-                at: fakeBundleDir.deletingLastPathComponent()
-                    .deletingLastPathComponent()
-                    .deletingLastPathComponent()
-            )
+            try? FileManager.default.removeItem(at: fakeBundleRoot)
         }
 
         do {

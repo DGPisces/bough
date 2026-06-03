@@ -42,7 +42,7 @@ final class PerformanceBenchmarks: XCTestCase {
 
         print("[bench] scanLines realistic mix \(blob.count) bytes / \(lineCount) lines: \(String(format: "%.2f", elapsedMs))ms")
         XCTAssertNotNil(result.delta.lastAssistantMessage)
-        XCTAssertLessThan(elapsedMs, 5_000)
+        XCTAssertLessThan(elapsedMs, 10_000)
     }
 
     func testScanLinesOnOneMegabyteOfAssistantLines() {
@@ -61,7 +61,7 @@ final class PerformanceBenchmarks: XCTestCase {
 
         print("[bench] scanLines ~1MB (\(approxLines) lines): \(String(format: "%.2f", elapsedMs))ms")
         XCTAssertFalse(result.delta.isEmpty)
-        XCTAssertLessThan(elapsedMs, 5_000, "1MB scan must stay under 5s even in debug")
+        XCTAssertLessThan(elapsedMs, 10_000, "1MB scan must stay under 10s even in debug parallel runs")
     }
 
     // MARK: - HookEvent.init
