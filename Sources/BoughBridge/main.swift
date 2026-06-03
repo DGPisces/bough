@@ -416,6 +416,18 @@ if let cmuxWorkspace = env["CMUX_WORKSPACE_ID"], !cmuxWorkspace.isEmpty {
     json["_cmux_workspace_id"] = cmuxWorkspace
 }
 
+// Codex GUI runtime context. Desktop app-server children carry the thread id
+// even when `~/.codex/config.toml` does not persist runtime approval settings.
+if let codexThreadId = env["CODEX_THREAD_ID"], !codexThreadId.isEmpty {
+    json["_codex_thread_id"] = codexThreadId
+}
+if let codexHome = env["CODEX_HOME"], !codexHome.isEmpty {
+    json["_codex_home"] = codexHome
+}
+if let approvalsReviewer = env["CODEX_APPROVALS_REVIEWER"], !approvalsReviewer.isEmpty {
+    json["_codex_approvals_reviewer"] = approvalsReviewer
+}
+
 // --- Serialize enriched JSON ---
 guard let enriched = try? JSONSerialization.data(withJSONObject: json) else { exit(0) }
 

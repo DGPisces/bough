@@ -1375,6 +1375,46 @@ extension ConfigInstaller {
         return codexBoolFeatureValue(fm: fm, configPath: configPath, key: "codex_hooks") == "false"
     }
 
+    static func codexAutoReviewEnabled(fm: FileManager) -> Bool {
+        let configPath = codexHome() + "/config.toml"
+        guard fm.fileExists(atPath: configPath),
+              let contents = try? String(contentsOfFile: configPath, encoding: .utf8)
+        else { return false }
+
+        return codexAutoReviewEnabled(in: contents)
+    }
+
+    static func codexAutoReviewEnabled(in contents: String) -> Bool {
+        guard codexConfigHasValidTableHeaders(contents) else { return false }
+
+        var approvalsReviewer: String?
+        var approvalPolicy: String?
+        let lines = contents.replacingOccurrences(of: "\r\n", with: "\n")
+            .components(separatedBy: "\n")
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { continue }
+            let stripped = codexTomlLineWithoutTrailingComment(trimmed)
+                .trimmingCharacters(in: .whitespaces)
+            guard !stripped.isEmpty else { continue }
+            if isCodexTomlSectionHeader(stripped) {
+                break
+            }
+
+            if let value = codexStringAssignmentValue(stripped, key: "approvals_reviewer") {
+                approvalsReviewer = value
+                continue
+            }
+            if let value = codexStringAssignmentValue(stripped, key: "approval_policy") {
+                approvalPolicy = value
+                continue
+            }
+        }
+
+        return approvalsReviewer == "auto_review" && approvalPolicy != "never"
+    }
+
     static func codexDeprecatedHooksKeyPresent(fm: FileManager) -> Bool {
         codexDeprecatedHooksKeyPresent(fm: fm, configPath: codexHome() + "/config.toml")
     }

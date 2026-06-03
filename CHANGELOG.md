@@ -2,6 +2,20 @@
 
 All notable changes to Bough are documented here.
 
+## [v1.0.0] - 2026-06-03
+
+Stable public release for Bough.
+
+### Changed
+
+- Promoted public release metadata and documentation from `v1.0.0-rc.1` to stable `v1.0.0`.
+- Updated Sparkle to `2.9.2` for the stable candidate.
+- Added English and Chinese README language-switch links.
+
+### Verified
+
+- Build, tests, version consistency, packaging, installed-app smoke, usage smoke, AirDrop UAT, and P0/P1 triage passed before release closeout.
+
 ## [v1.0.0-rc.1] - 2026-06-02
 
 Initial public prerelease candidate for Bough.

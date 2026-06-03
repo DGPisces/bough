@@ -4,6 +4,8 @@
 
 # Bough
 
+[English](README.md)
+
 Bough 是一款 macOS 刘海实用工具，把 AI 编码智能体、用量、音乐、歌词和 AirDrop 等状态放到屏幕顶部的可视空间里。
 
 ![Bough 刘海面板演示](Assets/README/panel-session-music-airdrop.png)
@@ -43,7 +45,7 @@ Bough 是一款 macOS 刘海实用工具，把 AI 编码智能体、用量、音
 
 ## 安装
 
-当前公开预发布版是 `v1.0.0-rc.1`。
+当前稳定版是 `v1.0.0`。
 
 1. 打开 [GitHub Releases](https://github.com/DGPisces/bough/releases)。
 2. 下载最新 `Bough.dmg`。
@@ -52,7 +54,7 @@ Bough 是一款 macOS 刘海实用工具，把 AI 编码智能体、用量、音
 
 ## 自动更新
 
-Bough 的自动更新使用公开仓库的 stable channel。`v1.0.0-rc.1` 是预发布版；预发布构建可能需要从 GitHub Releases 手动下载更新。
+Bough 的自动更新使用公开仓库的 stable channel。稳定版会通过公开更新源检查签名的应用内更新。
 
 ## 从源码构建
 

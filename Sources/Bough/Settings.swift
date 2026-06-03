@@ -21,7 +21,7 @@ enum SettingsNotification {
 
 enum AppVersion {
     /// Update this each release. Used as fallback when Info.plist is unavailable (debug builds).
-    static let fallback = "v1.0.0-rc.1"
+    static let fallback = "1.0.0"
 
     static var current: String {
         if let releaseLabel = Bundle.main.infoDictionary?["BoughReleaseLabel"] as? String {

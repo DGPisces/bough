@@ -575,7 +575,7 @@ final class L10n: ObservableObject {
         "welcome_guide_settings_desc": "Review mode, display, AirDrop, music, hooks, and usage options.",
         "welcome_guide_status_not_completed": "Not completed",
         "welcome_guide_status_completed": "Completed %@",
-        "welcome_guide_status_update_available": "Update available",
+        "welcome_guide_status_update_available": "Guide update available",
 
         // Menu
         "settings_ellipsis": "Settings...",
@@ -1225,7 +1225,7 @@ final class L10n: ObservableObject {
         "welcome_guide_settings_desc": "检查模式、显示器、AirDrop、音乐、Hooks 和用量选项。",
         "welcome_guide_status_not_completed": "未完成",
         "welcome_guide_status_completed": "已完成 %@",
-        "welcome_guide_status_update_available": "有新版本",
+        "welcome_guide_status_update_available": "欢迎引导有更新",
 
         // Menu
         "settings_ellipsis": "设置...",
