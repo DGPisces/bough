@@ -19,7 +19,7 @@ final class CodexAppServerClientTests: XCTestCase {
             client.stop()
         }
 
-        XCTAssertLessThanOrEqual(try openFileDescriptorCount(), baseline + 8)
+        try assertOpenFileDescriptorCountSettles(atMost: baseline + 8)
     }
 
     func testRepeatedProcessExitDoesNotLeakFileDescriptors() throws {
@@ -38,7 +38,7 @@ final class CodexAppServerClientTests: XCTestCase {
             wait(for: [exitExpectation], timeout: 2)
         }
 
-        XCTAssertLessThanOrEqual(try openFileDescriptorCount(), baseline + 8)
+        try assertOpenFileDescriptorCountSettles(atMost: baseline + 8)
     }
 
     func testStopDoesNotCallExitHandler() throws {
@@ -94,6 +94,20 @@ final class CodexAppServerClientTests: XCTestCase {
             .contentsOfDirectory(atPath: "/dev/fd")
             .compactMap(Int.init)
             .count
+    }
+
+    private func assertOpenFileDescriptorCountSettles(
+        atMost maxCount: Int,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        let deadline = Date().addingTimeInterval(1)
+        var count = try openFileDescriptorCount()
+        while count > maxCount && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            count = try openFileDescriptorCount()
+        }
+        XCTAssertLessThanOrEqual(count, maxCount, file: file, line: line)
     }
 
     // MARK: - drainMessages

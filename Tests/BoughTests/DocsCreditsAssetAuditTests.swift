@@ -65,6 +65,8 @@ final class DocsCreditsAssetAuditTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(screenshot.height, 600)
         XCTAssertTrue(readme.contains("![Bough notch panel demo](Assets/README/panel-session-music-airdrop.png)"))
         XCTAssertTrue(readmeZH.contains("![Bough 刘海面板演示](Assets/README/panel-session-music-airdrop.png)"))
+        XCTAssertTrue(readme.contains("[Simplified Chinese](README.zh-CN.md)"))
+        XCTAssertTrue(readmeZH.contains("[English](README.md)"))
         XCTAssertTrue(readme.contains("<summary>Supported tools</summary>"))
         XCTAssertTrue(readmeZH.contains("<summary>支持的工具</summary>"))
 
@@ -119,6 +121,7 @@ final class DocsCreditsAssetAuditTests: XCTestCase {
         XCTAssertTrue(contributing.contains("GitHub private vulnerability reporting"))
         XCTAssertFalse(contributing.contains("@"))
 
+        XCTAssertTrue(changelog.contains("## [v1.0.0] - 2026-06-03"))
         XCTAssertTrue(changelog.contains("## [v1.0.0-rc.1] - 2026-06-02"))
         XCTAssertFalse(changelog.contains(["0", "1", "0"].joined(separator: ".")))
     }

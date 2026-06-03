@@ -14,6 +14,16 @@ struct BoughApp: App {
             SettingsView(appState: appDelegate.appState)
                 .frame(minWidth: 660, minHeight: 540)
         }
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button(l10n["settings_ellipsis"]) {
+                    Task { @MainActor in
+                        SettingsWindowController.shared.show()
+                    }
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
+        }
         // Regression guard: round-3 used
         // `.windowResizability(.contentSize)` which actually locks the window
         // to the content's intrinsic size and forbids user-drag resize on

@@ -229,6 +229,195 @@ class HookServer {
         return .event
     }
 
+    static func shouldDeferCodexPermissionToAutoReview(
+        _ event: HookEvent,
+        fm: FileManager = .default
+    ) -> Bool {
+        guard EventNormalizer.normalize(event.eventName) == "PermissionRequest",
+              event.toolName != "AskUserQuestion",
+              let rawSource = event.rawJSON["_source"] as? String,
+              SessionSnapshot.normalizedSupportedSource(rawSource) == "codex"
+        else { return false }
+
+        if codexAutoReviewEnabled(fromRuntimePayload: event.rawJSON) {
+            return true
+        }
+        if codexAutoReviewEnabledFromTranscript(event: event, fm: fm) {
+            return true
+        }
+        return ConfigInstaller.codexAutoReviewEnabled(fm: fm)
+    }
+
+    private static func codexAutoReviewEnabled(fromRuntimePayload raw: [String: Any]) -> Bool {
+        let containers = [
+            raw,
+            raw["config"] as? [String: Any],
+            raw["runtime"] as? [String: Any],
+            raw["approval"] as? [String: Any],
+            raw["approval_context"] as? [String: Any],
+            raw["approvalContext"] as? [String: Any],
+        ].compactMap { $0 }
+
+        for container in containers {
+            let approvalPolicy = firstString(
+                in: container,
+                keys: ["approval_policy", "approvalPolicy", "_approval_policy"]
+            )
+            guard approvalPolicy != "never" else { continue }
+
+            if firstString(
+                in: container,
+                keys: [
+                    "approvals_reviewer",
+                    "approvalsReviewer",
+                    "approval_reviewer",
+                    "approvalReviewer",
+                    "_approvals_reviewer",
+                    "_codex_approvals_reviewer",
+                ]
+            ) == "auto_review" {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func codexAutoReviewEnabledFromTranscript(event: HookEvent, fm: FileManager) -> Bool {
+        for path in codexTranscriptCandidatePaths(event: event, fm: fm) {
+            if codexTranscriptIndicatesAutoReview(path: path, fm: fm) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func codexTranscriptCandidatePaths(event: HookEvent, fm: FileManager) -> [String] {
+        var candidates: [String] = []
+        let raw = event.rawJSON
+
+        if let transcriptPath = firstString(
+            in: raw,
+            keys: ["transcript_path", "transcriptPath", "_codex_transcript_path"]
+        ), fm.fileExists(atPath: transcriptPath) {
+            candidates.append(transcriptPath)
+        }
+
+        let threadIds = [
+            firstString(in: raw, keys: ["_codex_thread_id", "codex_thread_id", "thread_id", "threadId"]),
+            event.sessionId,
+        ]
+        for threadId in threadIds.compactMap({ $0 }) {
+            if let path = codexSessionPath(forThreadId: threadId, raw: raw, fm: fm),
+               !candidates.contains(path) {
+                candidates.append(path)
+            }
+        }
+
+        return candidates
+    }
+
+    private static func codexSessionPath(forThreadId threadId: String, raw: [String: Any], fm: FileManager) -> String? {
+        let safeThreadId = threadId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard safeThreadId.count >= 8,
+              safeThreadId.range(of: #"^[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil
+        else { return nil }
+
+        let codexHome = firstString(in: raw, keys: ["_codex_home", "codex_home", "codexHome"])
+            ?? ConfigInstaller.codexHome()
+        let sessionsBase = "\(codexHome)/sessions"
+        guard fm.fileExists(atPath: sessionsBase) else { return nil }
+
+        let calendar = Calendar.current
+        let now = Date()
+        for daysBack in 0..<14 {
+            guard let date = calendar.date(byAdding: .day, value: -daysBack, to: now) else { continue }
+            let y = String(format: "%04d", calendar.component(.year, from: date))
+            let m = String(format: "%02d", calendar.component(.month, from: date))
+            let d = String(format: "%02d", calendar.component(.day, from: date))
+            let dir = "\(sessionsBase)/\(y)/\(m)/\(d)"
+            guard let files = try? fm.contentsOfDirectory(atPath: dir) else { continue }
+            for file in files.sorted(by: >) where file.hasSuffix(".jsonl") && file.contains(safeThreadId) {
+                return "\(dir)/\(file)"
+            }
+        }
+        return nil
+    }
+
+    private static func codexTranscriptIndicatesAutoReview(path: String, fm: FileManager) -> Bool {
+        guard fm.fileExists(atPath: path),
+              let text = readFileProbe(path: path, maxBytes: 16_777_216) else { return false }
+
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
+            guard let data = String(line).data(using: .utf8),
+                  let item = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let payload = item["payload"] as? [String: Any] else { continue }
+
+            if item["type"] as? String == "turn_context",
+               firstString(in: payload, keys: ["model"]) == "codex-auto-review" {
+                return true
+            }
+
+            guard item["type"] as? String == "response_item",
+                  payload["type"] as? String == "message",
+                  payload["role"] as? String == "developer" else { continue }
+
+            if developerPayloadMentionsCodexAutoReview(payload) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func developerPayloadMentionsCodexAutoReview(_ payload: [String: Any]) -> Bool {
+        let text = messageText(from: payload).lowercased()
+        return text.contains("approvals_reviewer") && text.contains("auto_review")
+    }
+
+    private static func messageText(from payload: [String: Any]) -> String {
+        if let text = payload["content"] as? String { return text }
+        guard let parts = payload["content"] as? [[String: Any]] else { return "" }
+        return parts.compactMap { $0["text"] as? String }.joined(separator: "\n")
+    }
+
+    private static func readFileProbe(path: String, maxBytes: UInt64) -> String? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+
+        do {
+            let size = try handle.seekToEnd()
+            if size <= maxBytes {
+                try handle.seek(toOffset: 0)
+                return String(data: handle.readDataToEndOfFile(), encoding: .utf8)
+            }
+
+            let half = maxBytes / 2
+            try handle.seek(toOffset: 0)
+            let head = handle.readData(ofLength: Int(half))
+
+            try handle.seek(toOffset: size - half)
+            let tail = handle.readDataToEndOfFile()
+
+            guard let headText = String(data: head, encoding: .utf8),
+                  var tailText = String(data: tail, encoding: .utf8) else { return nil }
+            if let firstNewline = tailText.firstIndex(of: "\n") {
+                tailText = String(tailText[tailText.index(after: firstNewline)...])
+            }
+            return headText + "\n" + tailText
+        } catch {
+            return nil
+        }
+    }
+
+    private static func firstString(in raw: [String: Any], keys: [String]) -> String? {
+        for key in keys {
+            if let value = raw[key] as? String {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { return trimmed }
+            }
+        }
+        return nil
+    }
+
     private static func disabledModeResponse(for event: HookEvent) -> Data {
         switch routeKind(for: event) {
         case .permission:
@@ -346,6 +535,15 @@ class HookServer {
         switch Self.routeKind(for: event) {
         case .permission:
             let sessionId = event.sessionId ?? "default"
+
+            // Codex's built-in auto-review replaces the manual sandbox approval
+            // prompt with its own reviewer. Do not convert that into a Bough
+            // human approval; return no decision so Codex can continue its
+            // native approval path.
+            if Self.shouldDeferCodexPermissionToAutoReview(event) {
+                sendResponse(connection: connection, data: Data("{}".utf8))
+                return
+            }
 
             // Auto-approve safe internal tools without showing UI
             if let toolName = event.toolName, Self.autoApproveTools.contains(toolName) {

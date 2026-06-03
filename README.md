@@ -4,6 +4,8 @@
 
 # Bough
 
+[Simplified Chinese](README.zh-CN.md)
+
 Bough is a macOS notch utility that keeps AI coding agents, usage, music, lyrics, and AirDrop state visible at the top of your screen.
 
 ![Bough notch panel demo](Assets/README/panel-session-music-airdrop.png)
@@ -43,7 +45,7 @@ Bough is a macOS notch utility that keeps AI coding agents, usage, music, lyrics
 
 ## Install
 
-The current public prerelease is `v1.0.0-rc.1`.
+The current stable release is `v1.0.0`.
 
 1. Open [GitHub Releases](https://github.com/DGPisces/bough/releases).
 2. Download the latest `Bough.dmg`.
@@ -52,7 +54,7 @@ The current public prerelease is `v1.0.0-rc.1`.
 
 ## Automatic Updates
 
-Bough uses the public repository stable channel for automatic updates. `v1.0.0-rc.1` is a prerelease; prerelease builds may require manual updates from GitHub Releases.
+Bough uses the public repository stable channel for automatic updates. Stable builds check the public update feed for signed in-app updates.
 
 ## Build From Source
 
