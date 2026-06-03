@@ -65,7 +65,7 @@ final class DocsCreditsAssetAuditTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(screenshot.height, 600)
         XCTAssertTrue(readme.contains("![Bough notch panel demo](Assets/README/panel-session-music-airdrop.png)"))
         XCTAssertTrue(readmeZH.contains("![Bough 刘海面板演示](Assets/README/panel-session-music-airdrop.png)"))
-        XCTAssertTrue(readme.contains("[Simplified Chinese](README.zh-CN.md)"))
+        XCTAssertTrue(readme.contains("[简体中文](README.zh-CN.md)"))
         XCTAssertTrue(readmeZH.contains("[English](README.md)"))
         XCTAssertTrue(readme.contains("<summary>Supported tools</summary>"))
         XCTAssertTrue(readmeZH.contains("<summary>支持的工具</summary>"))
@@ -123,6 +123,10 @@ final class DocsCreditsAssetAuditTests: XCTestCase {
 
         XCTAssertTrue(changelog.contains("## [v1.0.0] - 2026-06-03"))
         XCTAssertTrue(changelog.contains("## [v1.0.0-rc.1] - 2026-06-02"))
+        XCTAssertTrue(changelog.releaseSection("v1.0.0")?.contains("### English") == true)
+        XCTAssertTrue(changelog.releaseSection("v1.0.0")?.contains("### 简体中文") == true)
+        XCTAssertTrue(changelog.releaseSection("v1.0.0-rc.1")?.contains("### English") == true)
+        XCTAssertTrue(changelog.releaseSection("v1.0.0-rc.1")?.contains("### 简体中文") == true)
         XCTAssertFalse(changelog.contains(["0", "1", "0"].joined(separator: ".")))
     }
 
@@ -241,5 +245,20 @@ final class DocsCreditsAssetAuditTests: XCTestCase {
             context?.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
         }
         return bytes
+    }
+}
+
+private extension String {
+    func releaseSection(_ version: String) -> String? {
+        guard let start = range(of: "## [\(version)]")?.upperBound else {
+            return nil
+        }
+
+        let rest = self[start...]
+        if let end = rest.range(of: "\n## [")?.lowerBound {
+            return String(rest[..<end])
+        }
+
+        return String(rest)
     }
 }
