@@ -77,8 +77,13 @@ if [[ "${BASH_REMATCH[1]}" != "$RELEASE_TAG" ]]; then
 fi
 DOWNLOAD_URL="$BOUGH_DMG_DOWNLOAD_URL"
 
-echo "==> Signing $DMG_PATH with Sparkle EdDSA key from Keychain"
-SIGN_OUTPUT="$("$SIGN_UPDATE" "$DMG_PATH")"
+if [[ -n "${SPARKLE_EDDSA_PRIVATE_KEY:-}" ]]; then
+    echo "==> Signing $DMG_PATH with Sparkle EdDSA key from environment"
+    SIGN_OUTPUT="$(printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | "$SIGN_UPDATE" --ed-key-file - "$DMG_PATH")"
+else
+    echo "==> Signing $DMG_PATH with Sparkle EdDSA key from Keychain"
+    SIGN_OUTPUT="$("$SIGN_UPDATE" "$DMG_PATH")"
+fi
 ED_SIG="$(printf '%s' "$SIGN_OUTPUT" | /usr/bin/perl -ne 'print $1 if /sparkle:edSignature="([^"]+)"/')"
 if [[ -z "$ED_SIG" ]]; then
     echo "ERROR: could not parse EdDSA signature from sign_update output:" >&2

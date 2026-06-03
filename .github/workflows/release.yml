@@ -104,6 +104,8 @@ jobs:
 
       - name: Prepare stable appcast
         if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
         run: |
           Tools/Release/release-flow.sh update-appcast \
             --tag "$BOUGH_RELEASE_TAG" \

@@ -46,6 +46,7 @@ final class PublicGitHubGovernanceTests: XCTestCase {
 
     func testReleaseWorkflowIsTagOnlyAndEnvironmentGated() throws {
         let release = try repoText(".github/workflows/release.yml")
+        let updateAppcast = try repoText("Tools/Release/update-appcast.sh")
 
         XCTAssertTrue(release.contains("name: release"))
         XCTAssertTrue(release.contains("tags:"))
@@ -57,6 +58,9 @@ final class PublicGitHubGovernanceTests: XCTestCase {
         XCTAssertTrue(release.contains("security import \"$CERTIFICATE_PATH\""))
         XCTAssertTrue(release.contains("xcrun notarytool store-credentials"))
         XCTAssertTrue(release.contains("SPARKLE_EDDSA_PRIVATE_KEY"))
+        XCTAssertTrue(release.contains("SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}"))
+        XCTAssertTrue(updateAppcast.contains("SPARKLE_EDDSA_PRIVATE_KEY"))
+        XCTAssertTrue(updateAppcast.contains("--ed-key-file -"))
         XCTAssertTrue(release.contains("BUILD_ARCH=universal"))
         XCTAssertTrue(release.contains("--repo DGPisces/bough"))
         XCTAssertTrue(release.contains(#"gh release edit "${release_args[@]}""#))
