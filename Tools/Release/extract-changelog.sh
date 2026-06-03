@@ -32,9 +32,10 @@ if ! grep -q "## \[$version\]" "$changelog_path"; then
     exit 1
 fi
 
-# Extract content between "## [$version]" and the next "## [" header
-# Using awk to find the version header and extract until the next header
-awk -v version="$version" '
+# Extract content between "## [$version]" and the next "## [" header.
+# Release notes are published directly from this output, so every release entry
+# must carry both language sections.
+notes="$(awk -v version="$version" '
     BEGIN { found = 0; in_section = 0 }
 
     # Check if this is the version header we are looking for
@@ -52,4 +53,16 @@ awk -v version="$version" '
 
     # If we found our section, print lines until the next header
     in_section { print }
-' "$changelog_path"
+' "$changelog_path")"
+
+if ! printf '%s\n' "$notes" | grep -q '^### English$'; then
+    echo "Error: Version $version release notes must include a ### English section" >&2
+    exit 1
+fi
+
+if ! printf '%s\n' "$notes" | grep -q '^### 简体中文$'; then
+    echo "Error: Version $version release notes must include a ### 简体中文 section" >&2
+    exit 1
+fi
+
+printf '%s\n' "$notes"

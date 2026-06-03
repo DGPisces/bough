@@ -4,7 +4,7 @@
 
 # Bough
 
-[Simplified Chinese](README.zh-CN.md)
+[简体中文](README.zh-CN.md)
 
 Bough is a macOS notch utility that keeps AI coding agents, usage, music, lyrics, and AirDrop state visible at the top of your screen.
 

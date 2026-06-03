@@ -189,6 +189,33 @@ final class ReleaseFlowScriptTests: XCTestCase {
         XCTAssertFalse(curlLog.contains("-H"))
     }
 
+    func testExtractChangelogRequiresBilingualReleaseNotes() throws {
+        let result = try Self.runExtractChangelog(["v1.0.0"])
+
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("### English"))
+        XCTAssertTrue(result.stdout.contains("### 简体中文"))
+    }
+
+    func testExtractChangelogRejectsSingleLanguageReleaseNotes() throws {
+        let changelog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BoughSingleLanguageChangelog-\(UUID().uuidString).md")
+        try """
+        # Changelog
+
+        ## [v9.9.9] - 2026-06-03
+
+        ### English
+
+        - Only English release notes.
+        """.write(to: changelog, atomically: true, encoding: .utf8)
+
+        let result = try Self.runExtractChangelog(["v9.9.9", changelog.path])
+
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stderr.contains("### 简体中文"))
+    }
+
     private struct RunResult {
         let exitCode: Int32
         let stdout: String
@@ -212,6 +239,26 @@ final class ReleaseFlowScriptTests: XCTestCase {
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = [repoRoot.appendingPathComponent("Tools/Release/release-flow.sh").path] + args
         process.environment = environment
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        return RunResult(
+            exitCode: process.terminationStatus,
+            stdout: String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
+            stderr: String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        )
+    }
+
+    private static func runExtractChangelog(_ args: [String]) throws -> RunResult {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [repoRoot.appendingPathComponent("Tools/Release/extract-changelog.sh").path] + args
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()

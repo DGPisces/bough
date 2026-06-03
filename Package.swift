@@ -8,7 +8,7 @@ let package = Package(
         // Sparkle — auto-update framework. Pinned to 2.6+ for stable
         // SPUStandardUpdaterController + ed25519 signature verification.
         .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.6.0"),
-        .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
+        .package(url: "https://github.com/jpsim/Yams.git", from: "6.2.2"),
         // TOMLKit — TOML 1.0 round-trip parser used only by the Bough executable
         // for [hooks.*] cleanup in ConfigInstaller (D-01, D-04). Wraps
         // marzer/tomlplusplus; MIT-licensed. Pinned at latest stable floor 0.6.0
