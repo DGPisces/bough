@@ -7,5 +7,18 @@
     <link>https://raw.githubusercontent.com/DGPisces/bough/appcast/appcast.xml</link>
     <description>Stable Bough updates</description>
     <language>en</language>
+    <item>
+      <title>Version 1.0.0</title>
+      <link>https://github.com/DGPisces/bough/releases/tag/v1.0.0</link>
+      <sparkle:version>1</sparkle:version>
+      <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 03 Jun 2026 23:13:24 +0000</pubDate>
+      <enclosure
+        url="https://github.com/DGPisces/bough/releases/download/v1.0.0/Bough-v1.0.0.dmg"
+        sparkle:edSignature="Gji/V8CwNWykUPt3lAZvr7zUT9qjoMnKeCLiLR9QJqkSOvmHlUfbw6Jbta2/2F9gW43TaXKo6vM+ObgzZ13GBw=="
+        length="13620057"
+        type="application/octet-stream" />
+    </item>
   </channel>
 </rss>
