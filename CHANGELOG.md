@@ -2,6 +2,26 @@
 
 All notable changes to Bough are documented here.
 
+## [v1.0.3] - 2026-06-04
+
+### English
+
+Release rebuild hotfix for the public Settings appearance.
+
+- Rebuilt release artifacts with the macOS 26 SDK while keeping the minimum runtime at macOS 14.0.
+- Moved release and packaged smoke workflows to macOS 26 runners so signed public DMGs match the Settings appearance verified before release.
+- Added release gates that reject DMGs without the AppKit Settings entry or with a macOS SDK older than 26.0.
+- Added a post-publish GitHub asset verification step that downloads the published DMG and re-runs the release verification gates.
+
+### 简体中文
+
+公开版设置界面外观的重新构建 hotfix。
+
+- 使用 macOS 26 SDK 重新构建 release artifact，同时保持最低运行系统为 macOS 14.0。
+- 将 release 和 packaged smoke workflow 移到 macOS 26 runner，确保正式签名 DMG 与发布前验证的设置界面外观一致。
+- 新增 release gate，拒绝不使用 AppKit 设置入口或 macOS SDK 低于 26.0 的 DMG。
+- 新增发布后 GitHub asset 验证步骤：下载已发布 DMG，并重新运行 release verification gates。
+
 ## [v1.0.2] - 2026-06-04
 
 ### English
