@@ -2,6 +2,24 @@
 
 All notable changes to Bough are documented here.
 
+## [v1.0.2] - 2026-06-04
+
+### English
+
+Settings hotfix for the signed public release.
+
+- Removed the SwiftUI Settings scene that could surface a second, incorrectly laid-out Settings window in the signed release app.
+- Moved app startup to an AppKit entry point so the app menu, Command-comma shortcut, and status menu all route to the same `SettingsWindowController` window.
+- Verified the packaged app path with an isolated GUI smoke: the app menu and Command-comma each opened a single `Bough Settings` window at `660x540`.
+
+### 简体中文
+
+正式签名发布包的设置界面 hotfix。
+
+- 移除 SwiftUI Settings scene，避免签名 release app 打开第二个排版错误的设置窗口。
+- 将 app 启动入口迁移到 AppKit，让 app menu、Command-comma 快捷键和状态栏菜单都进入同一个 `SettingsWindowController` 窗口。
+- 已用隔离 GUI smoke 验证打包 app 路径：app menu 和 Command-comma 都只打开一个 `660x540` 的 `Bough Settings` 窗口。
+
 ## [v1.0.1] - 2026-06-04
 
 ### English

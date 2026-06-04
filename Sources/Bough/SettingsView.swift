@@ -2395,9 +2395,9 @@ private struct AboutPage: View {
         // Regression guard: wrap the About page in a ScrollView so
         // users on shorter Settings windows can still reach the Automatic
         // Updates section below. The outer ScrollView coexists with the
-        // .windowResizability(.contentSize) on the Settings scene in
-        // BoughApp.swift — together they let the window grow when there is
-        // screen room, and scroll when there is not.
+        // AppKit window sizing in SettingsWindowController.swift: the window
+        // can grow when there is screen room, and this page scrolls when there
+        // is not.
         ScrollView {
             VStack(spacing: 24) {
                 BoughMascotView(frameSize: 100)

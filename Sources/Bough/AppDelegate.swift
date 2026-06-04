@@ -28,6 +28,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let shouldAutoOpenWelcomeGuide = WelcomeGuideSettings.shouldAutoOpenOnLaunch()
 
+        installMainMenu()
         ProcessInfo.processInfo.disableAutomaticTermination("Bough must stay running")
         ProcessInfo.processInfo.disableSuddenTermination()
         // Pre-set app icon so Dock/menu bar use the packaged bundle icon.
@@ -114,6 +115,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+        let appMenuItem = NSMenuItem()
+        let appMenu = NSMenu()
+
+        let settingsItem = NSMenuItem(
+            title: L10n.shared["settings_ellipsis"],
+            action: #selector(openSettingsFromMainMenu),
+            keyEquivalent: ","
+        )
+        settingsItem.keyEquivalentModifierMask = [.command]
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
+
+        appMenu.addItem(.separator())
+
+        let quitItem = NSMenuItem(
+            title: L10n.shared["quit"],
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+        quitItem.keyEquivalentModifierMask = [.command]
+        quitItem.target = NSApp
+        appMenu.addItem(quitItem)
+
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+        NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func openSettingsFromMainMenu() {
+        SettingsWindowController.shared.show()
     }
 
     private func scheduleWelcomeGuideAutoOpenIfNeeded(_ shouldAutoOpen: Bool) {
