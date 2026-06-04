@@ -30,6 +30,8 @@ Common options:
   --appcast PATH
   --version X.Y.Z
   --build N
+  --min-macos X.Y
+  --min-sdk X.Y
   --attempts N
   --sleep SECONDS
   --repo OWNER/REPO
@@ -214,6 +216,141 @@ verify_stable_appcast_download_url() {
         || die "stable appcast enclosure URL mismatch: expected $expected got ${actual:-<missing>}"
 }
 
+version_ge() {
+    /usr/bin/awk -v actual="$1" -v required="$2" '
+      BEGIN {
+        split(actual, a, ".")
+        split(required, r, ".")
+        for (i = 1; i <= 3; i++) {
+          av = (a[i] == "" ? 0 : a[i]) + 0
+          rv = (r[i] == "" ? 0 : r[i]) + 0
+          if (av > rv) exit 0
+          if (av < rv) exit 1
+        }
+        exit 0
+      }
+    '
+}
+
+assert_settings_entry_in_dmg() {
+    local dmg="$1"
+    [[ -f "$dmg" ]] || die "DMG not found: $dmg"
+
+    local mount_dir
+    mount_dir="$(mktemp -d)"
+    local attached="0"
+    local error=""
+
+    if ! hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_dir" >/dev/null; then
+        rmdir "$mount_dir" 2>/dev/null || true
+        die "could not mount DMG for Settings entry verification: $dmg"
+    fi
+    attached="1"
+
+    local app_dir="$mount_dir/Bough.app"
+    if [[ ! -d "$app_dir" ]]; then
+        app_dir="$(find "$mount_dir" -maxdepth 2 -name 'Bough.app' -type d -print -quit)"
+    fi
+
+    if [[ -z "$app_dir" || ! -d "$app_dir" ]]; then
+        error="mounted DMG does not contain Bough.app"
+    else
+        local executable binary legacy_symbols
+        executable="$(plutil -extract CFBundleExecutable raw "$app_dir/Contents/Info.plist" 2>/dev/null || true)"
+        if [[ "$executable" != "Bough" ]]; then
+            error="Bough.app CFBundleExecutable mismatch: expected Bough got ${executable:-<missing>}"
+        else
+            binary="$app_dir/Contents/MacOS/$executable"
+            if [[ ! -x "$binary" ]]; then
+                error="Bough executable missing or not executable: $binary"
+            else
+                legacy_symbols="$(/usr/bin/strings "$binary" \
+                    | /usr/bin/grep -E 'BoughApp|SettingsSceneOpener|OpenSettingsAction|NSApplicationDelegateAdaptor|CommandGroup\\(replacing: \\.appSettings\\)' \
+                    || true)"
+                if [[ -n "$legacy_symbols" ]]; then
+                    error="release app still contains legacy SwiftUI Settings entry symbols"
+                fi
+            fi
+        fi
+    fi
+
+    if [[ "$attached" == "1" ]]; then
+        hdiutil detach "$mount_dir" -quiet || error="${error:-could not detach Settings entry verification mount: $mount_dir}"
+    fi
+    rmdir "$mount_dir" 2>/dev/null || true
+
+    [[ -z "$error" ]] || die "$error"
+    echo "Settings entry artifact OK: AppKit settings window entry only"
+}
+
+assert_macos_sdk_in_dmg() {
+    local dmg="$1"
+    local required_minos="${2:-14.0}"
+    local required_sdk="${3:-26.0}"
+    [[ -f "$dmg" ]] || die "DMG not found: $dmg"
+
+    local mount_dir
+    mount_dir="$(mktemp -d)"
+    local attached="0"
+    local error=""
+
+    if ! hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_dir" >/dev/null; then
+        rmdir "$mount_dir" 2>/dev/null || true
+        die "could not mount DMG for SDK verification: $dmg"
+    fi
+    attached="1"
+
+    local app_dir="$mount_dir/Bough.app"
+    if [[ ! -d "$app_dir" ]]; then
+        app_dir="$(find "$mount_dir" -maxdepth 2 -name 'Bough.app' -type d -print -quit)"
+    fi
+
+    if [[ -z "$app_dir" || ! -d "$app_dir" ]]; then
+        error="mounted DMG does not contain Bough.app"
+    else
+        local executable binary build_versions
+        executable="$(plutil -extract CFBundleExecutable raw "$app_dir/Contents/Info.plist" 2>/dev/null || true)"
+        binary="$app_dir/Contents/MacOS/$executable"
+        if [[ "$executable" != "Bough" || ! -x "$binary" ]]; then
+            error="Bough executable missing or not executable"
+        else
+            build_versions="$(otool -l "$binary" | /usr/bin/awk '
+              $1 == "cmd" && $2 == "LC_BUILD_VERSION" { inblock = 1; minos = ""; sdk = ""; next }
+              inblock && $1 == "minos" { minos = $2; next }
+              inblock && $1 == "sdk" {
+                sdk = $2
+                if (minos != "" && sdk != "") print minos " " sdk
+                inblock = 0
+              }
+            ')"
+            if [[ -z "$build_versions" ]]; then
+                error="Bough executable has no LC_BUILD_VERSION records"
+            else
+                local minos sdk
+                while read -r minos sdk; do
+                    [[ -n "$minos" && -n "$sdk" ]] || continue
+                    if [[ "$minos" != "$required_minos" ]]; then
+                        error="Bough executable minos mismatch: expected $required_minos got $minos"
+                        break
+                    fi
+                    if ! version_ge "$sdk" "$required_sdk"; then
+                        error="Bough executable SDK too old: expected >= $required_sdk got $sdk"
+                        break
+                    fi
+                done <<< "$build_versions"
+            fi
+        fi
+    fi
+
+    if [[ "$attached" == "1" ]]; then
+        hdiutil detach "$mount_dir" -quiet || error="${error:-could not detach SDK verification mount: $mount_dir}"
+    fi
+    rmdir "$mount_dir" 2>/dev/null || true
+
+    [[ -z "$error" ]] || die "$error"
+    echo "macOS SDK artifact OK: minos=$required_minos sdk>=$required_sdk"
+}
+
 parse_args() {
     TAG=""
     LABEL=""
@@ -226,6 +363,8 @@ parse_args() {
     APPCAST_PATH="${BOUGH_APPCAST_PATH:-}"
     VERSION=""
     BUILD=""
+    MIN_MACOS="${BOUGH_RELEASE_MIN_MACOS:-14.0}"
+    MIN_SDK="${BOUGH_RELEASE_MIN_SDK:-26.0}"
     REPO="DGPisces/bough"
     DRY_RUN="0"
     REPLACE="0"
@@ -248,6 +387,8 @@ parse_args() {
             --appcast) APPCAST_PATH="${2:?--appcast requires a path}"; shift 2 ;;
             --version) VERSION="${2:?--version requires a value}"; shift 2 ;;
             --build) BUILD="${2:?--build requires a value}"; shift 2 ;;
+            --min-macos) MIN_MACOS="${2:?--min-macos requires a value}"; shift 2 ;;
+            --min-sdk) MIN_SDK="${2:?--min-sdk requires a value}"; shift 2 ;;
             --repo) REPO="${2:?--repo requires OWNER/REPO}"; shift 2 ;;
             --attempts) ATTEMPTS="${2:?--attempts requires a value}"; shift 2 ;;
             --sleep) SLEEP_SECONDS="${2:?--sleep requires a value}"; shift 2 ;;
@@ -432,6 +573,8 @@ cmd_verify() {
             print_command xmllint --noout Tools/Release/appcast.xml
             print_command Tools/Release/release-flow.sh _assert-stable-appcast-url --download-url "$DOWNLOAD_URL"
         fi
+        print_command Tools/Release/release-flow.sh _assert-settings-entry --dmg "$DMG"
+        print_command Tools/Release/release-flow.sh _assert-macos-sdk --dmg "$DMG" --min-macos "$MIN_MACOS" --min-sdk "$MIN_SDK"
         print_command hdiutil verify "$DMG"
         print_command xcrun stapler validate "$DMG"
         print_command spctl --assess --type open --context context:primary-signature -v "$DMG"
@@ -444,6 +587,8 @@ cmd_verify() {
         xmllint --noout "$REPO_ROOT/Tools/Release/appcast.xml"
         verify_stable_appcast_download_url "$DOWNLOAD_URL"
     fi
+    assert_settings_entry_in_dmg "$DMG"
+    assert_macos_sdk_in_dmg "$DMG" "$MIN_MACOS" "$MIN_SDK"
     hdiutil verify "$DMG"
     xcrun stapler validate "$DMG"
     spctl --assess --type open --context context:primary-signature -v "$DMG"
@@ -561,6 +706,18 @@ cmd_assert_stable_appcast_url() {
     verify_stable_appcast_download_url "$DOWNLOAD_URL"
 }
 
+cmd_assert_settings_entry() {
+    parse_args "$@"
+    require_value "--dmg" "$DMG"
+    assert_settings_entry_in_dmg "$DMG"
+}
+
+cmd_assert_macos_sdk() {
+    parse_args "$@"
+    require_value "--dmg" "$DMG"
+    assert_macos_sdk_in_dmg "$DMG" "$MIN_MACOS" "$MIN_SDK"
+}
+
 COMMAND="${1:-}"
 if [[ -z "$COMMAND" ]]; then
     usage
@@ -578,6 +735,8 @@ case "$COMMAND" in
     verify) cmd_verify "$@" ;;
     verify-remote) cmd_verify_remote "$@" ;;
     _assert-stable-appcast-url) cmd_assert_stable_appcast_url "$@" ;;
+    _assert-settings-entry) cmd_assert_settings_entry "$@" ;;
+    _assert-macos-sdk) cmd_assert_macos_sdk "$@" ;;
     -h|--help) usage ;;
     *) die "unknown command '$COMMAND'" ;;
 esac

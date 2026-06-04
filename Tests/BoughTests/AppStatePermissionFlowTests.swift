@@ -11,18 +11,8 @@ final class AppStatePermissionFlowTests: XCTestCase {
         let eventA = try makePermissionRequestEvent(sessionId: "s1", toolName: "Bash")
         let eventB = try makePermissionRequestEvent(sessionId: "s2", toolName: "Read")
 
-        let responseTaskA = Task<Data, Never> {
-            await withCheckedContinuation { continuation in
-                appState.handlePermissionRequest(eventA, continuation: continuation)
-            }
-        }
-        let responseTaskB = Task<Data, Never> {
-            await withCheckedContinuation { continuation in
-                appState.handlePermissionRequest(eventB, continuation: continuation)
-            }
-        }
-
-        await Task.yield()
+        let responseTaskA = await startPermissionRequest(eventA, in: appState)
+        let responseTaskB = await startPermissionRequest(eventB, in: appState)
 
         XCTAssertEqual(appState.permissionQueue.count, 2)
         XCTAssertEqual(appState.surface, .approvalCard(sessionId: "s1"))
@@ -54,13 +44,7 @@ final class AppStatePermissionFlowTests: XCTestCase {
         let sessionId = "s-single"
         let event = try makePermissionRequestEvent(sessionId: sessionId, toolName: "Bash")
 
-        let responseTask = Task<Data, Never> {
-            await withCheckedContinuation { continuation in
-                appState.handlePermissionRequest(event, continuation: continuation)
-            }
-        }
-
-        await Task.yield()
+        let responseTask = await startPermissionRequest(event, in: appState)
 
         XCTAssertEqual(appState.surface, .approvalCard(sessionId: sessionId))
         XCTAssertEqual(appState.permissionQueue.count, 1)
@@ -84,13 +68,7 @@ final class AppStatePermissionFlowTests: XCTestCase {
         let sessionId = "s-reappear"
 
         let firstEvent = try makePermissionRequestEvent(sessionId: sessionId, toolName: "Edit")
-        let firstResponseTask = Task<Data, Never> {
-            await withCheckedContinuation { continuation in
-                appState.handlePermissionRequest(firstEvent, continuation: continuation)
-            }
-        }
-
-        await Task.yield()
+        let firstResponseTask = await startPermissionRequest(firstEvent, in: appState)
         appState.dismissPermissionPrompt()
         XCTAssertEqual(appState.surface, .collapsed)
         XCTAssertEqual(appState.permissionQueue.count, 1)
@@ -101,13 +79,7 @@ final class AppStatePermissionFlowTests: XCTestCase {
         XCTAssertEqual(appState.permissionQueue.count, 0)
 
         let secondEvent = try makePermissionRequestEvent(sessionId: sessionId, toolName: "Write")
-        let secondResponseTask = Task<Data, Never> {
-            await withCheckedContinuation { continuation in
-                appState.handlePermissionRequest(secondEvent, continuation: continuation)
-            }
-        }
-
-        await Task.yield()
+        let secondResponseTask = await startPermissionRequest(secondEvent, in: appState)
 
         XCTAssertEqual(appState.surface, .approvalCard(sessionId: sessionId))
         XCTAssertEqual(appState.permissionQueue.count, 1)
@@ -145,6 +117,19 @@ final class AppStatePermissionFlowTests: XCTestCase {
         let hookSpecificOutput = try XCTUnwrap(json["hookSpecificOutput"] as? [String: Any])
         let decision = try XCTUnwrap(hookSpecificOutput["decision"] as? [String: Any])
         return try XCTUnwrap(decision["behavior"] as? String)
+    }
+
+    private func startPermissionRequest(_ event: HookEvent, in appState: AppState) async -> Task<Data, Never> {
+        let exp = expectation(description: "permission request should be enqueued")
+        let task = Task<Data, Never> { @MainActor in
+            await withCheckedContinuation { continuation in
+                appState.handlePermissionRequest(event, continuation: continuation)
+                exp.fulfill()
+            }
+        }
+
+        await fulfillment(of: [exp], timeout: 1.0)
+        return task
     }
 
     private func assertTaskNotResolved(_ task: Task<Data, Never>, timeout: TimeInterval = 0.05) async {

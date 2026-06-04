@@ -34,7 +34,7 @@ jobs:
 
   unsigned-packaging-smoke:
     name: ci / unsigned-packaging-smoke
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - name: Show Swift version
@@ -46,5 +46,9 @@ jobs:
           fi
       - name: Build unsigned arm64 DMG
         run: BUILD_ARCH=arm64 SKIP_SIGN=1 SKIP_NOTARIZE=1 Tools/Build/build-dmg.sh
+      - name: Packaging artifact guards
+        run: |
+          Tools/Release/release-flow.sh _assert-settings-entry --dmg .build/Bough.dmg
+          Tools/Release/release-flow.sh _assert-macos-sdk --dmg .build/Bough.dmg
       - name: Packaged usage monitor smoke
         run: Tools/Smoke/smoke-packaged-usage-monitor.sh
