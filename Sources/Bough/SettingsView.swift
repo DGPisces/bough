@@ -2441,9 +2441,16 @@ private struct AboutPage: View {
                     .frame(maxWidth: 360)
                     .scrollDisabled(true)
                 } else {
-                    updateSection
-                        .frame(maxWidth: 360)
-                        .multilineTextAlignment(.center)
+                    Form {
+                        Section(l10n["update_homebrew_managed_title"]) {
+                            homebrewUpdateSection
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .id(SettingsTargetID.aboutUpdates)
+                    }
+                    .formStyle(.grouped)
+                    .frame(maxWidth: 360)
+                    .scrollDisabled(true)
                 }
 
                 Button {
@@ -2472,6 +2479,31 @@ private struct AboutPage: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 24)
+        }
+    }
+
+    private var homebrewUpdateSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(l10n["update_homebrew_command"])
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(nil)
+                .textSelection(.enabled)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                )
+
+            aboutButton(l10n["update_copy_command"], icon: "doc.on.doc") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(l10n["update_homebrew_command"], forType: .string)
+            }
+            .id(SettingsTargetID.aboutUpdateCopyCommand)
+            .settingsControlHighlight(isHighlighted: highlightedTargetID == .aboutUpdateCopyCommand)
+            .accessibilityLabel(l10n["update_copy_command"])
         }
     }
 
@@ -2525,30 +2557,13 @@ private struct AboutPage: View {
                         .multilineTextAlignment(.center)
                 }
 
-                if updater.isHomebrewInstall {
-                    HStack(spacing: 8) {
-                        Text(l10n["update_homebrew_command"])
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .controlBackgroundColor)))
-                        aboutButton(l10n["update_copy_command"], icon: "doc.on.doc") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(l10n["update_homebrew_command"], forType: .string)
-                        }
-                        .id(SettingsTargetID.aboutUpdateCopyCommand)
-                        .settingsControlHighlight(isHighlighted: highlightedTargetID == .aboutUpdateCopyCommand)
-                    }
-                } else {
-                    // Sparkle owns the download + install alert; this button just
-                    // re-surfaces it if the user dismissed it earlier.
-                    aboutButton(l10n["update_now"], icon: "arrow.down.to.line") {
-                        updater.checkForUpdates()
-                    }
-                    .id(SettingsTargetID.aboutUpdateNow)
-                    .settingsControlHighlight(isHighlighted: highlightedTargetID == .aboutUpdateNow)
+                // Sparkle owns the download + install alert; this button just
+                // re-surfaces it if the user dismissed it earlier.
+                aboutButton(l10n["update_now"], icon: "arrow.down.to.line") {
+                    updater.checkForUpdates()
                 }
+                .id(SettingsTargetID.aboutUpdateNow)
+                .settingsControlHighlight(isHighlighted: highlightedTargetID == .aboutUpdateNow)
             }
 
         // Download progress and install state are owned by Sparkle's standard

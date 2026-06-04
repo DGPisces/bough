@@ -21,9 +21,9 @@ final class SparkleUpdaterConfigTests: XCTestCase {
     }
 
     func testStableVersionMetadata() throws {
-        XCTAssertEqual(try plistExtract("CFBundleShortVersionString"), "1.0.3")
-        XCTAssertEqual(try plistExtract("CFBundleVersion"), "4")
-        XCTAssertEqual(try plistExtract("BoughReleaseLabel"), "1.0.3")
+        XCTAssertEqual(try plistExtract("CFBundleShortVersionString"), "1.0.4")
+        XCTAssertEqual(try plistExtract("CFBundleVersion"), "5")
+        XCTAssertEqual(try plistExtract("BoughReleaseLabel"), "1.0.4")
     }
 
     func testSUPublicEDKeyIsRealKey() throws {
@@ -99,6 +99,65 @@ final class SparkleUpdaterConfigTests: XCTestCase {
             userInfo: [NSLocalizedDescriptionKey: "download failed"]
         )
         XCTAssertEqual(UpdateChecker.stateForAbortedUpdate(error: error), .failed("download failed"))
+    }
+
+    func testHomebrewCaskBundlePathsSkipSparkleStartup() {
+        let appleSiliconPath = "/opt/homebrew/Caskroom/bough/1.0.3/Bough.app"
+        let intelPath = "/usr/local/Caskroom/bough/1.0.3/Bough.app"
+        let symlinkedApplicationsPath = "/Applications/Bough.app"
+
+        XCTAssertTrue(UpdateChecker.isHomebrewInstall(bundlePath: appleSiliconPath))
+        XCTAssertTrue(UpdateChecker.isHomebrewInstall(bundlePath: intelPath))
+        XCTAssertTrue(UpdateChecker.isHomebrewInstall(
+            bundlePath: symlinkedApplicationsPath,
+            resolvedBundlePath: appleSiliconPath
+        ))
+
+        XCTAssertFalse(UpdateChecker.shouldStartSparkleForInstall(bundlePath: appleSiliconPath))
+        XCTAssertFalse(UpdateChecker.shouldStartSparkleForInstall(
+            bundlePath: symlinkedApplicationsPath,
+            resolvedBundlePath: appleSiliconPath
+        ))
+    }
+
+    func testHomebrewAppdirInstallDetectsCaskroomSymlinkForCurrentVersion() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BoughHomebrewDetection-\(UUID().uuidString)")
+        let appdir = root.appendingPathComponent("Applications")
+        let app = appdir.appendingPathComponent("Bough.app")
+        let caskVersion = root.appendingPathComponent("Caskroom/bough/1.0.4")
+        let caskApp = caskVersion.appendingPathComponent("Bough.app")
+
+        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: caskVersion, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: caskApp, withDestinationURL: app)
+
+        XCTAssertTrue(UpdateChecker.isHomebrewInstall(
+            bundlePath: app.path,
+            resolvedBundlePath: app.path,
+            bundleShortVersion: "1.0.4",
+            homebrewPrefixes: [root.path]
+        ))
+        XCTAssertFalse(UpdateChecker.shouldStartSparkleForInstall(
+            bundlePath: app.path,
+            resolvedBundlePath: app.path,
+            bundleShortVersion: "1.0.4",
+            homebrewPrefixes: [root.path]
+        ))
+        XCTAssertFalse(UpdateChecker.isHomebrewInstall(
+            bundlePath: app.path,
+            resolvedBundlePath: app.path,
+            bundleShortVersion: "1.0.5",
+            homebrewPrefixes: [root.path]
+        ))
+    }
+
+    func testNonHomebrewBundlePathsKeepSparkleStartupEnabled() {
+        XCTAssertFalse(UpdateChecker.isHomebrewInstall(bundlePath: "/Applications/Bough.app"))
+        XCTAssertFalse(UpdateChecker.isHomebrewInstall(bundlePath: "/Users/me/homebrew/Bough.app"))
+
+        XCTAssertTrue(UpdateChecker.shouldStartSparkleForInstall(bundlePath: "/Applications/Bough.app"))
+        XCTAssertTrue(UpdateChecker.shouldStartSparkleForInstall(bundlePath: "/Users/me/homebrew/Bough.app"))
     }
 
     #if DEBUG

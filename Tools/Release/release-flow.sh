@@ -15,6 +15,7 @@ Commands:
   update-appcast Update the stable public appcast through Tools/Release/update-appcast.sh.
   verify         Run release alignment and artifact verification gates.
   verify-remote  Wait until the remote public Sparkle feed and artifact are visible.
+  open-tap-pr    Open a manual-review PR updating DGPisces/homebrew-tap.
   assert-new-build
                  Fail if --build is not newer than the current stable appcast.
 
@@ -35,6 +36,9 @@ Common options:
   --attempts N
   --sleep SECONDS
   --repo OWNER/REPO
+  --tap-repo OWNER/REPO
+  --tap-branch BRANCH
+  --cask PATH
   --replace
   --dry-run
 EOF
@@ -110,6 +114,53 @@ validate_download_url_tag() {
 validate_public_repo() {
     [[ "$REPO" == "DGPisces/bough" ]] \
         || die "--repo must be DGPisces/bough for the public release flow"
+}
+
+validate_tap_repo() {
+    [[ "$TAP_REPO" == "DGPisces/homebrew-tap" ]] \
+        || die "--tap-repo must be DGPisces/homebrew-tap for the public tap flow"
+}
+
+validate_sha256() {
+    [[ "$1" =~ ^[A-Fa-f0-9]{64}$ ]] \
+        || die "--asset-sha256 must be a 64-character hex SHA-256"
+}
+
+normalize_sha256() {
+    printf '%s' "$1" | tr 'A-F' 'a-f'
+}
+
+validate_homebrew_cask_path() {
+    [[ "$1" == "Casks/bough.rb" ]] \
+        || die "--cask must be Casks/bough.rb for the public tap flow"
+}
+
+validate_homebrew_branch() {
+    [[ "$1" =~ ^[A-Za-z0-9._/-]+$ ]] \
+        || die "--tap-branch contains unsupported characters"
+    [[ "$1" != *..* && "$1" != .* && "$1" != */.* && "$1" != */ ]] \
+        || die "--tap-branch is not a safe branch name"
+    git check-ref-format "refs/heads/$1" >/dev/null 2>&1 \
+        || die "--tap-branch is not a valid git branch name"
+}
+
+validate_homebrew_release_inputs() {
+    require_value "--tag" "$TAG"
+    require_value "--version" "$VERSION"
+    require_value "--download-url" "$DOWNLOAD_URL"
+    require_value "--asset-sha256" "$ASSET_SHA256"
+    validate_tag "$TAG"
+    validate_stable_appcast_tag "$TAG"
+    validate_version "$VERSION"
+    [[ "$TAG" == "v${VERSION}" ]] \
+        || die "--tag must be v<version> for Homebrew cask updates"
+    validate_download_url_tag "$DOWNLOAD_URL" "$TAG"
+    validate_sha256 "$ASSET_SHA256"
+    ASSET_SHA256="$(normalize_sha256 "$ASSET_SHA256")"
+    validate_tap_repo
+    validate_homebrew_cask_path "$CASK_PATH"
+    TAP_BRANCH="${TAP_BRANCH:-bough-${TAG}}"
+    validate_homebrew_branch "$TAP_BRANCH"
 }
 
 print_command() {
@@ -366,6 +417,9 @@ parse_args() {
     MIN_MACOS="${BOUGH_RELEASE_MIN_MACOS:-14.0}"
     MIN_SDK="${BOUGH_RELEASE_MIN_SDK:-26.0}"
     REPO="DGPisces/bough"
+    TAP_REPO="DGPisces/homebrew-tap"
+    TAP_BRANCH=""
+    CASK_PATH="Casks/bough.rb"
     DRY_RUN="0"
     REPLACE="0"
     ATTEMPTS="${BOUGH_REMOTE_VERIFY_ATTEMPTS:-12}"
@@ -390,6 +444,9 @@ parse_args() {
             --min-macos) MIN_MACOS="${2:?--min-macos requires a value}"; shift 2 ;;
             --min-sdk) MIN_SDK="${2:?--min-sdk requires a value}"; shift 2 ;;
             --repo) REPO="${2:?--repo requires OWNER/REPO}"; shift 2 ;;
+            --tap-repo) TAP_REPO="${2:?--tap-repo requires OWNER/REPO}"; shift 2 ;;
+            --tap-branch) TAP_BRANCH="${2:?--tap-branch requires a branch name}"; shift 2 ;;
+            --cask) CASK_PATH="${2:?--cask requires a path}"; shift 2 ;;
             --attempts) ATTEMPTS="${2:?--attempts requires a value}"; shift 2 ;;
             --sleep) SLEEP_SECONDS="${2:?--sleep requires a value}"; shift 2 ;;
             --replace) REPLACE="1"; shift ;;
@@ -594,6 +651,161 @@ cmd_verify() {
     spctl --assess --type open --context context:primary-signature -v "$DMG"
 }
 
+homebrew_cask_url_for_compare() {
+    BOUGH_TAP_VERSION="$2" /usr/bin/perl -e '
+      my $url = shift;
+      $url =~ s/#\{version\}/$ENV{BOUGH_TAP_VERSION}/g;
+      print $url;
+    ' "$1"
+}
+
+update_homebrew_cask_file() {
+    local cask="$1"
+    local version="$2"
+    local sha256="$3"
+    local download_url="$4"
+
+    [[ -f "$cask" ]] || die "Homebrew cask not found: $cask"
+    BOUGH_TAP_VERSION="$version" \
+    BOUGH_TAP_SHA256="$sha256" \
+    BOUGH_TAP_DOWNLOAD_URL="$download_url" \
+        /usr/bin/perl -0pi -e '
+          my $version = $ENV{BOUGH_TAP_VERSION};
+          my $sha256 = $ENV{BOUGH_TAP_SHA256};
+          my $download_url = $ENV{BOUGH_TAP_DOWNLOAD_URL};
+
+          my $version_seen = s{(^\s*version\s+")[^"]+(")}{$1 . $version . $2}me;
+          die "version stanza missing\n" unless $version_seen;
+
+          my $sha_seen = s{(^\s*sha256\s+")[A-Fa-f0-9]+(")}{$1 . $sha256 . $2}me;
+          die "sha256 stanza missing\n" unless $sha_seen;
+
+          my $url_seen = s{(^\s*url\s+")([^"]+)(")}{
+            my $prefix = $1;
+            my $url = $2;
+            my $suffix = $3;
+            my $expanded = $url;
+            $expanded =~ s/#\{version\}/$version/g;
+            if ($expanded eq $download_url) {
+              $prefix . $url . $suffix
+            } else {
+              $prefix . $download_url . $suffix
+            }
+          }me;
+          die "url stanza missing\n" unless $url_seen;
+        ' "$cask"
+
+    local actual_version actual_sha actual_url expanded_url
+    actual_version="$(/usr/bin/perl -ne 'if (/^\s*version\s+"([^"]+)"/) { print $1; exit }' "$cask")"
+    actual_sha="$(/usr/bin/perl -ne 'if (/^\s*sha256\s+"([^"]+)"/) { print $1; exit }' "$cask")"
+    actual_url="$(/usr/bin/perl -ne 'if (/^\s*url\s+"([^"]+)"/) { print $1; exit }' "$cask")"
+    expanded_url="$(homebrew_cask_url_for_compare "$actual_url" "$version")"
+
+    [[ "$actual_version" == "$version" ]] \
+        || die "cask version mismatch: expected $version got ${actual_version:-<missing>}"
+    [[ "$actual_sha" == "$sha256" ]] \
+        || die "cask sha256 mismatch: expected $sha256 got ${actual_sha:-<missing>}"
+    [[ "$expanded_url" == "$download_url" ]] \
+        || die "cask URL mismatch: expected $download_url got ${expanded_url:-<missing>}"
+}
+
+tap_pr_body() {
+    cat <<EOF
+Updates Bough Homebrew Cask to ${TAG}.
+
+- Version: ${VERSION}
+- DMG: ${DOWNLOAD_URL}
+- SHA-256: ${ASSET_SHA256}
+
+Manual merge required.
+EOF
+}
+
+cmd_update_homebrew_cask() {
+    parse_args "$@"
+    require_value "--version" "$VERSION"
+    require_value "--asset-sha256" "$ASSET_SHA256"
+    require_value "--download-url" "$DOWNLOAD_URL"
+    validate_version "$VERSION"
+    validate_sha256 "$ASSET_SHA256"
+    ASSET_SHA256="$(normalize_sha256 "$ASSET_SHA256")"
+    validate_download_url_tag "$DOWNLOAD_URL" "v${VERSION}"
+
+    update_homebrew_cask_file "$CASK_PATH" "$VERSION" "$ASSET_SHA256" "$DOWNLOAD_URL"
+    echo "Homebrew cask updated:"
+    echo "  cask=$CASK_PATH"
+    echo "  version=$VERSION"
+    echo "  sha256=$ASSET_SHA256"
+    echo "  downloadURL=$DOWNLOAD_URL"
+}
+
+cmd_open_tap_pr() {
+    parse_args "$@"
+    validate_homebrew_release_inputs
+
+    local pr_title="Update Bough to ${TAG}"
+    local tap_dir cask_full_path existing_pr
+    if [[ "$DRY_RUN" == "1" ]]; then
+        echo "homebrew tap PR:"
+        echo "  tapRepo=$TAP_REPO"
+        echo "  branch=$TAP_BRANCH"
+        echo "  cask=$CASK_PATH"
+        echo "  version=$VERSION"
+        echo "  sha256=$ASSET_SHA256"
+        echo "  downloadURL=$DOWNLOAD_URL"
+        print_command gh repo clone "$TAP_REPO" "\$RUNNER_TEMP/bough-homebrew-tap" -- --depth 1
+        print_command git -C "\$RUNNER_TEMP/bough-homebrew-tap" switch -c "$TAP_BRANCH"
+        print_command Tools/Release/release-flow.sh _update-homebrew-cask --cask "\$RUNNER_TEMP/bough-homebrew-tap/$CASK_PATH" --version "$VERSION" --asset-sha256 "$ASSET_SHA256" --download-url "$DOWNLOAD_URL"
+        print_command git -C "\$RUNNER_TEMP/bough-homebrew-tap" add "$CASK_PATH"
+        print_command git -C "\$RUNNER_TEMP/bough-homebrew-tap" commit -m "$pr_title"
+        print_command git -C "\$RUNNER_TEMP/bough-homebrew-tap" push origin "HEAD:${TAP_BRANCH}"
+        print_command gh pr create --repo "$TAP_REPO" --base main --head "$TAP_BRANCH" --title "$pr_title" --body "$(tap_pr_body)"
+        return
+    fi
+
+    command -v gh >/dev/null 2>&1 || die "gh CLI is required to open the Homebrew tap PR"
+    command -v git >/dev/null 2>&1 || die "git is required to open the Homebrew tap PR"
+    [[ -n "${GH_TOKEN:-}" ]] \
+        || die "GH_TOKEN with contents and pull request write access to $TAP_REPO is required"
+
+    existing_pr="$(gh pr list \
+        --repo "$TAP_REPO" \
+        --head "$TAP_BRANCH" \
+        --state open \
+        --json url \
+        --jq '.[0].url // empty')"
+    if [[ -n "$existing_pr" ]]; then
+        echo "Homebrew tap PR already exists: $existing_pr"
+        return
+    fi
+
+    tap_dir="$(mktemp -d)"
+    trap 'rm -rf "$tap_dir"' EXIT
+
+    gh repo clone "$TAP_REPO" "$tap_dir" -- --depth 1
+    git -C "$tap_dir" switch -c "$TAP_BRANCH"
+    cask_full_path="$tap_dir/$CASK_PATH"
+    update_homebrew_cask_file "$cask_full_path" "$VERSION" "$ASSET_SHA256" "$DOWNLOAD_URL"
+
+    if git -C "$tap_dir" diff --quiet -- "$CASK_PATH"; then
+        echo "Homebrew cask already current for ${TAG}; no tap PR needed."
+        return
+    fi
+
+    git -C "$tap_dir" add "$CASK_PATH"
+    git -C "$tap_dir" \
+        -c user.name="github-actions[bot]" \
+        -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+        commit -m "$pr_title"
+    git -C "$tap_dir" push origin "HEAD:${TAP_BRANCH}"
+    gh pr create \
+        --repo "$TAP_REPO" \
+        --base main \
+        --head "$TAP_BRANCH" \
+        --title "$pr_title" \
+        --body "$(tap_pr_body)"
+}
+
 cmd_verify_remote() {
     parse_args "$@"
     require_value "--tag" "$TAG"
@@ -734,6 +946,8 @@ case "$COMMAND" in
     update-appcast) cmd_update_appcast "$@" ;;
     verify) cmd_verify "$@" ;;
     verify-remote) cmd_verify_remote "$@" ;;
+    open-tap-pr) cmd_open_tap_pr "$@" ;;
+    _update-homebrew-cask) cmd_update_homebrew_cask "$@" ;;
     _assert-stable-appcast-url) cmd_assert_stable_appcast_url "$@" ;;
     _assert-settings-entry) cmd_assert_settings_entry "$@" ;;
     _assert-macos-sdk) cmd_assert_macos_sdk "$@" ;;

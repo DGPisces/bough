@@ -68,10 +68,28 @@ final class PublicGitHubGovernanceTests: XCTestCase {
         XCTAssertTrue(release.contains(#"gh release edit "${release_args[@]}""#))
         XCTAssertTrue(release.contains(#"gh release upload "${upload_args[@]}""#))
         XCTAssertTrue(release.contains("(.browserDownloadUrl // .url)"))
+        XCTAssertTrue(release.contains("BOUGH_HOMEBREW_TAP_TOKEN"))
+        XCTAssertTrue(release.contains("Tools/Release/release-flow.sh open-tap-pr"))
+        XCTAssertFalse(release.contains("gh pr merge"))
         XCTAssertFalse(release.contains("self-hosted"))
         XCTAssertFalse(release.contains("DGPisces/\(Self.legacyRepoName)"))
         XCTAssertFalse(release.contains("BOUGH_RELEASE_BOT_TOKEN"))
         XCTAssertFalse(release.contains(Self.attributionTraceScriptName))
+    }
+
+    func testReadmesExposeHomebrewAndDmgAsPrimaryInstallPaths() throws {
+        let zh = try repoText("README.zh-CN.md")
+        let en = try repoText("README.md")
+
+        for readme in [zh, en] {
+            XCTAssertTrue(readme.contains("brew tap DGPisces/tap"))
+            XCTAssertTrue(readme.contains("brew install --cask bough"))
+            XCTAssertTrue(readme.contains("brew install --cask DGPisces/tap/bough"))
+            XCTAssertTrue(readme.contains("GitHub Releases"))
+            XCTAssertTrue(readme.contains("Bough.dmg"))
+            XCTAssertTrue(readme.contains("brew update"))
+            XCTAssertTrue(readme.contains("brew upgrade --cask bough"))
+        }
     }
 
     func testPublicGithubDirectoryHasNoTemplatesOrPrivateCI() throws {

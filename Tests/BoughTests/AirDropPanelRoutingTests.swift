@@ -103,8 +103,11 @@ final class AirDropPanelRoutingTests: XCTestCase {
         }
         XCTAssertEqual(returningTo, .sessionList)
 
-        try await Task.sleep(nanoseconds: 40_000_000)
+        let didReturn = try await waitUntil {
+            state.surface == .sessionList
+        }
 
+        XCTAssertTrue(didReturn)
         XCTAssertEqual(state.surface, .sessionList)
         XCTAssertEqual(state.airDropState, .idle)
     }
@@ -116,7 +119,7 @@ final class AirDropPanelRoutingTests: XCTestCase {
 
         state.beginAirDropPanelSelection()
 
-        try await Task.sleep(nanoseconds: 40_000_000)
+        try await Task.sleep(nanoseconds: 120_000_000)
 
         guard case .airDrop(let returningTo) = state.surface else {
             XCTFail("Manual AirDrop entry should stay foreground")
@@ -257,7 +260,7 @@ final class AirDropPanelRoutingTests: XCTestCase {
             AirDropPasteboardPayload(fileURLs: [file]),
             source: .drag
         )
-        try await Task.sleep(nanoseconds: 40_000_000)
+        try await Task.sleep(nanoseconds: 120_000_000)
 
         guard case .airDrop(let returningTo) = state.surface else {
             XCTFail("AirDrop mode should stay open after payload arrives")
@@ -356,5 +359,20 @@ final class AirDropPanelRoutingTests: XCTestCase {
     private static func sourceFile(_ relativePath: String) throws -> String {
         let url = TestHelpers.repoRoot(from: #filePath).appendingPathComponent(relativePath)
         return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval = 1.0,
+        intervalNanoseconds: UInt64 = 10_000_000,
+        _ predicate: @escaping () -> Bool
+    ) async throws -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if predicate() {
+                return true
+            }
+            try await Task.sleep(nanoseconds: intervalNanoseconds)
+        }
+        return predicate()
     }
 }

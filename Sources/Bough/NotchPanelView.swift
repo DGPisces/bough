@@ -3,6 +3,32 @@ import QuartzCore
 import SwiftUI
 import BoughCore
 
+enum NotchPanelLayoutMetrics {
+    static let sessionRowHeight: CGFloat = 90
+    static let minimumSessionScrollHeight: CGFloat = 180
+    static let expandedPanelBottomInset: CGFloat = 18
+    static let expandedDividerHeight: CGFloat = 1
+    static let usageStripReservedHeight: CGFloat = 58
+    static let auxiliaryRowReservedHeight: CGFloat = 112
+
+    static func sessionScrollMaxHeight(
+        maxVisibleSessions: Int,
+        availablePanelHeight: CGFloat,
+        notchHeight: CGFloat,
+        hasUsageStrip: Bool,
+        hasAuxiliaryRow: Bool
+    ) -> CGFloat {
+        let desiredHeight = CGFloat(max(2, maxVisibleSessions)) * sessionRowHeight
+        let reservedHeight = notchHeight
+            + expandedDividerHeight
+            + expandedPanelBottomInset
+            + (hasUsageStrip ? usageStripReservedHeight : 0)
+            + (hasAuxiliaryRow ? auxiliaryRowReservedHeight : 0)
+        let availableHeight = max(minimumSessionScrollHeight, availablePanelHeight - reservedHeight)
+        return min(desiredHeight, availableHeight)
+    }
+}
+
 @MainActor
 struct NotchPanelView: View {
     var appState: AppState
@@ -10,6 +36,7 @@ struct NotchPanelView: View {
     let notchHeight: CGFloat
     let notchW: CGFloat
     let screenWidth: CGFloat
+    let availablePanelHeight: CGFloat
 
     @AppStorage(SettingsKey.contentFontSize) private var contentFontSize = SettingsDefaults.contentFontSize
     @AppStorage(SettingsKey.showAgentDetails) private var showAgentDetails = SettingsDefaults.showAgentDetails
@@ -301,6 +328,8 @@ struct NotchPanelView: View {
                                 appState: appState,
                                 onlySessionId: appState.justCompletedSessionId,
                                 panelWidth: panelWidth,
+                                notchHeight: notchHeight,
+                                availablePanelHeight: availablePanelHeight,
                                 musicArtworkNamespace: musicArtworkNamespace
                             )
                             .transition(expandedContentTransition)
@@ -309,6 +338,8 @@ struct NotchPanelView: View {
                                 appState: appState,
                                 onlySessionId: nil,
                                 panelWidth: panelWidth,
+                                notchHeight: notchHeight,
+                                availablePanelHeight: availablePanelHeight,
                                 musicArtworkNamespace: musicArtworkNamespace
                             )
                             .transition(expandedContentTransition)
@@ -1994,6 +2025,8 @@ private struct SessionListView: View {
     /// When set, only show this session (auto-expand on completion)
     var onlySessionId: String? = nil
     let panelWidth: CGFloat
+    let notchHeight: CGFloat
+    let availablePanelHeight: CGFloat
     var musicArtworkNamespace: Namespace.ID
     @AppStorage(SettingsKey.sessionGroupingMode) private var groupingMode = SettingsDefaults.sessionGroupingMode
     @AppStorage(SettingsKey.maxVisibleSessions) private var maxVisibleSessions = SettingsDefaults.maxVisibleSessions
@@ -2082,6 +2115,14 @@ private struct SessionListView: View {
             musicControlsEnabled: showMusicControls
         )
         let usageStripLayout = UsageStripLayout(showsStrip: showsUsageStrip, needsScroll: needsScroll)
+        let hasAuxiliaryRow = (onlySessionId == nil && airDropEnabled) || showsMusicStrip
+        let scrollMaxHeight = NotchPanelLayoutMetrics.sessionScrollMaxHeight(
+            maxVisibleSessions: maxVisibleSessions,
+            availablePanelHeight: availablePanelHeight,
+            notchHeight: notchHeight,
+            hasUsageStrip: usageStripLayout.stripPlacement == .outsideScrollableContent,
+            hasAuxiliaryRow: hasAuxiliaryRow
+        )
         let sessionContent = VStack(spacing: 6) {
             ForEach(groups, id: \.header) { group in
                 if !group.header.isEmpty {
@@ -2148,7 +2189,7 @@ private struct SessionListView: View {
             }
 
             if usageStripLayout.sessionContentPlacement == .scrollable {
-                ThinScrollView(maxHeight: CGFloat(maxVisibleSessions) * 90) {
+                ThinScrollView(maxHeight: scrollMaxHeight) {
                     sessionContent
                 }
                 .clipShape(

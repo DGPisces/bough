@@ -103,6 +103,28 @@ final class SettingsSearchIndexTests: XCTestCase {
         XCTAssertEqual(results.first?.kind, .control)
     }
 
+    func testHomebrewSearchHidesSparkleUpdateActionsAndShowsCopyCommand() {
+        L10n.shared.language = "zh"
+
+        let checkResults = SettingsSearchIndex.search("检查更新", isHomebrewInstall: true)
+        let updateNowResults = SettingsSearchIndex.search("立即更新", isHomebrewInstall: true)
+        let copyResults = SettingsSearchIndex.search("homebrew update", isHomebrewInstall: true)
+
+        XCTAssertFalse(checkResults.contains { $0.targetID == .aboutCheckForUpdates })
+        XCTAssertFalse(updateNowResults.contains { $0.targetID == .aboutUpdateNow })
+        XCTAssertEqual(copyResults.first?.page, .about)
+        XCTAssertEqual(copyResults.first?.targetID, .aboutUpdateCopyCommand)
+        XCTAssertEqual(copyResults.first?.kind, .control)
+    }
+
+    func testDmgSearchKeepsSparkleUpdateActionsAndHidesHomebrewCopyCommand() {
+        let checkResults = SettingsSearchIndex.search("check update", isHomebrewInstall: false)
+        let copyResults = SettingsSearchIndex.search("homebrew update", isHomebrewInstall: false)
+
+        XCTAssertEqual(checkResults.first?.targetID, .aboutCheckForUpdates)
+        XCTAssertFalse(copyResults.contains { $0.targetID == .aboutUpdateCopyCommand })
+    }
+
     func testCustomHeightSearchFollowsCurrentVisibility() {
         UserDefaults.standard.set(NotchHeightMode.matchNotch.rawValue, forKey: SettingsKey.notchHeightMode)
 

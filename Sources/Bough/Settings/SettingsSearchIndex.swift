@@ -61,17 +61,28 @@ enum SettingsSearchIndex {
     }
 
     static func entries(codingSessionsEnabled: Bool) -> [SettingsSearchEntry] {
-        SettingsSearchCatalog.entries.filter {
+        entries(codingSessionsEnabled: codingSessionsEnabled, isHomebrewInstall: currentIsHomebrewInstall)
+    }
+
+    static func entries(
+        codingSessionsEnabled: Bool,
+        isHomebrewInstall: Bool
+    ) -> [SettingsSearchEntry] {
+        SettingsSearchCatalog.entries(isHomebrewInstall: isHomebrewInstall).filter {
             SettingsSidebarModel.isVisible(page: $0.page, codingSessionsEnabled: codingSessionsEnabled)
                 && $0.isVisible()
         }
     }
 
-    static func search(_ query: String, codingSessionsEnabled: Bool = CodingSessionsSettings.isEnabled()) -> [SettingsSearchResult] {
+    static func search(
+        _ query: String,
+        codingSessionsEnabled: Bool = CodingSessionsSettings.isEnabled(),
+        isHomebrewInstall: Bool = currentIsHomebrewInstall
+    ) -> [SettingsSearchResult] {
         let normalizedQuery = normalized(query)
         guard !normalizedQuery.isEmpty else { return [] }
 
-        return entries(codingSessionsEnabled: codingSessionsEnabled).enumerated()
+        return entries(codingSessionsEnabled: codingSessionsEnabled, isHomebrewInstall: isHomebrewInstall).enumerated()
             .compactMap { offset, entry -> (rank: Int, offset: Int, result: SettingsSearchResult)? in
                 guard let rank = rank(entry: entry, query: normalizedQuery) else { return nil }
                 return (rank, offset, makeResult(entry))
@@ -132,11 +143,18 @@ enum SettingsSearchIndex {
             .lowercased()
             .filter { !$0.isWhitespace }
     }
+
+    private static var currentIsHomebrewInstall: Bool {
+        UpdateChecker.isHomebrewInstall(
+            bundlePath: Bundle.main.bundlePath,
+            resolvedBundlePath: Bundle.main.bundleURL.resolvingSymlinksInPath().path
+        )
+    }
 }
 
 enum SettingsSearchCatalog {
-    static var entries: [SettingsSearchEntry] {
-        pages + sections + controls
+    static func entries(isHomebrewInstall: Bool) -> [SettingsSearchEntry] {
+        pages + sections(isHomebrewInstall: isHomebrewInstall) + controls(isHomebrewInstall: isHomebrewInstall)
     }
 
     private static var pages: [SettingsSearchEntry] {
@@ -155,7 +173,7 @@ enum SettingsSearchCatalog {
         ]
     }
 
-    private static var sections: [SettingsSearchEntry] {
+    private static func sections(isHomebrewInstall: Bool) -> [SettingsSearchEntry] {
         [
             .section(.general, .generalCodingSessions, "coding_sessions", "settings_search_desc_coding_sessions", ["general", "coding_sessions"], ["coding mode", "product mode", "coding sessions", "编程会话", "产品模式"], "hammer"),
             .section(.general, .generalWelcomeGuide, "welcome_guide_settings_section", "settings_search_desc_welcome_guide", ["general", "welcome_guide_settings_section"], ["welcome guide", "onboarding", "setup assistant", "new user setup", "欢迎引导", "新手引导"], "sparkles"),
@@ -197,12 +215,22 @@ enum SettingsSearchCatalog {
             .section(.advanced, .advancedSessionHandling, "settings_section_session_handling", "settings_search_desc_session_handling", ["advanced", "settings_section_session_handling"], ["session cleanup", "rotation", "tool history", "会话清理", "轮转", "工具历史"], "clock.arrow.circlepath"),
             .section(.advanced, .advancedDiagnosticsRepair, "settings_section_diagnostics_repair", "settings_search_desc_diagnostics", ["advanced", "settings_section_diagnostics_repair"], ["diagnostics", "repair", "export", "诊断", "修复", "导出"], "square.and.arrow.up"),
 
-            .section(.about, .aboutUpdates, "about_auto_update_section", "settings_search_desc_updates", ["about", "about_auto_update_section"], ["updates", "sparkle", "software update", "更新", "自动更新"], "arrow.triangle.2.circlepath"),
+            .section(
+                .about,
+                .aboutUpdates,
+                isHomebrewInstall ? "update_homebrew_managed_title" : "about_auto_update_section",
+                "settings_search_desc_updates",
+                ["about", isHomebrewInstall ? "update_homebrew_managed_title" : "about_auto_update_section"],
+                isHomebrewInstall
+                    ? ["updates", "homebrew", "brew", "cask", "更新", "自动更新"]
+                    : ["updates", "sparkle", "software update", "更新", "自动更新"],
+                isHomebrewInstall ? "terminal" : "arrow.triangle.2.circlepath"
+            ),
             .section(.about, .aboutDiagnostics, "export_diagnostics", "settings_search_desc_about_diagnostics", ["about", "export_diagnostics"], ["diagnostics", "logs", "诊断", "日志"], "ladybug"),
         ]
     }
 
-    private static var controls: [SettingsSearchEntry] {
+    private static func controls(isHomebrewInstall: Bool) -> [SettingsSearchEntry] {
         generalControls
             + notchControls
             + musicControls
@@ -213,7 +241,7 @@ enum SettingsSearchCatalog {
             + usageControls
             + integrationControls
             + advancedControls
-            + aboutControls
+            + aboutControls(isHomebrewInstall: isHomebrewInstall)
     }
 
     private static var generalControls: [SettingsSearchEntry] {
@@ -392,14 +420,14 @@ enum SettingsSearchCatalog {
         ]
     }
 
-    private static var aboutControls: [SettingsSearchEntry] {
+    private static func aboutControls(isHomebrewInstall: Bool) -> [SettingsSearchEntry] {
         [
             .control(.about, .aboutGitHub, .literal("GitHub"), .key("settings_search_desc_page_about"), [.key("about")], ["repository", "repo", "github 仓库"], "chevron.left.forwardslash.chevron.right"),
             .control(.about, .aboutIssues, .literal("Issues"), .key("settings_search_desc_page_about"), [.key("about")], ["github issues", "bug report", "问题反馈"], "ladybug"),
-            .control(.about, .aboutAutoUpdate, "about_auto_update_toggle", "settings_search_desc_updates", ["about", "about_auto_update_section"], ["automatic updates", "自动更新"], "arrow.triangle.2.circlepath", visible: notHomebrew),
-            .control(.about, .aboutCheckForUpdates, "check_for_updates", "settings_search_desc_updates", ["about", "about_auto_update_section"], ["check update", "software update", "检查更新"], "arrow.triangle.2.circlepath"),
-            .control(.about, .aboutUpdateNow, "update_now", "settings_search_desc_updates", ["about", "about_auto_update_section"], ["install update", "update now", "立即更新"], "arrow.down.to.line"),
-            .control(.about, .aboutUpdateCopyCommand, "update_copy_command", "settings_search_desc_updates", ["about", "about_auto_update_section"], ["copy update command", "复制更新命令"], "doc.on.doc"),
+            .control(.about, .aboutAutoUpdate, "about_auto_update_toggle", "settings_search_desc_updates", ["about", "about_auto_update_section"], ["automatic updates", "自动更新"], "arrow.triangle.2.circlepath", visible: { !isHomebrewInstall }),
+            .control(.about, .aboutCheckForUpdates, "check_for_updates", "settings_search_desc_updates", ["about", "about_auto_update_section"], ["check update", "software update", "检查更新"], "arrow.triangle.2.circlepath", visible: { !isHomebrewInstall }),
+            .control(.about, .aboutUpdateNow, "update_now", "settings_search_desc_updates", ["about", "about_auto_update_section"], ["install update", "update now", "立即更新"], "arrow.down.to.line", visible: { !isHomebrewInstall }),
+            .control(.about, .aboutUpdateCopyCommand, "update_copy_command", "settings_search_desc_updates", ["about", "update_homebrew_managed_title"], ["copy update command", "homebrew update", "brew upgrade", "复制更新命令"], "doc.on.doc", visible: { isHomebrewInstall }),
             .control(.about, .aboutDiagnostics, "export_diagnostics", "settings_search_desc_about_diagnostics", ["about", "export_diagnostics"], ["export diagnostics", "logs", "导出诊断"], "ladybug"),
         ]
     }
@@ -444,10 +472,6 @@ private extension SettingsSearchCatalog {
         defaultString(SettingsKey.notchHeightMode, SettingsDefaults.notchHeightMode) == NotchHeightMode.custom.rawValue
     }
 
-    static func notHomebrew() -> Bool {
-        let path = Bundle.main.bundlePath
-        return !path.contains("/Caskroom/") && !path.contains("/homebrew/")
-    }
 }
 
 private extension SettingsSearchEntry {

@@ -168,6 +168,7 @@ jobs:
           LOCAL_SHA="$(shasum -a 256 "$BOUGH_DMG_PATH" | awk '{print $1}')"
           PUBLISHED_SHA="$(shasum -a 256 "$PUBLISHED_DMG" | awk '{print $1}')"
           [[ "$PUBLISHED_SHA" == "$LOCAL_SHA" ]]
+          echo "BOUGH_DMG_SHA256=$LOCAL_SHA" >> "$GITHUB_ENV"
           Tools/Release/release-flow.sh verify \
             --tag "$BOUGH_RELEASE_TAG" \
             --dmg "$PUBLISHED_DMG" \
@@ -198,7 +199,7 @@ jobs:
       - name: Verify stable remote feed
         if: ${{ !contains(github.ref_name, '-') }}
         run: |
-          ASSET_SHA256="$(shasum -a 256 "$BOUGH_DMG_PATH" | awk '{print $1}')"
+          ASSET_SHA256="${BOUGH_DMG_SHA256:-$(shasum -a 256 "$BOUGH_DMG_PATH" | awk '{print $1}')}"
           ASSET_BYTES="$(stat -f %z "$BOUGH_DMG_PATH")"
           Tools/Release/release-flow.sh verify-remote \
             --tag "$BOUGH_RELEASE_TAG" \
@@ -206,6 +207,19 @@ jobs:
             --build "$BOUGH_RELEASE_BUILD" \
             --asset-sha256 "$ASSET_SHA256" \
             --asset-bytes "$ASSET_BYTES"
+
+      - name: Open Homebrew tap PR
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          # github.token is scoped to DGPisces/bough. This secret must be a
+          # fine-grained PAT or GitHub App token with write access to the tap.
+          GH_TOKEN: ${{ secrets.BOUGH_HOMEBREW_TAP_TOKEN }}
+        run: |
+          Tools/Release/release-flow.sh open-tap-pr \
+            --tag "$BOUGH_RELEASE_TAG" \
+            --version "$BOUGH_RELEASE_VERSION" \
+            --download-url "$BOUGH_DMG_DOWNLOAD_URL" \
+            --asset-sha256 "$BOUGH_DMG_SHA256"
 
       - name: Cleanup temporary keychain
         if: ${{ always() }}

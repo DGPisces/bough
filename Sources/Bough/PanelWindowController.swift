@@ -81,6 +81,34 @@ struct PanelScreenHopMotion {
     let fadeInDuration: TimeInterval
 }
 
+enum PanelWindowMetrics {
+    static let minimumHeight: CGFloat = 300
+    static let sessionRowHeight: CGFloat = 90
+    static let baseChromeHeight: CGFloat = 60
+    static let bottomScreenPadding: CGFloat = 8
+
+    static func desiredHeight(maxVisibleSessions: Int) -> CGFloat {
+        let visibleSessions = CGFloat(max(2, maxVisibleSessions))
+        return max(minimumHeight, visibleSessions * sessionRowHeight + baseChromeHeight)
+    }
+
+    static func maximumHeight(screenFrame: NSRect, visibleFrame: NSRect) -> CGFloat {
+        let bottomLimit = max(screenFrame.minY, visibleFrame.minY)
+        return max(minimumHeight, screenFrame.maxY - bottomLimit - bottomScreenPadding)
+    }
+
+    static func panelHeight(
+        maxVisibleSessions: Int,
+        screenFrame: NSRect,
+        visibleFrame: NSRect
+    ) -> CGFloat {
+        min(
+            desiredHeight(maxVisibleSessions: maxVisibleSessions),
+            maximumHeight(screenFrame: screenFrame, visibleFrame: visibleFrame)
+        )
+    }
+}
+
 @MainActor
 class PanelWindowController: NSObject, NSWindowDelegate {
     private enum ScreenHopMetrics {
@@ -117,8 +145,12 @@ class PanelWindowController: NSObject, NSWindowDelegate {
     }
 
     private func panelSize(for screen: NSScreen) -> NSSize {
-        let maxSessions = CGFloat(max(2, UserDefaults.standard.integer(forKey: SettingsKey.maxVisibleSessions)))
-        let maxH = max(300, maxSessions * 90 + 60)
+        let maxSessions = UserDefaults.standard.integer(forKey: SettingsKey.maxVisibleSessions)
+        let maxH = PanelWindowMetrics.panelHeight(
+            maxVisibleSessions: maxSessions,
+            screenFrame: screen.frame,
+            visibleFrame: screen.visibleFrame
+        )
         let screenW = screen.frame.width
         let width = min(620, screenW - 40)
         return NSSize(width: width, height: maxH)
@@ -292,7 +324,8 @@ class PanelWindowController: NSObject, NSWindowDelegate {
             hasNotch: hasNotch,
             notchHeight: notchHeight,
             notchW: notchW,
-            screenWidth: screen.frame.width
+            screenWidth: screen.frame.width,
+            availablePanelHeight: panelSize(for: screen).height
         )
         let contentView = NotchHostingView(rootView: rootView)
         contentView.sizingOptions = []
