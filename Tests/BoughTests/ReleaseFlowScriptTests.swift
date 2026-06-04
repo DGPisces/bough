@@ -84,6 +84,7 @@ final class ReleaseFlowScriptTests: XCTestCase {
         XCTAssertTrue(result.stdout.contains("xmllint --noout Tools/Release/appcast.xml"))
         XCTAssertTrue(result.stdout.contains("Tools/Release/release-flow.sh _assert-stable-appcast-url --download-url \(downloadURL)"))
         XCTAssertTrue(result.stdout.contains("Tools/Release/release-flow.sh _assert-settings-entry --dmg /tmp/Bough.dmg"))
+        XCTAssertTrue(result.stdout.contains("Tools/Release/release-flow.sh _assert-macos-sdk --dmg /tmp/Bough.dmg --min-macos 14.0 --min-sdk 26.0"))
     }
 
     func testVerifyDryRunForRCDoesNotTouchDefaultAppcast() throws {
@@ -98,6 +99,7 @@ final class ReleaseFlowScriptTests: XCTestCase {
         XCTAssertEqual(result.exitCode, 0, result.stderr)
         XCTAssertTrue(result.stdout.contains("Tools/Release/check-version-consistency.sh --with-dmg /tmp/Bough.dmg"))
         XCTAssertTrue(result.stdout.contains("Tools/Release/release-flow.sh _assert-settings-entry --dmg /tmp/Bough.dmg"))
+        XCTAssertTrue(result.stdout.contains("Tools/Release/release-flow.sh _assert-macos-sdk --dmg /tmp/Bough.dmg --min-macos 14.0 --min-sdk 26.0"))
         XCTAssertFalse(result.stdout.contains("xmllint"))
         XCTAssertFalse(result.stdout.contains("_assert-stable-appcast-url"))
     }
