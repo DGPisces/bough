@@ -214,6 +214,57 @@ verify_stable_appcast_download_url() {
         || die "stable appcast enclosure URL mismatch: expected $expected got ${actual:-<missing>}"
 }
 
+assert_settings_entry_in_dmg() {
+    local dmg="$1"
+    [[ -f "$dmg" ]] || die "DMG not found: $dmg"
+
+    local mount_dir
+    mount_dir="$(mktemp -d)"
+    local attached="0"
+    local error=""
+
+    if ! hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_dir" >/dev/null; then
+        rmdir "$mount_dir" 2>/dev/null || true
+        die "could not mount DMG for Settings entry verification: $dmg"
+    fi
+    attached="1"
+
+    local app_dir="$mount_dir/Bough.app"
+    if [[ ! -d "$app_dir" ]]; then
+        app_dir="$(find "$mount_dir" -maxdepth 2 -name 'Bough.app' -type d -print -quit)"
+    fi
+
+    if [[ -z "$app_dir" || ! -d "$app_dir" ]]; then
+        error="mounted DMG does not contain Bough.app"
+    else
+        local executable binary legacy_symbols
+        executable="$(plutil -extract CFBundleExecutable raw "$app_dir/Contents/Info.plist" 2>/dev/null || true)"
+        if [[ "$executable" != "Bough" ]]; then
+            error="Bough.app CFBundleExecutable mismatch: expected Bough got ${executable:-<missing>}"
+        else
+            binary="$app_dir/Contents/MacOS/$executable"
+            if [[ ! -x "$binary" ]]; then
+                error="Bough executable missing or not executable: $binary"
+            else
+                legacy_symbols="$(/usr/bin/strings "$binary" \
+                    | /usr/bin/grep -E 'BoughApp|SettingsSceneOpener|OpenSettingsAction|NSApplicationDelegateAdaptor|CommandGroup\\(replacing: \\.appSettings\\)' \
+                    || true)"
+                if [[ -n "$legacy_symbols" ]]; then
+                    error="release app still contains legacy SwiftUI Settings entry symbols"
+                fi
+            fi
+        fi
+    fi
+
+    if [[ "$attached" == "1" ]]; then
+        hdiutil detach "$mount_dir" -quiet || error="${error:-could not detach Settings entry verification mount: $mount_dir}"
+    fi
+    rmdir "$mount_dir" 2>/dev/null || true
+
+    [[ -z "$error" ]] || die "$error"
+    echo "Settings entry artifact OK: AppKit settings window entry only"
+}
+
 parse_args() {
     TAG=""
     LABEL=""
@@ -432,6 +483,7 @@ cmd_verify() {
             print_command xmllint --noout Tools/Release/appcast.xml
             print_command Tools/Release/release-flow.sh _assert-stable-appcast-url --download-url "$DOWNLOAD_URL"
         fi
+        print_command Tools/Release/release-flow.sh _assert-settings-entry --dmg "$DMG"
         print_command hdiutil verify "$DMG"
         print_command xcrun stapler validate "$DMG"
         print_command spctl --assess --type open --context context:primary-signature -v "$DMG"
@@ -444,6 +496,7 @@ cmd_verify() {
         xmllint --noout "$REPO_ROOT/Tools/Release/appcast.xml"
         verify_stable_appcast_download_url "$DOWNLOAD_URL"
     fi
+    assert_settings_entry_in_dmg "$DMG"
     hdiutil verify "$DMG"
     xcrun stapler validate "$DMG"
     spctl --assess --type open --context context:primary-signature -v "$DMG"
@@ -561,6 +614,12 @@ cmd_assert_stable_appcast_url() {
     verify_stable_appcast_download_url "$DOWNLOAD_URL"
 }
 
+cmd_assert_settings_entry() {
+    parse_args "$@"
+    require_value "--dmg" "$DMG"
+    assert_settings_entry_in_dmg "$DMG"
+}
+
 COMMAND="${1:-}"
 if [[ -z "$COMMAND" ]]; then
     usage
@@ -578,6 +637,7 @@ case "$COMMAND" in
     verify) cmd_verify "$@" ;;
     verify-remote) cmd_verify_remote "$@" ;;
     _assert-stable-appcast-url) cmd_assert_stable_appcast_url "$@" ;;
+    _assert-settings-entry) cmd_assert_settings_entry "$@" ;;
     -h|--help) usage ;;
     *) die "unknown command '$COMMAND'" ;;
 esac

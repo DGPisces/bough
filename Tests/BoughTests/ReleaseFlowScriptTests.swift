@@ -83,6 +83,7 @@ final class ReleaseFlowScriptTests: XCTestCase {
         XCTAssertEqual(result.exitCode, 0, result.stderr)
         XCTAssertTrue(result.stdout.contains("xmllint --noout Tools/Release/appcast.xml"))
         XCTAssertTrue(result.stdout.contains("Tools/Release/release-flow.sh _assert-stable-appcast-url --download-url \(downloadURL)"))
+        XCTAssertTrue(result.stdout.contains("Tools/Release/release-flow.sh _assert-settings-entry --dmg /tmp/Bough.dmg"))
     }
 
     func testVerifyDryRunForRCDoesNotTouchDefaultAppcast() throws {
@@ -96,8 +97,22 @@ final class ReleaseFlowScriptTests: XCTestCase {
 
         XCTAssertEqual(result.exitCode, 0, result.stderr)
         XCTAssertTrue(result.stdout.contains("Tools/Release/check-version-consistency.sh --with-dmg /tmp/Bough.dmg"))
+        XCTAssertTrue(result.stdout.contains("Tools/Release/release-flow.sh _assert-settings-entry --dmg /tmp/Bough.dmg"))
         XCTAssertFalse(result.stdout.contains("xmllint"))
         XCTAssertFalse(result.stdout.contains("_assert-stable-appcast-url"))
+    }
+
+    func testReleaseWorkflowVerifiesPublishedGitHubAssetAfterUpload() throws {
+        let workflow = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent(".github/workflows/release.yml"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(workflow.contains("- name: Verify published GitHub asset"))
+        XCTAssertTrue(workflow.contains("gh release download \"$BOUGH_RELEASE_TAG\""))
+        XCTAssertTrue(workflow.contains("[[ \"$PUBLISHED_SHA\" == \"$LOCAL_SHA\" ]]"))
+        XCTAssertTrue(workflow.contains("Tools/Release/release-flow.sh verify"))
+        XCTAssertTrue(workflow.range(of: "Publish GitHub Release")!.lowerBound < workflow.range(of: "Verify published GitHub asset")!.lowerBound)
+        XCTAssertTrue(workflow.range(of: "Verify published GitHub asset")!.lowerBound < workflow.range(of: "Publish stable appcast branch")!.lowerBound)
     }
 
     func testPublishAssetDefaultsToPublicRepoAndDownloadURL() throws {

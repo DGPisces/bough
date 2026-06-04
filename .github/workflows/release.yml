@@ -153,6 +153,26 @@ jobs:
             --jq ".assets[] | select(.name == \"$BOUGH_DMG_NAME\") | (.browserDownloadUrl // .url)")"
           [[ "$DOWNLOAD_URL" == "$BOUGH_DMG_DOWNLOAD_URL" ]]
 
+      - name: Verify published GitHub asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PUBLISHED_DIR="$RUNNER_TEMP/published-release"
+          mkdir -p "$PUBLISHED_DIR"
+          gh release download "$BOUGH_RELEASE_TAG" \
+            --repo DGPisces/bough \
+            --pattern "$BOUGH_DMG_NAME" \
+            --dir "$PUBLISHED_DIR" \
+            --clobber
+          PUBLISHED_DMG="$PUBLISHED_DIR/$BOUGH_DMG_NAME"
+          LOCAL_SHA="$(shasum -a 256 "$BOUGH_DMG_PATH" | awk '{print $1}')"
+          PUBLISHED_SHA="$(shasum -a 256 "$PUBLISHED_DMG" | awk '{print $1}')"
+          [[ "$PUBLISHED_SHA" == "$LOCAL_SHA" ]]
+          Tools/Release/release-flow.sh verify \
+            --tag "$BOUGH_RELEASE_TAG" \
+            --dmg "$PUBLISHED_DMG" \
+            --download-url "$BOUGH_DMG_DOWNLOAD_URL"
+
       - name: Publish stable appcast branch
         if: ${{ !contains(github.ref_name, '-') }}
         env:
