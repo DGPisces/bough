@@ -293,6 +293,31 @@ final class NotchPanelViewTests: XCTestCase {
         XCTAssertFalse(source.contains("hideMascot"))
     }
 
+    func testExpandedSessionScrollHeightIsCappedByAvailablePanelHeight() {
+        let cappedHeight = NotchPanelLayoutMetrics.sessionScrollMaxHeight(
+            maxVisibleSessions: 20,
+            availablePanelHeight: 640,
+            notchHeight: 42,
+            hasUsageStrip: true,
+            hasAuxiliaryRow: true
+        )
+
+        XCTAssertEqual(cappedHeight, 409)
+        XCTAssertLessThan(cappedHeight, CGFloat(20 * 90))
+    }
+
+    func testExpandedSessionScrollHeightKeepsConfiguredRowsWhenThereIsRoom() {
+        let height = NotchPanelLayoutMetrics.sessionScrollMaxHeight(
+            maxVisibleSessions: 5,
+            availablePanelHeight: 900,
+            notchHeight: 42,
+            hasUsageStrip: true,
+            hasAuxiliaryRow: true
+        )
+
+        XCTAssertEqual(height, 450)
+    }
+
     func testCompactMusicSourceWiresMusicFigureAndPlayPauseOnly() throws {
         let source = try sourceFile("Sources/Bough/NotchPanelView.swift")
         let width = try XCTUnwrap(source.slice(from: "private var panelWidth: CGFloat", to: "var body: some View"))

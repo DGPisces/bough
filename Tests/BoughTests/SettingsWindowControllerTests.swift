@@ -1,4 +1,6 @@
+import AppKit
 import XCTest
+@testable import Bough
 
 final class SettingsWindowControllerTests: XCTestCase {
     func testSettingsEntryUsesAppKitWindowForStableLayout() throws {
@@ -24,6 +26,33 @@ final class SettingsWindowControllerTests: XCTestCase {
         XCTAssertFalse(controller.contains("SettingsSceneOpener"))
         XCTAssertFalse(controller.contains("OpenSettingsAction"))
         XCTAssertFalse(panel.contains("SettingsSceneOpenerInstaller"))
+    }
+
+    func testPanelWindowHeightIsCappedToVisibleScreenArea() {
+        let screenFrame = NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let visibleFrame = NSRect(x: 0, y: 40, width: 1440, height: 820)
+
+        let height = PanelWindowMetrics.panelHeight(
+            maxVisibleSessions: 20,
+            screenFrame: screenFrame,
+            visibleFrame: visibleFrame
+        )
+
+        XCTAssertEqual(height, 852)
+        XCTAssertLessThanOrEqual(height, screenFrame.maxY - visibleFrame.minY)
+    }
+
+    func testPanelWindowKeepsDesiredHeightWhenItFits() {
+        let screenFrame = NSRect(x: 0, y: 0, width: 1728, height: 1117)
+        let visibleFrame = NSRect(x: 0, y: 0, width: 1728, height: 1072)
+
+        let height = PanelWindowMetrics.panelHeight(
+            maxVisibleSessions: 5,
+            screenFrame: screenFrame,
+            visibleFrame: visibleFrame
+        )
+
+        XCTAssertEqual(height, 510)
     }
 
     private func sourceFile(_ relativePath: String) throws -> String {

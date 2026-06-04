@@ -2,6 +2,28 @@
 
 All notable changes to Bough are documented here.
 
+## [v1.0.4] - 2026-06-04
+
+### English
+
+Homebrew Cask distribution and update ownership.
+
+- Added Homebrew Cask as a primary install path through `DGPisces/tap`.
+- Kept the visible GitHub Release DMG as the shared artifact for Homebrew and manual installs.
+- Added Homebrew-managed update behavior so cask installs do not trigger Sparkle checks and show copyable Homebrew update commands.
+- Added release automation that opens a manual-review PR against `DGPisces/homebrew-tap` with the verified DMG SHA-256.
+- Fixed expanded panel height so long session lists scroll internally instead of clipping below the visible screen.
+
+### 简体中文
+
+Homebrew Cask 分发和更新归属。
+
+- 新增通过 `DGPisces/tap` 安装的 Homebrew Cask 主要安装方式。
+- 保持 GitHub Release 页面可见 DMG 作为 Homebrew 和手动安装共用的发布 artifact。
+- 新增 Homebrew 管理更新行为：cask 安装版不触发 Sparkle 检查，并显示可复制的 Homebrew 更新命令。
+- 新增 release 自动化：使用已验证的 DMG SHA-256 向 `DGPisces/homebrew-tap` 打开人工审核 PR。
+- 修复展开面板高度，长 session 列表改为内部滚动，避免超出可见屏幕。
+
 ## [v1.0.3] - 2026-06-04
 
 ### English

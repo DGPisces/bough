@@ -23,6 +23,11 @@ set -euo pipefail
 # update tooling rejects prerelease tags; this gate only maps the prerelease tag
 # to its numeric bundle base version (1.0.0). Stable tags still compare exactly.
 #
+# Dirty tagged worktree handling: when preparing the next release locally from a
+# previously tagged commit, source release metadata may be dirty while HEAD still
+# points at the old tag. In that local-only state, skip the stale HEAD tag check.
+# Clean release workflow runs still compare against the real tag.
+#
 # Next-release build handling: set BOUGH_SKIP_APPCAST_VERSION_CHECK=1 while
 # building the DMG for the next version before Tools/Release/update-appcast.sh has
 # generated the matching feed entry. Source-vs-DMG and git-tag checks still run;
@@ -73,6 +78,13 @@ fi
 # 3. git tag on HEAD (empty = untagged development commit).
 # ---------------------------------------------------------------------------
 GIT_TAG=$(git -C "$REPO_ROOT" tag --points-at HEAD 2>/dev/null | head -n1 || true)
+if [[ -n "$GIT_TAG" ]]; then
+    if ! git -C "$REPO_ROOT" diff --quiet -- Platform/Apple/Info.plist Tools/Release/appcast.xml \
+        || ! git -C "$REPO_ROOT" diff --cached --quiet -- Platform/Apple/Info.plist Tools/Release/appcast.xml; then
+        echo "INFO: HEAD has tag $GIT_TAG, but release metadata is dirty — skipping stale HEAD tag agreement check." >&2
+        GIT_TAG=""
+    fi
+fi
 ENV_RELEASE_TAG="${BOUGH_RELEASE_TAG:-}"
 RELEASE_TAG_SOURCE="git tag on HEAD"
 RELEASE_TAG="$GIT_TAG"

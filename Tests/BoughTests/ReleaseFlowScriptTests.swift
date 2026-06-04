@@ -112,9 +112,24 @@ final class ReleaseFlowScriptTests: XCTestCase {
         XCTAssertTrue(workflow.contains("- name: Verify published GitHub asset"))
         XCTAssertTrue(workflow.contains("gh release download \"$BOUGH_RELEASE_TAG\""))
         XCTAssertTrue(workflow.contains("[[ \"$PUBLISHED_SHA\" == \"$LOCAL_SHA\" ]]"))
+        XCTAssertTrue(workflow.contains("echo \"BOUGH_DMG_SHA256=$LOCAL_SHA\" >> \"$GITHUB_ENV\""))
         XCTAssertTrue(workflow.contains("Tools/Release/release-flow.sh verify"))
         XCTAssertTrue(workflow.range(of: "Publish GitHub Release")!.lowerBound < workflow.range(of: "Verify published GitHub asset")!.lowerBound)
         XCTAssertTrue(workflow.range(of: "Verify published GitHub asset")!.lowerBound < workflow.range(of: "Publish stable appcast branch")!.lowerBound)
+    }
+
+    func testReleaseWorkflowOpensHomebrewTapPRAfterStableRemoteVerification() throws {
+        let workflow = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent(".github/workflows/release.yml"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(workflow.contains("- name: Open Homebrew tap PR"))
+        XCTAssertTrue(workflow.contains("GH_TOKEN: ${{ secrets.BOUGH_HOMEBREW_TAP_TOKEN }}"))
+        XCTAssertTrue(workflow.contains("Tools/Release/release-flow.sh open-tap-pr"))
+        XCTAssertTrue(workflow.contains("--asset-sha256 \"$BOUGH_DMG_SHA256\""))
+        XCTAssertTrue(workflow.range(of: "Verify stable remote feed")!.lowerBound < workflow.range(of: "Open Homebrew tap PR")!.lowerBound)
+        XCTAssertFalse(workflow.contains("gh pr merge"))
     }
 
     func testPublishAssetDefaultsToPublicRepoAndDownloadURL() throws {
@@ -204,6 +219,74 @@ final class ReleaseFlowScriptTests: XCTestCase {
         XCTAssertFalse(curlLog.contains("Bearer"))
         XCTAssertFalse(curlLog.contains("--header"))
         XCTAssertFalse(curlLog.contains("-H"))
+    }
+
+    func testUpdateHomebrewCaskUpdatesVersionChecksumAndKeepsMatchingTemplateURL() throws {
+        let cask = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BoughCask-\(UUID().uuidString).rb")
+        try """
+        cask "bough" do
+          version "1.0.3"
+          sha256 "36e0395856f19a7a504845cae5b1ee1789af24848e84dbe8b1e0d4c2a1d1a111"
+
+          url "https://github.com/DGPisces/bough/releases/download/v#{version}/Bough-v#{version}.dmg"
+          name "Bough"
+          desc "Local AI coding agent visibility for macOS"
+          homepage "https://github.com/DGPisces/bough"
+
+          app "Bough.app"
+        end
+        """.write(to: cask, atomically: true, encoding: .utf8)
+
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let result = try Self.run([
+            "_update-homebrew-cask",
+            "--cask", cask.path,
+            "--version", "1.0.4",
+            "--asset-sha256", sha,
+            "--download-url", "https://github.com/DGPisces/bough/releases/download/v1.0.4/Bough-v1.0.4.dmg"
+        ])
+
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let updated = try String(contentsOf: cask, encoding: .utf8)
+        XCTAssertTrue(updated.contains(#"version "1.0.4""#))
+        XCTAssertTrue(updated.contains(#"sha256 "\#(sha)""#))
+        XCTAssertTrue(updated.contains(#"url "https://github.com/DGPisces/bough/releases/download/v#{version}/Bough-v#{version}.dmg""#))
+    }
+
+    func testOpenTapPRDryRunUsesManualReviewTapFlow() throws {
+        let sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        let result = try Self.run([
+            "open-tap-pr",
+            "--tag", "v1.0.4",
+            "--version", "1.0.4",
+            "--download-url", "https://github.com/DGPisces/bough/releases/download/v1.0.4/Bough-v1.0.4.dmg",
+            "--asset-sha256", sha,
+            "--dry-run"
+        ])
+
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("tapRepo=DGPisces/homebrew-tap"))
+        XCTAssertTrue(result.stdout.contains("branch=bough-v1.0.4"))
+        XCTAssertTrue(result.stdout.contains("gh pr create"))
+        XCTAssertTrue(result.stdout.contains("--repo DGPisces/homebrew-tap"))
+        XCTAssertTrue(result.stdout.contains("--head bough-v1.0.4"))
+        XCTAssertFalse(result.stdout.contains("gh pr merge"))
+        XCTAssertFalse(result.stdout.contains("homebrew/cask"))
+    }
+
+    func testOpenTapPRRejectsPrereleaseTags() throws {
+        let result = try Self.run([
+            "open-tap-pr",
+            "--tag", "v1.0.4-rc.1",
+            "--version", "1.0.4",
+            "--download-url", "https://github.com/DGPisces/bough/releases/download/v1.0.4-rc.1/Bough-v1.0.4-rc.1.dmg",
+            "--asset-sha256", "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "--dry-run"
+        ])
+
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stderr.contains("stable appcast updates only support stable tags"))
     }
 
     func testExtractChangelogRequiresBilingualReleaseNotes() throws {

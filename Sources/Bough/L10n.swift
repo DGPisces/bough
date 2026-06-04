@@ -605,8 +605,9 @@ final class L10n: ObservableObject {
         "update_retry": "Retry",
         "update_homebrew_title": "Update Available",
         "update_homebrew_body": "Bough %@ is available. Since you installed via Homebrew, please run:",
-        "update_homebrew_command": "brew upgrade bough",
-        "update_copy_command": "Copy Command",
+        "update_homebrew_managed_title": "Updates managed by Homebrew",
+        "update_homebrew_command": "brew update\nbrew upgrade --cask bough",
+        "update_copy_command": "Copy Commands",
 
         // NotchPanel
         "mute": "Mute",
@@ -1255,7 +1256,8 @@ final class L10n: ObservableObject {
         "update_retry": "重试",
         "update_homebrew_title": "发现新版本",
         "update_homebrew_body": "Bough %@ 已发布。由于您通过 Homebrew 安装，请运行：",
-        "update_homebrew_command": "brew upgrade bough",
+        "update_homebrew_managed_title": "由 Homebrew 管理更新",
+        "update_homebrew_command": "brew update\nbrew upgrade --cask bough",
         "update_copy_command": "复制命令",
 
         // NotchPanel

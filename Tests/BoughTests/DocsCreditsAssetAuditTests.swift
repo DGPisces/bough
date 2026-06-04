@@ -202,8 +202,6 @@ final class DocsCreditsAssetAuditTests: XCTestCase {
             ["cut", "over"].joined(),
             ["bough", "internal"].joined(separator: "-"),
             ["private", "repo"].joined(separator: " "),
-            ["Home", "brew"].joined(),
-            ["brew", "install"].joined(separator: " "),
             ["SECURITY", "md"].joined(separator: "."),
             ["CODE", "OF", "CONDUCT"].joined(separator: "_"),
             ["Code", "of", "Conduct"].joined(separator: " "),

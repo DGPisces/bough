@@ -21,6 +21,7 @@ final class UpdateChecker: NSObject, ObservableObject {
     nonisolated private static let sparkleNoUpdateErrorCode = 1001
     nonisolated private static let fallbackAppcastFeedURLString =
         "https://raw.githubusercontent.com/DGPisces/bough/appcast/appcast.xml"
+    nonisolated private static let defaultHomebrewPrefixes = ["/opt/homebrew", "/usr/local"]
 
     @Published private(set) var state: UpdateState = .idle
 
@@ -69,8 +70,69 @@ final class UpdateChecker: NSObject, ObservableObject {
     /// True when the app bundle lives inside a Homebrew cask path. Homebrew
     /// manages its own upgrade flow, so Sparkle stays hands-off in that case.
     var isHomebrewInstall: Bool {
-        let path = Bundle.main.bundlePath
-        return path.contains("/Caskroom/") || path.contains("/homebrew/")
+        Self.isHomebrewInstall(
+            bundlePath: Bundle.main.bundlePath,
+            resolvedBundlePath: Bundle.main.bundleURL.resolvingSymlinksInPath().path,
+            bundleShortVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        )
+    }
+
+    nonisolated static func isHomebrewInstall(
+        bundlePath: String,
+        resolvedBundlePath: String? = nil,
+        bundleShortVersion: String? = nil,
+        homebrewPrefixes: [String] = defaultHomebrewPrefixes,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        let candidatePaths = [bundlePath, resolvedBundlePath]
+            .compactMap { $0 }
+            .map { comparablePath($0) }
+
+        if candidatePaths.contains(where: isHomebrewCaskBundlePath) {
+            return true
+        }
+
+        guard let bundleShortVersion, !bundleShortVersion.isEmpty else {
+            return false
+        }
+
+        return homebrewPrefixes.contains { prefix in
+            let caskBundlePath = "\(prefix)/Caskroom/bough/\(bundleShortVersion)/Bough.app"
+            guard fileManager.fileExists(atPath: caskBundlePath) else {
+                return false
+            }
+            let resolvedCaskBundlePath = comparablePath(
+                URL(fileURLWithPath: caskBundlePath)
+                    .resolvingSymlinksInPath()
+                    .path
+            )
+            return candidatePaths.contains(resolvedCaskBundlePath)
+        }
+    }
+
+    nonisolated static func shouldStartSparkleForInstall(
+        bundlePath: String,
+        resolvedBundlePath: String? = nil,
+        bundleShortVersion: String? = nil,
+        homebrewPrefixes: [String] = defaultHomebrewPrefixes
+    ) -> Bool {
+        !isHomebrewInstall(
+            bundlePath: bundlePath,
+            resolvedBundlePath: resolvedBundlePath,
+            bundleShortVersion: bundleShortVersion,
+            homebrewPrefixes: homebrewPrefixes
+        )
+    }
+
+    nonisolated private static func isHomebrewCaskBundlePath(_ path: String) -> Bool {
+        path.contains("/caskroom/bough/")
+    }
+
+    nonisolated private static func comparablePath(_ path: String) -> String {
+        URL(fileURLWithPath: path)
+            .standardizedFileURL
+            .path
+            .lowercased()
     }
 
     // MARK: - Lifecycle
@@ -86,11 +148,13 @@ final class UpdateChecker: NSObject, ObservableObject {
         }
         #endif
 
-        if isHomebrewInstall {
-            Self.log.info("Homebrew install detected — disabling Sparkle auto-checks")
-            updater.automaticallyChecksForUpdates = false
+        if !Self.shouldStartSparkleForInstall(
+            bundlePath: Bundle.main.bundlePath,
+            resolvedBundlePath: Bundle.main.bundleURL.resolvingSymlinksInPath().path,
+            bundleShortVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        ) {
+            Self.log.info("Homebrew install detected — skipping Sparkle startup")
             updaterStarted = true
-            controller.startUpdater()
             return
         }
 
@@ -108,6 +172,10 @@ final class UpdateChecker: NSObject, ObservableObject {
 
     /// User-initiated check. Sparkle presents its own progress / prompt UI.
     func checkForUpdates() {
+        guard !isHomebrewInstall else {
+            Self.log.info("Homebrew install detected — ignoring Sparkle check request")
+            return
+        }
         guard updater.canCheckForUpdates else { return }
         state = .checking
         controller.checkForUpdates(nil)
