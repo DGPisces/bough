@@ -4,7 +4,9 @@
 
 # Bough
 
-[English](README.md)
+<p align="center">
+  <a href="README.md">English</a>
+</p>
 
 Bough 是一款 macOS 刘海实用工具，把 AI 编码智能体、用量、音乐、歌词和 AirDrop 等状态放到屏幕顶部的可视空间里。
 

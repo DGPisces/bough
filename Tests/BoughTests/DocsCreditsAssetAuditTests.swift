@@ -65,8 +65,10 @@ final class DocsCreditsAssetAuditTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(screenshot.height, 600)
         XCTAssertTrue(readme.contains("![Bough notch panel demo](Assets/README/panel-session-music-airdrop.png)"))
         XCTAssertTrue(readmeZH.contains("![Bough 刘海面板演示](Assets/README/panel-session-music-airdrop.png)"))
-        XCTAssertTrue(readme.contains("[简体中文](README.zh-CN.md)"))
-        XCTAssertTrue(readmeZH.contains("[English](README.md)"))
+        XCTAssertTrue(readme.contains(#"<p align="center">"#))
+        XCTAssertTrue(readme.contains(#"<a href="README.zh-CN.md">简体中文</a>"#))
+        XCTAssertTrue(readmeZH.contains(#"<p align="center">"#))
+        XCTAssertTrue(readmeZH.contains(#"<a href="README.md">English</a>"#))
         XCTAssertTrue(readme.contains("<summary>Supported tools</summary>"))
         XCTAssertTrue(readmeZH.contains("<summary>支持的工具</summary>"))
 
