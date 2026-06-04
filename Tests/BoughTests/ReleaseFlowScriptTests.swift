@@ -216,6 +216,56 @@ final class ReleaseFlowScriptTests: XCTestCase {
         XCTAssertTrue(result.stderr.contains("### 简体中文"))
     }
 
+    func testBumpWritesNextBuildFromStableAppcast() throws {
+        let fixture = try Self.makeReleaseFixture(shortVersion: "1.0.0", build: "1")
+        let script = fixture.root.appendingPathComponent("Tools/Release/release-flow.sh")
+
+        let result = try Self.run(
+            ["bump", "--tag", "v1.0.1"],
+            scriptPath: script.path,
+            environment: Self.environment([
+                "BOUGH_APPCAST_PATH": fixture.appcast.path
+            ])
+        )
+
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        XCTAssertEqual(try Self.plistExtract("CFBundleShortVersionString", in: fixture.plist), "1.0.1")
+        XCTAssertEqual(try Self.plistExtract("CFBundleVersion", in: fixture.plist), "2")
+        XCTAssertEqual(try Self.plistExtract("BoughReleaseLabel", in: fixture.plist), "1.0.1")
+    }
+
+    func testAssertNewBuildRejectsBuildAlreadyInStableAppcast() throws {
+        let fixture = try Self.makeReleaseFixture(shortVersion: "1.0.0", build: "1")
+        let script = fixture.root.appendingPathComponent("Tools/Release/release-flow.sh")
+
+        let result = try Self.run(
+            ["assert-new-build", "--build", "1"],
+            scriptPath: script.path,
+            environment: Self.environment([
+                "BOUGH_APPCAST_PATH": fixture.appcast.path
+            ])
+        )
+
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stderr.contains("release build 1 must be greater than current stable appcast build 1"))
+    }
+
+    func testAssertNewBuildAcceptsBuildNewerThanStableAppcast() throws {
+        let fixture = try Self.makeReleaseFixture(shortVersion: "1.0.1", build: "2")
+        let script = fixture.root.appendingPathComponent("Tools/Release/release-flow.sh")
+
+        let result = try Self.run(
+            ["assert-new-build", "--build", "2"],
+            scriptPath: script.path,
+            environment: Self.environment([
+                "BOUGH_APPCAST_PATH": fixture.appcast.path
+            ])
+        )
+
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("Release build OK: 2 > current stable appcast build 1"))
+    }
+
     private struct RunResult {
         let exitCode: Int32
         let stdout: String
@@ -227,17 +277,24 @@ final class ReleaseFlowScriptTests: XCTestCase {
         let logFile: URL
     }
 
+    private struct ReleaseFixture {
+        let root: URL
+        let plist: URL
+        let appcast: URL
+    }
+
     private static var legacyRepoName: String {
         ["bough", "internal"].joined(separator: "-")
     }
 
     private static func run(
         _ args: [String],
+        scriptPath: String = repoRoot.appendingPathComponent("Tools/Release/release-flow.sh").path,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> RunResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = [repoRoot.appendingPathComponent("Tools/Release/release-flow.sh").path] + args
+        process.arguments = [scriptPath] + args
         process.environment = environment
 
         let stdoutPipe = Pipe()
@@ -253,6 +310,87 @@ final class ReleaseFlowScriptTests: XCTestCase {
             stdout: String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
             stderr: String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         )
+    }
+
+    private static func environment(_ overrides: [String: String]) -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        for (key, value) in overrides {
+            environment[key] = value
+        }
+        return environment
+    }
+
+    private static func makeReleaseFixture(shortVersion: String, build: String) throws -> ReleaseFixture {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BoughReleaseFixture-\(UUID().uuidString)")
+        let tools = root.appendingPathComponent("Tools/Release")
+        let platform = root.appendingPathComponent("Platform/Apple")
+        try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: platform, withIntermediateDirectories: true)
+
+        let script = tools.appendingPathComponent("release-flow.sh")
+        try FileManager.default.copyItem(
+            at: repoRoot.appendingPathComponent("Tools/Release/release-flow.sh"),
+            to: script
+        )
+
+        let plist = platform.appendingPathComponent("Info.plist")
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>CFBundleShortVersionString</key>
+            <string>\(shortVersion)</string>
+            <key>CFBundleVersion</key>
+            <string>\(build)</string>
+            <key>BoughReleaseLabel</key>
+            <string>\(shortVersion)</string>
+        </dict>
+        </plist>
+        """.write(to: plist, atomically: true, encoding: .utf8)
+
+        let appcast = tools.appendingPathComponent("appcast.xml")
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+          <channel>
+            <title>Bough</title>
+            <item>
+              <title>Version 1.0.0</title>
+              <sparkle:version>1</sparkle:version>
+              <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+            </item>
+          </channel>
+        </rss>
+        """.write(to: appcast, atomically: true, encoding: .utf8)
+
+        return ReleaseFixture(root: root, plist: plist, appcast: appcast)
+    }
+
+    private static func plistExtract(_ key: String, in plist: URL) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/plutil")
+        process.arguments = ["-extract", key, "raw", plist.path]
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        if process.terminationStatus != 0 {
+            throw NSError(
+                domain: "ReleaseFlowScriptTests",
+                code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: "plutil failed: \(stderr)"]
+            )
+        }
+        return stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func runExtractChangelog(_ args: [String]) throws -> RunResult {

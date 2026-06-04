@@ -8,12 +8,15 @@ usage() {
 Usage: Tools/Release/release-flow.sh <command> [options]
 
 Commands:
+  bump           Write release version/build metadata into Platform/Apple/Info.plist.
   prepare        Validate intended version/build/tag metadata.
   build          Build the release DMG, or show the build command with --dry-run.
   publish-asset  Upload a DMG to a GitHub Release and print the download URL.
   update-appcast Update the stable public appcast through Tools/Release/update-appcast.sh.
   verify         Run release alignment and artifact verification gates.
   verify-remote  Wait until the remote public Sparkle feed and artifact are visible.
+  assert-new-build
+                 Fail if --build is not newer than the current stable appcast.
 
 Common options:
   --tag vX.Y.Z[-rc.N]
@@ -24,6 +27,7 @@ Common options:
   --asset-sha256 HASH
   --asset-bytes N
   --feed-url URL
+  --appcast PATH
   --version X.Y.Z
   --build N
   --attempts N
@@ -165,6 +169,43 @@ stable_appcast_url() {
     /usr/bin/perl -0ne 'if (m{<item>.*?<enclosure\s+[^>]*url="([^"]+)"}s) { print $1; exit }' "$appcast_path"
 }
 
+release_plist_path() {
+    printf '%s/Platform/Apple/Info.plist' "$REPO_ROOT"
+}
+
+plist_value() {
+    plutil -extract "$1" raw "$(release_plist_path)"
+}
+
+top_appcast_build_from_file() {
+    /usr/bin/perl -0ne '
+      if (m{<item>.*?<sparkle:version>([^<]+)</sparkle:version>}s) {
+        print $1;
+        exit 0;
+      }
+      exit 1;
+    ' "$1"
+}
+
+current_stable_appcast_build() {
+    local appcast_path="${APPCAST_PATH:-}"
+    local tmp build
+    if [[ -n "$appcast_path" ]]; then
+        [[ -f "$appcast_path" ]] || die "appcast file not found: $appcast_path"
+        build="$(top_appcast_build_from_file "$appcast_path" || true)"
+    else
+        tmp="$(mktemp)"
+        if ! curl -fsSL --max-time 30 "${FEED_URL:-$(default_feed_url)}" -o "$tmp"; then
+            rm -f "$tmp"
+            return 1
+        fi
+        build="$(top_appcast_build_from_file "$tmp" || true)"
+        rm -f "$tmp"
+    fi
+    [[ -z "$build" || "$build" =~ ^[0-9]+$ ]] || die "stable appcast build must be numeric, got: $build"
+    printf '%s' "$build"
+}
+
 verify_stable_appcast_download_url() {
     local expected="$1"
     local actual
@@ -182,6 +223,7 @@ parse_args() {
     ASSET_SHA256=""
     ASSET_BYTES=""
     FEED_URL=""
+    APPCAST_PATH="${BOUGH_APPCAST_PATH:-}"
     VERSION=""
     BUILD=""
     REPO="DGPisces/bough"
@@ -203,6 +245,7 @@ parse_args() {
             --asset-sha256) ASSET_SHA256="${2:?--asset-sha256 requires a hash}"; shift 2 ;;
             --asset-bytes) ASSET_BYTES="${2:?--asset-bytes requires a byte count}"; shift 2 ;;
             --feed-url) FEED_URL="${2:?--feed-url requires a URL}"; shift 2 ;;
+            --appcast) APPCAST_PATH="${2:?--appcast requires a path}"; shift 2 ;;
             --version) VERSION="${2:?--version requires a value}"; shift 2 ;;
             --build) BUILD="${2:?--build requires a value}"; shift 2 ;;
             --repo) REPO="${2:?--repo requires OWNER/REPO}"; shift 2 ;;
@@ -214,6 +257,57 @@ parse_args() {
             *) die "unknown argument '$1'" ;;
         esac
     done
+}
+
+cmd_bump() {
+    parse_args "$@"
+    require_value "--tag" "$TAG"
+    validate_tag "$TAG"
+    local tag_label="${TAG#v}"
+    local tag_base="${tag_label%%-*}"
+    VERSION="${VERSION:-$tag_base}"
+    validate_version "$VERSION"
+    [[ "$tag_base" == "$VERSION" ]] \
+        || die "--tag base version ($tag_base) must match --version ($VERSION)"
+    LABEL="${LABEL:-$(default_label_for_tag "$TAG")}"
+    validate_label_for_tag "$TAG" "$LABEL"
+
+    local source_build latest_build appcast_build
+    source_build="$(plist_value CFBundleVersion)"
+    [[ "$source_build" =~ ^[0-9]+$ ]] || die "source CFBundleVersion must be numeric, got: $source_build"
+    if [[ -z "$BUILD" ]]; then
+        appcast_build="$(current_stable_appcast_build)" \
+            || die "could not read current stable appcast build; pass --build explicitly or retry with network access"
+        latest_build="$source_build"
+        if [[ -n "$appcast_build" && "$appcast_build" -gt "$latest_build" ]]; then
+            latest_build="$appcast_build"
+        fi
+        BUILD="$((latest_build + 1))"
+    fi
+    [[ "$BUILD" =~ ^[0-9]+$ ]] || die "--build must be numeric"
+
+    if [[ "$DRY_RUN" == "1" ]]; then
+        echo "release metadata bump:"
+        echo "  version=$VERSION"
+        echo "  build=$BUILD"
+        echo "  tag=$TAG"
+        echo "  label=$LABEL"
+        print_command plutil -replace CFBundleShortVersionString -string "$VERSION" Platform/Apple/Info.plist
+        print_command plutil -replace CFBundleVersion -string "$BUILD" Platform/Apple/Info.plist
+        print_command plutil -replace BoughReleaseLabel -string "$LABEL" Platform/Apple/Info.plist
+        return
+    fi
+
+    local plist
+    plist="$(release_plist_path)"
+    plutil -replace CFBundleShortVersionString -string "$VERSION" "$plist"
+    plutil -replace CFBundleVersion -string "$BUILD" "$plist"
+    plutil -replace BoughReleaseLabel -string "$LABEL" "$plist"
+    echo "Release metadata updated:"
+    echo "  version=$VERSION"
+    echo "  build=$BUILD"
+    echo "  tag=$TAG"
+    echo "  label=$LABEL"
 }
 
 cmd_prepare() {
@@ -239,6 +333,24 @@ cmd_prepare() {
     echo
     printf 'export BOUGH_RELEASE_TAG=%q\n' "$TAG"
     printf 'export BOUGH_RELEASE_LABEL=%q\n' "$LABEL"
+}
+
+cmd_assert_new_build() {
+    parse_args "$@"
+    require_value "--build" "$BUILD"
+    [[ "$BUILD" =~ ^[0-9]+$ ]] || die "--build must be numeric"
+
+    local appcast_build
+    appcast_build="$(current_stable_appcast_build)" \
+        || die "could not read current stable appcast build"
+    if [[ -z "$appcast_build" ]]; then
+        echo "No stable appcast build found; accepting build $BUILD."
+        return
+    fi
+    if [[ "$BUILD" -le "$appcast_build" ]]; then
+        die "release build $BUILD must be greater than current stable appcast build $appcast_build. Run: Tools/Release/release-flow.sh bump --tag <next-tag>"
+    fi
+    echo "Release build OK: $BUILD > current stable appcast build $appcast_build"
 }
 
 cmd_build() {
@@ -457,7 +569,9 @@ fi
 shift
 
 case "$COMMAND" in
+    bump) cmd_bump "$@" ;;
     prepare) cmd_prepare "$@" ;;
+    assert-new-build) cmd_assert_new_build "$@" ;;
     build) cmd_build "$@" ;;
     publish-asset) cmd_publish_asset "$@" ;;
     update-appcast) cmd_update_appcast "$@" ;;

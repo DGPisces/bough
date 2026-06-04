@@ -21,9 +21,9 @@ final class SparkleUpdaterConfigTests: XCTestCase {
     }
 
     func testStableVersionMetadata() throws {
-        XCTAssertEqual(try plistExtract("CFBundleShortVersionString"), "1.0.0")
-        XCTAssertEqual(try plistExtract("CFBundleVersion"), "1")
-        XCTAssertEqual(try plistExtract("BoughReleaseLabel"), "1.0.0")
+        XCTAssertEqual(try plistExtract("CFBundleShortVersionString"), "1.0.1")
+        XCTAssertEqual(try plistExtract("CFBundleVersion"), "2")
+        XCTAssertEqual(try plistExtract("BoughReleaseLabel"), "1.0.1")
     }
 
     func testSUPublicEDKeyIsRealKey() throws {

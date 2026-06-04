@@ -32,6 +32,7 @@ jobs:
           VERSION="$(plutil -extract CFBundleShortVersionString raw Platform/Apple/Info.plist)"
           BUILD="$(plutil -extract CFBundleVersion raw Platform/Apple/Info.plist)"
           Tools/Release/release-flow.sh prepare --version "$VERSION" --build "$BUILD" --tag "$TAG"
+          Tools/Release/release-flow.sh assert-new-build --build "$BUILD"
           {
             echo "BOUGH_RELEASE_TAG=$TAG"
             echo "BOUGH_RELEASE_VERSION=$VERSION"

@@ -2,6 +2,24 @@
 
 All notable changes to Bough are documented here.
 
+## [v1.0.1] - 2026-06-04
+
+### English
+
+Stable update that makes `v1.0.0-rc.1` installations see an available update.
+
+- Bumped the app bundle metadata to `1.0.1` with build `2`, so Sparkle treats this release as newer than `v1.0.0-rc.1` and `v1.0.0` build `1`.
+- Added release tooling to bump `Platform/Apple/Info.plist` from the latest stable update feed build.
+- Added a release gate that rejects tags whose build number is not newer than the current stable update feed build.
+
+### 简体中文
+
+稳定版更新，让 `v1.0.0-rc.1` 安装包可以检测到可用更新。
+
+- 将 app bundle metadata 升到 `1.0.1`，build 升到 `2`，让 Sparkle 将本次发布识别为比 `v1.0.0-rc.1` 和 `v1.0.0` build `1` 更新。
+- 新增 release tooling，可根据最新 stable update feed build 自动更新 `Platform/Apple/Info.plist`。
+- 新增 release gate，拒绝 build 号不高于当前 stable update feed build 的 tag。
+
 ## [v1.0.0] - 2026-06-03
 
 ### English
