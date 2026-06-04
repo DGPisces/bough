@@ -50,10 +50,9 @@ class SettingsWindowController {
         // styleMask MUST include .resizable for the user to drag the window
         // corners. Round 3+4 of regression had attempted to fix this
         // via SwiftUI `.windowResizability(.contentMinSize)` on the
-        // `Settings { }` scene in BoughApp.swift — but Bough's settings
-        // window is actually constructed here via AppKit (the SwiftUI
-        // Settings scene is unused for the visible window), so those
-        // modifiers never applied. The fix lives in this styleMask.
+        // SwiftUI Settings scene — but Bough's settings window is actually
+        // constructed here via AppKit, so scene modifiers never applied. The
+        // fix lives in this styleMask.
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: winW, height: winH),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
