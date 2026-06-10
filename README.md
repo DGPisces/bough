@@ -8,18 +8,18 @@
   <a href="README.zh-CN.md">简体中文</a>
 </p>
 
-Bough is a macOS notch utility that keeps AI coding agents, usage, music, lyrics, and AirDrop state visible at the top of your screen.
+Bough is a macOS menu bar utility that keeps AI coding agent status, usage, music, and AirDrop visible at the top of your screen.
 
 ![Bough notch panel demo](Assets/README/panel-session-music-airdrop.png)
 
 ## Features
 
-- Shows session state for Codex, Claude Code, Cursor, and other supported tools in the notch area.
-- Surfaces permission requests, questions, completion, busy, and idle states, with jump-back support to the matching terminal or app.
-- Tracks AI usage windows with optional usage and recovery notifications.
-- Displays music playback, lyrics, and AirDrop drag surfaces.
-- Supports local, remote SSH, and common terminal/editor workflows.
-- Includes the Bough mascot, tool mascots, pixel sounds, diagnostics, and Settings previews.
+- Shows session state for Codex, Claude Code, Cursor, and other supported tools right in the Mac notch / menu bar.
+- Permission requests, questions, completion, busy, idle — every state at a glance. Click to jump back to the matching terminal or editor window.
+- Tracks daily usage for Codex and Claude Code. Alerts you when you're approaching the limit, and lets you know when the cooldown is over.
+- Now playing music and lyrics, right in the menu bar — no need to switch windows.
+- AirDrop drag panel for faster file reception.
+- Works whether you're developing locally, SSH'd into a remote server, or using any common terminal and editor.
 
 <details>
 <summary>Supported tools</summary>
@@ -47,8 +47,6 @@ Bough is a macOS notch utility that keeps AI coding agents, usage, music, lyrics
 
 ## Install
 
-The current stable release is `v1.0.5`.
-
 ### Homebrew Cask
 
 ```sh
@@ -56,29 +54,23 @@ brew tap DGPisces/tap
 brew install --cask bough
 ```
 
-Equivalent one-line form:
-
-```sh
-brew install --cask DGPisces/tap/bough
-```
-
 ### GitHub Releases DMG
 
 1. Open [GitHub Releases](https://github.com/DGPisces/bough/releases).
 2. Download the latest versioned Bough DMG asset, for example `Bough-vX.Y.Z.dmg`.
 3. Open the DMG and drag `Bough.app` into `/Applications`.
-4. On first launch, follow macOS prompts for opening the app and granting required permissions.
+4. On first launch, follow the macOS prompts to confirm and grant the required permissions.
 
 ## Automatic Updates
 
-- Homebrew Cask installs are updated by Homebrew:
+- Homebrew Cask installs — let Homebrew handle it:
 
   ```sh
   brew update
   brew upgrade --cask bough
   ```
 
-- GitHub Releases DMG installs use Bough's in-app updater. Stable builds check the public stable channel for signed updates.
+- DMG installs — Bough has a built-in updater. Stable builds check the public stable channel for signed updates.
 
 ## Build From Source
 
@@ -90,15 +82,15 @@ swift build -c release
 swift test
 ```
 
-The release executable is `.build/release/Bough`.
+The release binary is at `.build/release/Bough`.
 
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md). Report security issues through GitHub private vulnerability reporting.
 
-## Thanks
+## Credits
 
-Thanks to [CodeIsland](https://github.com/wxtsky/CodeIsland) for providing the foundation. See [`CREDITS.md`](CREDITS.md) for license and third-party notices.
+Bough is a fork of [CodeIsland](https://github.com/wxtsky/CodeIsland) — thanks to the original project for laying the foundation. See [`CREDITS.md`](CREDITS.md) for license and third-party notices.
 
 ## License
 

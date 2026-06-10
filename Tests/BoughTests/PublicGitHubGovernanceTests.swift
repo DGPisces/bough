@@ -87,7 +87,6 @@ final class PublicGitHubGovernanceTests: XCTestCase {
         for readme in [zh, en] {
             XCTAssertTrue(readme.contains("brew tap DGPisces/tap"))
             XCTAssertTrue(readme.contains("brew install --cask bough"))
-            XCTAssertTrue(readme.contains("brew install --cask DGPisces/tap/bough"))
             XCTAssertTrue(readme.contains("GitHub Releases"))
             XCTAssertTrue(readme.contains("Bough-vX.Y.Z.dmg"))
             XCTAssertTrue(readme.contains("brew update"))

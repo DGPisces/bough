@@ -8,23 +8,23 @@
   <a href="README.md">English</a>
 </p>
 
-Bough 是一款 macOS 刘海实用工具，把 AI 编码智能体、用量、音乐、歌词和 AirDrop 等状态放到屏幕顶部的可视空间里。
+Bough 是一款 macOS 菜单栏工具，专门把 AI 编程助手的状态、用量、音乐和 AirDrop 这些信息常驻在屏幕顶部。
 
 ![Bough 刘海面板演示](Assets/README/panel-session-music-airdrop.png)
 
 ## 功能
 
-- 在刘海区域显示 Codex、Claude Code、Cursor 等工具的会话状态。
-- 展示权限请求、问题、完成、忙碌和空闲等状态，并支持回到对应终端或应用。
-- 跟踪 AI 用量窗口，提供可选的用量提醒和恢复提示。
-- 显示音乐播放信息、歌词和 AirDrop 拖拽面板。
-- 支持本机、远程 SSH 和常见终端/编辑器工作流。
-- 内置 Bough mascot、工具 mascot、像素音效、诊断和设置页预览。
+- 在 Mac 刘海 / 菜单栏区域实时显示 Codex、Claude Code、Cursor 等工具的会话状态。
+- 权限请求、提问、完成、忙碌、空闲——各种状态一目了然，点一下还能切回对应的终端或编辑器窗口。
+- 自动跟踪 Codex 和 Claude Code 的每日用量，快到限额的时候提醒你，冷却结束了也会告诉你。
+- 正在播放的音乐、歌词，直接挂在菜单栏上，不用切窗口。
+- AirDrop 拖拽面板，接收文件更快。
+- 不管你在本地开发、SSH 到远程，还是用各种终端和编辑器，都能正常工作。
 
 <details>
 <summary>支持的工具</summary>
 
-| 工具 | Bough mascot |
+| 工具 | Bough 吉祥物 |
 |---|---|
 | Codex | <img src="Assets/README/mascots/codex.gif" alt="Codex mascot" width="56"/> |
 | Claude Code | <img src="Assets/README/mascots/claude.gif" alt="Claude Code mascot" width="56"/> |
@@ -47,8 +47,6 @@ Bough 是一款 macOS 刘海实用工具，把 AI 编码智能体、用量、音
 
 ## 安装
 
-当前稳定版是 `v1.0.5`。
-
 ### Homebrew Cask
 
 ```sh
@@ -56,29 +54,23 @@ brew tap DGPisces/tap
 brew install --cask bough
 ```
 
-等价的一行命令：
-
-```sh
-brew install --cask DGPisces/tap/bough
-```
-
 ### GitHub Releases DMG
 
 1. 打开 [GitHub Releases](https://github.com/DGPisces/bough/releases)。
 2. 下载最新的版本化 Bough DMG 资产，例如 `Bough-vX.Y.Z.dmg`。
-3. 打开 DMG，将 `Bough.app` 拖入 `/Applications`。
-4. 首次启动时，按 macOS 提示完成打开确认和必要权限设置。
+3. 打开 DMG，把 `Bough.app` 拖进 `/Applications`。
+4. 首次启动时跟着 macOS 提示走，完成安全确认和权限授权就行。
 
 ## 自动更新
 
-- Homebrew Cask 安装版由 Homebrew 管理更新：
+- Homebrew Cask 安装的，交给 Homebrew：
 
   ```sh
   brew update
   brew upgrade --cask bough
   ```
 
-- GitHub Releases DMG 安装版使用 Bough 的应用内更新。稳定版会通过公开 stable channel 检查签名更新。
+- DMG 安装的，Bough 内置了自动更新。稳定版会走公开 stable channel 检查签名更新。
 
 ## 从源码构建
 
@@ -90,15 +82,15 @@ swift build -c release
 swift test
 ```
 
-Release 构建产物位于 `.build/release/Bough`。
+构建产物在 `.build/release/Bough`。
 
 ## 贡献
 
-贡献流程见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。安全问题请通过 GitHub private vulnerability reporting 提交。
+贡献流程见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。安全漏洞请通过 GitHub 的 private vulnerability reporting 提交。
 
 ## 致谢
 
-感谢 [CodeIsland](https://github.com/wxtsky/CodeIsland) 提供基础。许可与第三方说明见 [`CREDITS.md`](CREDITS.md)。
+Bough 是 [CodeIsland](https://github.com/wxtsky/CodeIsland) 的 fork，感谢原项目打下的基础。许可与第三方说明见 [`CREDITS.md`](CREDITS.md)。
 
 ## 许可
 
