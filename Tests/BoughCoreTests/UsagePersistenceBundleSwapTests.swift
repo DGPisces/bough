@@ -30,6 +30,7 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
 
     private var tempHome: URL!
     private var originalHome: String?
+    private var lockedEnvironment = false
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -40,17 +41,27 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
             .appendingPathComponent("UsagePersistenceBundleSwapTests-\(UUID().uuidString)",
                                     isDirectory: true)
         try FileManager.default.createDirectory(at: tempHome, withIntermediateDirectories: true)
+        CoreTestHelpers.processEnvironmentLock.lock()
+        lockedEnvironment = true
         originalHome = ProcessInfo.processInfo.environment["HOME"]
         setenv("HOME", tempHome.path, 1)
     }
 
     override func tearDownWithError() throws {
-        if let original = originalHome {
-            setenv("HOME", original, 1)
-        } else {
-            unsetenv("HOME")
+        if lockedEnvironment {
+            if let original = originalHome {
+                setenv("HOME", original, 1)
+            } else {
+                unsetenv("HOME")
+            }
         }
-        try? FileManager.default.removeItem(at: tempHome)
+        if let tempHome {
+            try? FileManager.default.removeItem(at: tempHome)
+        }
+        if lockedEnvironment {
+            CoreTestHelpers.processEnvironmentLock.unlock()
+            lockedEnvironment = false
+        }
         try super.tearDownWithError()
     }
 
@@ -77,10 +88,9 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
             productionHome = NSHomeDirectory()
         }
 
-        // Compute the production path the same way AtomicJSONStore does:
-        // URL(fileURLWithPath: $HOME).appendingPathComponent(".bough").
-        let baseUnderProd = URL(fileURLWithPath: productionHome)
-            .appendingPathComponent(".bough")
+        setenv("HOME", productionHome, 1)
+        defer { setenv("HOME", tempHome.path, 1) }
+        let baseUnderProd = AtomicJSONStore.baseDirectoryURL()
 
         // The core invariant: the storage path must never be inside a bundle container.
         XCTAssertFalse(

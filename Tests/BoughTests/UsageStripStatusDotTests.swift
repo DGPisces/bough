@@ -170,7 +170,10 @@ final class UsageStripStatusDotClassifierTests: XCTestCase {
                 for: state, availability: availability, severity: severity
             )
             XCTAssertFalse(label.isEmpty, "label missing for \(state)")
-            XCTAssertTrue(label.hasPrefix("Status:"), "expected 'Status:' prefix; got \(label)")
+            XCTAssertTrue(
+                label.hasPrefix("Status:") || label.hasPrefix("状态："),
+                "expected localized status prefix; got \(label)"
+            )
         }
     }
 
@@ -249,6 +252,7 @@ final class AlarmReducerTests: XCTestCase {
         let atBoundary = t0.addingTimeInterval(1.8)
         let r = AlarmReducer.step(previous: prev, currentSeverity: .depleted, now: atBoundary)
         XCTAssertFalse(r.alarmActive, "strict < boundary: 1.8 is NOT active")
+        XCTAssertNil(r.next.alarmStartedAt, "expired alarm should clear so the status dot can stop ticking")
     }
 
     // 8. Mid-window stays active.

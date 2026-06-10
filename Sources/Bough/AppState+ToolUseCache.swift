@@ -4,7 +4,7 @@ import BoughCore
 
 private let log = Logger(subsystem: "com.dgpisces.bough", category: "PermissionDeny")
 
-/// Cached metadata for an in-flight tool_use_id, written on PreToolUse and consumed by
+/// Cached metadata for an in-flight tool use, written on PreToolUse and consumed by
 /// downstream PermissionRequest / PostToolUse events.
 ///
 /// This lets us (1) correlate PermissionRequest payloads back to the originating tool
@@ -25,12 +25,12 @@ extension AppState {
     static let pendingToolUseTTL: TimeInterval = 900  // 15 minutes
 
     /// Cache a PreToolUse so later PermissionRequest / PostToolUse events carrying the
-    /// same tool_use_id can be correlated back to the originating invocation.
+    /// same session/source/tool_use_id can be correlated back to the originating invocation.
     func cachePreToolUseIfApplicable(_ event: HookEvent) {
         guard EventNormalizer.normalize(event.eventName) == "PreToolUse" else { return }
-        guard let toolUseId = event.toolUseId, !toolUseId.isEmpty else { return }
+        guard let key = ToolUseKey(event: event) else { return }
 
-        pendingToolUses[toolUseId] = PreToolUseRecord(
+        pendingToolUses[key] = PreToolUseRecord(
             sessionId: event.sessionId ?? "default",
             toolName: event.toolName,
             toolDescription: event.toolDescription,
@@ -48,11 +48,11 @@ extension AppState {
                 || normalized == "PostToolUseFailure"
                 || normalized == "PermissionDenied"
         else { return }
-        guard let toolUseId = event.toolUseId, !toolUseId.isEmpty else { return }
+        guard let key = ToolUseKey(event: event) else { return }
 
-        pendingToolUses.removeValue(forKey: toolUseId)
+        pendingToolUses.removeValue(forKey: key)
 
-        guard let staleIndex = permissionQueue.firstIndex(where: { $0.toolUseId == toolUseId })
+        guard let staleIndex = permissionQueue.firstIndex(where: { $0.toolUseKey == key })
         else { return }
 
         if shouldKeepQueuedPermissionForCompletedEvent(event, normalizedEventName: normalized) {
@@ -60,7 +60,8 @@ extension AppState {
         }
 
         let stale = permissionQueue.remove(at: staleIndex)
-        log.notice("⚠️ permission deny reason=resolveToolUseIfCompleted session=\(stale.event.sessionId ?? "nil", privacy: .public) toolUseId=\(toolUseId, privacy: .public) tool=\(stale.event.toolName ?? "nil", privacy: .public) triggerEvent=\(normalized, privacy: .public)")
+        clearDismissedPermissionRequestId(stale.dismissalId)
+        log.notice("⚠️ permission deny reason=resolveToolUseIfCompleted session=\(stale.event.sessionId ?? "nil", privacy: .public) toolUseId=\(key.toolUseId, privacy: .public) tool=\(stale.event.toolName ?? "nil", privacy: .public) triggerEvent=\(normalized, privacy: .public)")
         let denyBody = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#
         stale.continuation.resume(returning: Data(denyBody.utf8))
 
@@ -85,19 +86,19 @@ extension AppState {
     }
 
     /// Try to merge this permission request into an existing queue entry for the same
-    /// tool_use_id. Returns true when the new arrival was treated as a replay and its
+    /// session/source/tool_use_id. Returns true when the new arrival was treated as a replay and its
     /// continuation has already been resolved (caller must not enqueue).
     ///
     /// Behavior: the newer continuation replaces the queued one in-place. The older
     /// continuation is denied so Claude's prior waiter doesn't hang; the queue slot and
     /// its position remain the same so the visible card doesn't reshuffle under the user.
     func mergeDuplicatePermissionRequest(_ request: PermissionRequest) -> Bool {
-        guard let toolUseId = request.toolUseId, !toolUseId.isEmpty else { return false }
-        guard let existingIndex = permissionQueue.firstIndex(where: { $0.toolUseId == toolUseId })
+        guard let key = request.toolUseKey else { return false }
+        guard let existingIndex = permissionQueue.firstIndex(where: { $0.toolUseKey == key })
         else { return false }
 
         let existing = permissionQueue[existingIndex]
-        log.notice("⚠️ permission deny reason=mergeDuplicatePermissionRequest session=\(existing.event.sessionId ?? "nil", privacy: .public) toolUseId=\(toolUseId, privacy: .public) tool=\(existing.event.toolName ?? "nil", privacy: .public)")
+        log.notice("⚠️ permission deny reason=mergeDuplicatePermissionRequest session=\(existing.event.sessionId ?? "nil", privacy: .public) toolUseId=\(key.toolUseId, privacy: .public) tool=\(existing.event.toolName ?? "nil", privacy: .public)")
         let denyBody = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#
         existing.continuation.resume(returning: Data(denyBody.utf8))
         permissionQueue[existingIndex] = request
@@ -108,7 +109,7 @@ extension AppState {
         guard normalizedEventName != "PermissionDenied" else { return false }
 
         let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String)
-            ?? permissionQueue.first(where: { $0.toolUseId == event.toolUseId })
+            ?? permissionQueue.first(where: { $0.toolUseKey == ToolUseKey(event: event) })
                 .flatMap { SessionSnapshot.normalizedSupportedSource($0.event.rawJSON["_source"] as? String) }
 
         switch source {
@@ -122,15 +123,21 @@ extension AppState {
     /// Backfill tool metadata from the cached PreToolUse when the PermissionRequest
     /// payload is missing fields (observed with some third-party CLIs that re-emit
     /// permission events without replaying the tool input).
-    func enrichPermissionRequestFromCache(sessionId: String, event: HookEvent) {
-        guard let toolUseId = event.toolUseId, !toolUseId.isEmpty else { return }
-        guard let record = pendingToolUses[toolUseId] else { return }
+    func permissionEventByEnrichingFromCache(_ event: HookEvent) -> HookEvent {
+        guard let key = ToolUseKey(event: event) else { return event }
+        guard let record = pendingToolUses[key] else { return event }
 
-        if sessions[sessionId]?.currentTool == nil, let name = record.toolName {
-            sessions[sessionId]?.currentTool = name
+        var raw = event.rawJSON
+        if event.toolName == nil, let name = record.toolName {
+            raw["tool_name"] = name
         }
-        if sessions[sessionId]?.toolDescription == nil, let desc = record.toolDescription {
-            sessions[sessionId]?.toolDescription = desc
+        if event.toolInput == nil, let input = record.toolInput {
+            raw["tool_input"] = input
         }
+        guard JSONSerialization.isValidJSONObject(raw),
+              let data = try? JSONSerialization.data(withJSONObject: raw),
+              let enriched = HookEvent(from: data)
+        else { return event }
+        return enriched
     }
 }

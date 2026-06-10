@@ -69,9 +69,10 @@ enum JSONMinimalEditor {
                 }
             }
         } else {
-            // Last entry — strip the preceding comma from the previous entry.
+            // Last entry — strip the separator comma after the previous entry.
+            // Scan forward so JSONC comments do not hide the comma.
             let prev = doc.entries[idx - 1]
-            if let commaIdx = findPrevNonSpace(chars: chars, from: entry.keyStart, stopAt: prev.valueEnd),
+            if let commaIdx = findNextNonSpace(chars: chars, from: prev.valueEnd, stopAt: entry.keyStart),
                chars[commaIdx] == "," {
                 removeStart = commaIdx
             } else {
@@ -117,6 +118,9 @@ enum JSONMinimalEditor {
             guard i < chars.count else { return nil }
             if chars[i] == "}" {
                 let closeBrace = i
+                i += 1
+                skipSpace(chars: chars, i: &i)
+                guard i == chars.count else { return nil }
                 return Document(
                     objectContentStart: openBrace + 1,
                     objectContentEnd: closeBrace,
@@ -198,11 +202,26 @@ enum JSONMinimalEditor {
                 case "u":
                     guard i + 5 < chars.count else { return nil }
                     let hex = String(chars[(i + 2)...(i + 5)])
-                    guard let code = UInt32(hex, radix: 16), let scalar = UnicodeScalar(code) else { return nil }
+                    guard let code = UInt32(hex, radix: 16) else { return nil }
+                    if (0xD800...0xDBFF).contains(code) {
+                        guard i + 11 < chars.count,
+                              chars[i + 6] == "\\",
+                              chars[i + 7] == "u" else { return nil }
+                        let lowHex = String(chars[(i + 8)...(i + 11)])
+                        guard let low = UInt32(lowHex, radix: 16),
+                              (0xDC00...0xDFFF).contains(low) else { return nil }
+                        let combined = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
+                        guard let scalar = UnicodeScalar(combined) else { return nil }
+                        out.append(Character(scalar))
+                        i += 12
+                        continue
+                    }
+                    guard !(0xDC00...0xDFFF).contains(code),
+                          let scalar = UnicodeScalar(code) else { return nil }
                     out.append(Character(scalar))
                     i += 6
                     continue
-                default: out.append(esc)
+                default: return nil
                 }
                 i += 2
                 continue
@@ -226,46 +245,105 @@ enum JSONMinimalEditor {
             return skipObjectOrArray(chars: chars, i: &i, open: "{", close: "}")
         case "[":
             return skipObjectOrArray(chars: chars, i: &i, open: "[", close: "]")
-        case "t", "f", "n":
-            while i < chars.count, chars[i].isLetter { i += 1 }
-            return true
+        case "t":
+            return skipLiteral("true", chars: chars, i: &i)
+        case "f":
+            return skipLiteral("false", chars: chars, i: &i)
+        case "n":
+            return skipLiteral("null", chars: chars, i: &i)
         case "-", "+", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
-            while i < chars.count {
-                let cc = chars[i]
-                if cc.isNumber || cc == "." || cc == "e" || cc == "E" || cc == "-" || cc == "+" {
-                    i += 1
-                } else { break }
-            }
-            return true
+            return skipNumber(chars: chars, i: &i)
         default:
             return false
         }
     }
 
+    private static func skipNumber(chars: [Character], i: inout Int) -> Bool {
+        if i < chars.count, chars[i] == "-" { i += 1 }
+        guard i < chars.count else { return false }
+
+        if chars[i] == "0" {
+            i += 1
+            if i < chars.count, chars[i].isNumber { return false }
+        } else if ["1", "2", "3", "4", "5", "6", "7", "8", "9"].contains(chars[i]) {
+            repeat { i += 1 } while i < chars.count && chars[i].isNumber
+        } else {
+            return false
+        }
+
+        if i < chars.count, chars[i] == "." {
+            i += 1
+            guard i < chars.count, chars[i].isNumber else { return false }
+            repeat { i += 1 } while i < chars.count && chars[i].isNumber
+        }
+
+        if i < chars.count && (chars[i] == "e" || chars[i] == "E") {
+            i += 1
+            if i < chars.count && (chars[i] == "+" || chars[i] == "-") { i += 1 }
+            guard i < chars.count, chars[i].isNumber else { return false }
+            repeat { i += 1 } while i < chars.count && chars[i].isNumber
+        }
+
+        return true
+    }
+
+    private static func skipLiteral(_ literal: String, chars: [Character], i: inout Int) -> Bool {
+        let literalChars = Array(literal)
+        guard i + literalChars.count <= chars.count else { return false }
+        for offset in literalChars.indices {
+            guard chars[i + offset] == literalChars[offset] else { return false }
+        }
+        i += literalChars.count
+        return true
+    }
+
     private static func skipObjectOrArray(chars: [Character], i: inout Int, open: Character, close: Character) -> Bool {
         guard i < chars.count, chars[i] == open else { return false }
         i += 1
-        var depth = 1
-        while i < chars.count, depth > 0 {
-            let c = chars[i]
-            if c == "\"" {
-                if readStringLiteral(chars: chars, i: &i) == nil { return false }
-                continue
+
+        if open == "{" {
+            skipSpace(chars: chars, i: &i)
+            if i < chars.count, chars[i] == close {
+                i += 1
+                return true
             }
-            if c == "/", i + 1 < chars.count, (chars[i + 1] == "/" || chars[i + 1] == "*") {
+            while i < chars.count {
+                guard readStringLiteral(chars: chars, i: &i) != nil else { return false }
+                skipSpace(chars: chars, i: &i)
+                guard i < chars.count, chars[i] == ":" else { return false }
+                i += 1
+                guard skipValue(chars: chars, i: &i) else { return false }
+                skipSpace(chars: chars, i: &i)
+                if i < chars.count, chars[i] == "," {
+                    i += 1
+                    skipSpace(chars: chars, i: &i)
+                    continue
+                }
+                guard i < chars.count, chars[i] == close else { return false }
+                i += 1
+                return true
+            }
+            return false
+        }
+
+        skipSpace(chars: chars, i: &i)
+        if i < chars.count, chars[i] == close {
+            i += 1
+            return true
+        }
+        while i < chars.count {
+            guard skipValue(chars: chars, i: &i) else { return false }
+            skipSpace(chars: chars, i: &i)
+            if i < chars.count, chars[i] == "," {
+                i += 1
                 skipSpace(chars: chars, i: &i)
                 continue
             }
-            if c == open || c == "{" || c == "[" { depth += 1 }
-            else if c == close || c == "}" || c == "]" {
-                // Generic `{`/`[` -> `}`/`]` matching is sloppy for mixed nesting, but JSON
-                // nesting is well-formed so we rely on each opener pairing with its own closer.
-                depth -= 1
-                if depth == 0 { i += 1; return true }
-            }
+            guard i < chars.count, chars[i] == close else { return false }
             i += 1
+            return true
         }
-        return depth == 0
+        return false
     }
 
     private static func findNextNonSpace(chars: [Character], from: Int, stopAt: Int) -> Int? {
@@ -286,16 +364,6 @@ enum JSONMinimalEditor {
                 }
                 continue
             }
-            return i
-        }
-        return nil
-    }
-
-    private static func findPrevNonSpace(chars: [Character], from: Int, stopAt: Int) -> Int? {
-        var i = from - 1
-        while i >= stopAt {
-            let c = chars[i]
-            if c == " " || c == "\t" || c == "\n" || c == "\r" { i -= 1; continue }
             return i
         }
         return nil

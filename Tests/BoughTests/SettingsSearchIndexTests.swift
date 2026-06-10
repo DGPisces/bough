@@ -3,13 +3,35 @@ import XCTest
 @testable import Bough
 
 final class SettingsSearchIndexTests: XCTestCase {
+    private var savedLanguage: String!
+    private var savedLanguageDefaultValue: Any?
+    private var savedCodingSessionsEnabled: Any?
+    private var lockedProcessState = false
+
     override func setUp() {
+        super.setUp()
+        TestHelpers.processStateLock.lock()
+        lockedProcessState = true
+        savedLanguage = L10n.shared.language
+        savedLanguageDefaultValue = UserDefaults.standard.object(forKey: SettingsKey.appLanguage)
+        savedCodingSessionsEnabled = UserDefaults.standard.object(forKey: SettingsKey.codingSessionsEnabled)
         UserDefaults.standard.removeObject(forKey: SettingsKey.codingSessionsEnabled)
         L10n.shared.language = "en"
     }
 
     override func tearDown() {
-        L10n.shared.language = "system"
+        if lockedProcessState {
+            TestHelpers.restoreUserDefaultsValue(savedCodingSessionsEnabled, forKey: SettingsKey.codingSessionsEnabled)
+            TestHelpers.restoreSharedLanguage(savedLanguage, savedDefaultValue: savedLanguageDefaultValue)
+        }
+        savedLanguage = nil
+        savedLanguageDefaultValue = nil
+        savedCodingSessionsEnabled = nil
+        if lockedProcessState {
+            TestHelpers.processStateLock.unlock()
+            lockedProcessState = false
+        }
+        super.tearDown()
     }
 
     func testMusicSearchPrefersMusicPageBeforeSound() {
@@ -126,22 +148,17 @@ final class SettingsSearchIndexTests: XCTestCase {
     }
 
     func testCustomHeightSearchFollowsCurrentVisibility() {
-        UserDefaults.standard.set(NotchHeightMode.matchNotch.rawValue, forKey: SettingsKey.notchHeightMode)
-
-        let hiddenResults = SettingsSearchIndex.search("custom height")
+        let hiddenResults = SettingsSearchIndex.search("custom height", notchHeightMode: .matchNotch)
 
         XCTAssertEqual(hiddenResults.first?.page, .notch)
         XCTAssertEqual(hiddenResults.first?.targetID, .notchTopBarHeight)
         XCTAssertFalse(hiddenResults.contains { $0.targetID == .notchCustomHeight })
 
-        UserDefaults.standard.set(NotchHeightMode.custom.rawValue, forKey: SettingsKey.notchHeightMode)
-
-        let visibleResults = SettingsSearchIndex.search("custom height")
+        let visibleResults = SettingsSearchIndex.search("custom height", notchHeightMode: .custom)
 
         XCTAssertEqual(visibleResults.first?.page, .notch)
         XCTAssertEqual(visibleResults.first?.targetID, .notchCustomHeight)
         XCTAssertEqual(visibleResults.first?.kind, .control)
-        UserDefaults.standard.removeObject(forKey: SettingsKey.notchHeightMode)
     }
 
     func testControlResultRanksBeforeSectionAndPage() {
@@ -165,4 +182,5 @@ final class SettingsSearchIndexTests: XCTestCase {
 
         XCTAssertTrue(SettingsSearchIndex.search(physicalHardwareName).isEmpty)
     }
+
 }

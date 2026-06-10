@@ -25,7 +25,8 @@
 #   the full signing + appcast-generation pipeline.  Useful for CI.
 #
 # Usage:
-#   bash Tools/Smoke/sparkle-upgrade-smoke.sh           # full interactive run
+#   BOUGH_SMOKE_TOUCH_REAL_USAGE=1 bash Tools/Smoke/sparkle-upgrade-smoke.sh
+#                                                        # full interactive run
 #   SKIP_INTERACTIVE=1 bash Tools/Smoke/sparkle-upgrade-smoke.sh  # CI / headless
 #
 # Prerequisites:
@@ -42,20 +43,36 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TOOLS="$REPO_ROOT/.build/artifacts/sparkle/Sparkle/bin"
-STAGING="$(mktemp -d)/smoke"
+STAGING_ROOT="$(mktemp -d)"
+STAGING="$STAGING_ROOT/smoke"
 BOUGH_DATA_DIR="$HOME/.bough"
 USAGE_FILE="$BOUGH_DATA_DIR/usage-daily.json"
+ORIGINAL_USAGE_BACKUP=""
+ORIGINAL_USAGE_EXISTED="0"
+USAGE_SEEDED="0"
 SKIP_INTERACTIVE="${SKIP_INTERACTIVE:-0}"
+TOUCH_REAL_USAGE="${BOUGH_SMOKE_TOUCH_REAL_USAGE:-0}"
 
 # ---------------------------------------------------------------------------
 # Cleanup trap — removes STAGING on EXIT (success or failure)
 # ---------------------------------------------------------------------------
 cleanup() {
-    rm -rf "$STAGING"
+    restore_usage_baseline
+    rm -rf "$STAGING_ROOT"
 }
 trap cleanup EXIT
 
 mkdir -p "$STAGING"
+
+restore_usage_baseline() {
+    [[ "$USAGE_SEEDED" == "1" ]] || return 0
+    if [[ "$ORIGINAL_USAGE_EXISTED" == "1" && -n "$ORIGINAL_USAGE_BACKUP" && -f "$ORIGINAL_USAGE_BACKUP" ]]; then
+        mkdir -p "$BOUGH_DATA_DIR"
+        cp "$ORIGINAL_USAGE_BACKUP" "$USAGE_FILE"
+    else
+        rm -f "$USAGE_FILE"
+    fi
+}
 
 # ---------------------------------------------------------------------------
 # Preflight checks
@@ -79,12 +96,32 @@ preflight() {
 # Step 1 + 2: Build v1 and v2 bundles
 #
 # Each bundle is assembled from the swift build output with a patched
-# Info.plist (CFBundleVersion patched via plutil).  The bundles are minimal
-# .app wrappers sufficient for Sparkle to identify the version.
+# Info.plist (CFBundleVersion patched via plutil). Interactive runs build a
+# launchable .app by embedding Sparkle.framework and fixing the binary rpath.
 #
 # RESEARCH.md pitfall #3: bundles must embed the REAL SUPublicEDKey so
 # Sparkle's EdDSA verification passes.  We read it from the source plist.
 # ---------------------------------------------------------------------------
+embed_sparkle_runtime() {
+    local contents="$1"
+    local binary="$contents/MacOS/Bough"
+    local frameworks_dir="$contents/Frameworks"
+    local sparkle_src="$REPO_ROOT/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+
+    if [[ ! -d "$sparkle_src" ]]; then
+        echo "ERROR: $sparkle_src not found. Run 'swift build -c release' first." >&2
+        exit 1
+    fi
+
+    mkdir -p "$frameworks_dir"
+    rm -rf "$frameworks_dir/Sparkle.framework"
+    cp -R "$sparkle_src" "$frameworks_dir/"
+
+    if ! otool -l "$binary" | grep -q "@executable_path/../Frameworks"; then
+        install_name_tool -add_rpath "@executable_path/../Frameworks" "$binary"
+    fi
+}
+
 build_bundle() {
     local version="$1"         # integer CFBundleVersion (1 or 2)
     local bundle_dir="$STAGING/Bough_v${version}.app"
@@ -104,15 +141,18 @@ build_bundle() {
     # For v1: override SUFeedURL to the local file:// appcast (step 6 below)
     # (done in a second call after appcast is generated — see override_feed_url)
 
-    # Stub the Mach-O executable (Sparkle checks it exists; a real build would
-    # copy the compiled binary here; for the smoke test we use swift build output)
     local swift_exe
     swift_exe="$REPO_ROOT/.build/release/Bough"
     if [[ -f "$swift_exe" ]]; then
         cp "$swift_exe" "$macos_dir/Bough"
+        embed_sparkle_runtime "$contents"
     else
-        # No release build — create a minimal stub so hdiutil can package it
-        echo "WARNING: .build/release/Bough not found; creating executable stub" >&2
+        if [[ "$SKIP_INTERACTIVE" != "1" ]]; then
+            echo "ERROR: interactive smoke requires a real .build/release/Bough executable." >&2
+            echo "Run 'swift build -c release' first, or set SKIP_INTERACTIVE=1 for pipeline-only validation." >&2
+            exit 1
+        fi
+        echo "WARNING: .build/release/Bough not found; creating pipeline-only executable stub" >&2
         printf '#!/bin/sh\nexec echo "Bough stub v%s"\n' "$version" > "$macos_dir/Bough"
         chmod +x "$macos_dir/Bough"
     fi
@@ -185,8 +225,13 @@ generate_appcast_xml() {
 
     local appcast="$STAGING/appcast.xml"
     if [[ ! -f "$appcast" ]]; then
-        # generate_appcast may name it differently; search
-        appcast=$(find "$STAGING" -name "*.xml" -maxdepth 1 | head -1)
+        # generate_appcast may name it differently; search the staging root.
+        for candidate in "$STAGING"/*.xml; do
+            if [[ -f "$candidate" ]]; then
+                appcast="$candidate"
+                break
+            fi
+        done
     fi
     if [[ -z "$appcast" ]] || [[ ! -f "$appcast" ]]; then
         echo "ERROR: generate_appcast did not produce an appcast XML file in $STAGING" >&2
@@ -222,12 +267,25 @@ override_feed_url() {
 # ---------------------------------------------------------------------------
 seed_usage() {
     echo "=== Step 7: seeding usage-daily.json baseline ===" >&2
+    if [[ "$TOUCH_REAL_USAGE" != "1" ]]; then
+        echo "ERROR: interactive Sparkle preservation smoke writes real $USAGE_FILE." >&2
+        echo "Set BOUGH_SMOKE_TOUCH_REAL_USAGE=1 to opt in after backing up user data." >&2
+        exit 2
+    fi
 
     mkdir -p "$BOUGH_DATA_DIR"
+    if [[ "$USAGE_SEEDED" != "1" ]]; then
+        if [[ -f "$USAGE_FILE" ]]; then
+            ORIGINAL_USAGE_EXISTED="1"
+            ORIGINAL_USAGE_BACKUP="$STAGING_ROOT/original-usage-daily.json"
+            cp "$USAGE_FILE" "$ORIGINAL_USAGE_BACKUP"
+        fi
+        USAGE_SEEDED="1"
+    fi
     local baseline='{"2026-01-01":{"tokens":100,"sessions":5}}'
     printf '%s' "$baseline" > "$USAGE_FILE"
 
-    echo "==> Seeded: $USAGE_FILE" >&2
+    echo "==> Seeded smoke baseline: $USAGE_FILE (original restored on exit)" >&2
 }
 
 # ---------------------------------------------------------------------------
@@ -290,6 +348,10 @@ main() {
     echo "=== Sparkle upgrade smoke test (D-03) ===" >&2
     if [[ "$SKIP_INTERACTIVE" == "1" ]]; then
         echo "==> SKIP_INTERACTIVE=1: steps 7-10 (UI + assertions) will be skipped" >&2
+    elif [[ "$TOUCH_REAL_USAGE" != "1" ]]; then
+        echo "ERROR: full interactive smoke writes real $USAGE_FILE." >&2
+        echo "Set BOUGH_SMOKE_TOUCH_REAL_USAGE=1 to opt in after backing up user data." >&2
+        exit 2
     fi
 
     preflight
@@ -312,7 +374,7 @@ main() {
 
     if [[ "$SKIP_INTERACTIVE" == "1" ]]; then
         echo "==> Signing + appcast-generation pipeline complete (interactive steps skipped)" >&2
-        echo "PASS (CI mode)" >&2
+        echo "PARTIAL (pipeline-only; interactive Sparkle upgrade not verified)" >&2
         exit 0
     fi
 

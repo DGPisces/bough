@@ -3,7 +3,13 @@ import Foundation
 public final class UsageMonitorRunner {
     public static let appClosedIdleInterval: TimeInterval = 300
     public static let sampleFreshnessInterval: TimeInterval = 900
+    public static let sampleFutureSkewAllowance: TimeInterval = 60
     public static let staleSampleReason = "Usage data is stale"
+
+    public static func sampleTimestampIsFresh(receivedAt: Date, now: Date) -> Bool {
+        let age = now.timeIntervalSince(receivedAt)
+        return age >= -sampleFutureSkewAllowance && age <= sampleFreshnessInterval
+    }
 
     public static func defaultClaudeUsageFilePath() -> String {
         AtomicJSONStore.baseDirectoryURL()
@@ -194,9 +200,9 @@ public final class UsageMonitorRunner {
             return outcome
         }
 
-        let priorSnapshot = try? continuityStore.latestSnapshot(tool: parsed.tool)
+        let priorSnapshot = try? continuityStore.latestRecordedSnapshot(tool: parsed.tool)
         let priorSequence = try? continuityStore.latestAcceptedSampleSequence(tool: parsed.tool)
-        let priorWeekly = priorSnapshot?.weekly.acceptedSnapshot
+        let priorWeekly = priorSnapshot?.weeklySnapshotForForecast
         let sourceIsFresh = sampleIsFresh(receivedAt: acceptedAt)
         let today: TodayValue? = {
             guard sourceIsFresh else { return nil }
@@ -300,14 +306,12 @@ public final class UsageMonitorRunner {
 
         do {
             let url = URL(fileURLWithPath: statusPath)
-            try fileManager.createDirectory(
-                at: url.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
+            try BoughPrivateStorage.ensurePrivateDirectoryForFile(at: url, fileManager: fileManager)
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try encoder.encode(status).write(to: url, options: .atomic)
+            try BoughPrivateStorage.protectPrivateFile(at: url, fileManager: fileManager)
         } catch {
             // Status writes are observability only; continuity store errors are
             // surfaced through the returned run outcome.
@@ -323,6 +327,22 @@ public final class UsageMonitorRunner {
             return
         }
 
+        if outcomes.contains(where: { outcome in
+            if case .failed = outcome { return true }
+            return false
+        }) {
+            writeStatus(for: .failed(reason: "Usage monitor cycle failed"), heartbeatAt: heartbeatAt)
+            return
+        }
+
+        if outcomes.contains(where: { outcome in
+            if case .unavailable = outcome { return true }
+            return false
+        }) {
+            writeStatus(for: .unavailable(reason: "Usage sources unavailable"), heartbeatAt: heartbeatAt)
+            return
+        }
+
         if let nonFatal = outcomes.reversed().compactMap({ outcome -> UsageMonitorRunOutcome? in
             switch outcome {
             case .duplicate, .stale, .skipped:
@@ -332,14 +352,6 @@ public final class UsageMonitorRunner {
             }
         }).first {
             writeStatus(for: nonFatal, heartbeatAt: heartbeatAt)
-            return
-        }
-
-        if outcomes.contains(where: { outcome in
-            if case .failed = outcome { return true }
-            return false
-        }) {
-            writeStatus(for: .failed(reason: "Usage monitor cycle failed"), heartbeatAt: heartbeatAt)
             return
         }
 
@@ -359,7 +371,7 @@ public final class UsageMonitorRunner {
     }
 
     private func sampleIsFresh(receivedAt: Date) -> Bool {
-        now().timeIntervalSince(receivedAt) <= Self.sampleFreshnessInterval
+        Self.sampleTimestampIsFresh(receivedAt: receivedAt, now: now())
     }
 
     private func recordRecoveryEdges(
@@ -388,7 +400,7 @@ public final class UsageMonitorRunner {
                 windowKind: windowKind,
                 priorSlot: priorSnapshot.windowSlot(for: windowKind).acceptedForRecovery,
                 currentSlot: currentWindow,
-                priorAvailability: .available,
+                priorAvailability: priorSnapshot.availability,
                 currentAvailability: currentSnapshot.availability,
                 priorAcceptedSequence: priorSequence,
                 currentAcceptedSequence: currentSequence,
@@ -458,6 +470,18 @@ private extension UsageSnapshot {
         switch kind {
         case .fiveHour: return fiveHour
         case .weekly: return weekly
+        }
+    }
+
+    var weeklySnapshotForForecast: UsageWindowSnapshot? {
+        switch availability {
+        case .available, .partial:
+            if case .available(let snapshot) = weekly {
+                return snapshot
+            }
+            return nil
+        case .loading, .stale, .unavailable:
+            return nil
         }
     }
 }

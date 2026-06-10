@@ -151,6 +151,62 @@ final class JSONLTailerTests: XCTestCase {
         tailer.detach(sessionId: "s1")
     }
 
+    func testSplitAppendedLineIsParsedOnce() throws {
+        let url = temporaryFileURL()
+        try Data("".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let expectation = self.expectation(description: "delta delivered after line completes")
+        let captured = LockedBox<ConversationTailDelta?>(nil)
+
+        let tailer = JSONLTailer(
+            queue: DispatchQueue(label: "tailer-test"),
+            onDelta: { delta in
+                captured.set(delta)
+                expectation.fulfill()
+            }
+        )
+        tailer.attach(sessionId: "s1", filePath: url.path)
+        Thread.sleep(forTimeInterval: 0.15)
+
+        let line = assistantLine(text: "split once") + "\n"
+        let splitIndex = line.index(line.startIndex, offsetBy: line.count / 2)
+        try appendToFile(url: url, content: String(line[..<splitIndex]))
+        Thread.sleep(forTimeInterval: 0.15)
+        try appendToFile(url: url, content: String(line[splitIndex...]))
+
+        wait(for: [expectation], timeout: 2)
+
+        XCTAssertEqual(captured.get()?.lastAssistantMessage, "split once")
+        tailer.detach(sessionId: "s1")
+    }
+
+    func testAssistantLineWithWhitespaceAroundTypeColonIsParsed() throws {
+        let url = temporaryFileURL()
+        try Data("".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let expectation = self.expectation(description: "initial delta delivered")
+        let captured = LockedBox<ConversationTailDelta?>(nil)
+        let tailer = JSONLTailer(
+            queue: DispatchQueue(label: "tailer-test"),
+            onDelta: { delta in
+                captured.set(delta)
+                expectation.fulfill()
+            }
+        )
+        tailer.attach(sessionId: "s1", filePath: url.path)
+        Thread.sleep(forTimeInterval: 0.15)
+
+        let line = #"{"type" : "assistant","message":{"content":[{"type":"text","text":"spaced type"}]}}"# + "\n"
+        try appendToFile(url: url, content: line)
+
+        wait(for: [expectation], timeout: 2)
+
+        XCTAssertEqual(captured.get()?.lastAssistantMessage, "spaced type")
+        tailer.detach(sessionId: "s1")
+    }
+
     func testDetachStopsFurtherCallbacks() throws {
         let url = temporaryFileURL()
         try Data("".utf8).write(to: url)
@@ -178,6 +234,63 @@ final class JSONLTailerTests: XCTestCase {
         XCTAssertEqual(callCount.get(), 1)
     }
 
+    func testDelayedReplacementAfterDeleteIsRetried() throws {
+        let url = temporaryFileURL()
+        try Data("".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let expectation = self.expectation(description: "delta delivered after delayed replacement")
+        let captured = LockedBox<ConversationTailDelta?>(nil)
+        let tailer = JSONLTailer(
+            queue: DispatchQueue(label: "tailer-test"),
+            onDelta: { delta in
+                captured.set(delta)
+                expectation.fulfill()
+            }
+        )
+        tailer.attach(sessionId: "s1", filePath: url.path)
+        Thread.sleep(forTimeInterval: 0.15)
+
+        try FileManager.default.removeItem(at: url)
+        Thread.sleep(forTimeInterval: 0.25)
+        try Data("".utf8).write(to: url)
+        Thread.sleep(forTimeInterval: 0.6)
+        try appendToFile(url: url, content: assistantLine(text: "after rotate") + "\n")
+
+        wait(for: [expectation], timeout: 3)
+
+        XCTAssertEqual(captured.get()?.sessionId, "s1")
+        XCTAssertEqual(captured.get()?.lastAssistantMessage, "after rotate")
+        tailer.detach(sessionId: "s1")
+    }
+
+    func testActiveSessionCountCanBeReadFromDeltaCallback() throws {
+        let url = temporaryFileURL()
+        try Data("".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let expectation = self.expectation(description: "delta reads active count")
+        let count = LockedBox<Int?>(nil)
+        let tailerBox = LockedBox<JSONLTailer?>(nil)
+        let tailer = JSONLTailer(
+            queue: DispatchQueue(label: "tailer-test-active-count"),
+            onDelta: { _ in
+                guard let tailer = tailerBox.get() else { return }
+                count.set(tailer.activeSessionCount)
+                expectation.fulfill()
+            }
+        )
+        tailerBox.set(tailer)
+        tailer.attach(sessionId: "s1", filePath: url.path)
+        Thread.sleep(forTimeInterval: 0.15)
+
+        try appendToFile(url: url, content: assistantLine(text: "count") + "\n")
+
+        wait(for: [expectation], timeout: 2)
+        XCTAssertEqual(count.get(), 1)
+        tailer.detach(sessionId: "s1")
+    }
+
     // MARK: - Fixtures
 
     private func assistantLine(text: String) -> String {
@@ -203,8 +316,15 @@ final class JSONLTailerTests: XCTestCase {
     }
 
     private func jsonString(_ obj: [String: Any]) -> String {
-        let data = try! JSONSerialization.data(withJSONObject: obj)
-        return String(data: data, encoding: .utf8)!
+        do {
+            let data = try JSONSerialization.data(withJSONObject: obj)
+            guard let string = String(data: data, encoding: .utf8) else {
+                preconditionFailure("JSON fixture encoded non-UTF8 data")
+            }
+            return string
+        } catch {
+            preconditionFailure("JSON fixture is not serializable: \(error)")
+        }
     }
 
     private func temporaryFileURL() -> URL {

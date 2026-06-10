@@ -14,8 +14,8 @@
 		<false/>
 	</dict>
 	<key>StandardOutPath</key>
-	<string>/tmp/dev.dgpisces.bough.usage-monitor.out.log</string>
+	<string>/dev/null</string>
 	<key>StandardErrorPath</key>
-	<string>/tmp/dev.dgpisces.bough.usage-monitor.err.log</string>
+	<string>/dev/null</string>
 </dict>
 </plist>

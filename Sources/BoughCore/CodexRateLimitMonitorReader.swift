@@ -30,22 +30,31 @@ public final class CodexAppServerRateLimitMonitorReader: CodexRateLimitMonitorRe
     }
 
     public func readRateLimits() throws -> [String: AnyCodableLike] {
+        let initializationState = CodexRateLimitReadState(requiresObjectResult: false)
         let state = CodexRateLimitReadState()
         let client = CodexAppServerClient(
             executableURL: executableURL,
             callbackQueue: callbackQueue
         )
         client.onMessage = { message in
+            initializationState.receive(message)
             state.receive(message)
         }
         client.onExit = { _ in
+            initializationState.finish(.failure(CodexRateLimitMonitorReaderError.serviceStopped))
             state.finish(.failure(CodexRateLimitMonitorReaderError.serviceStopped))
         }
 
         try client.start()
         defer { client.stop() }
 
-        _ = try client.initializeHandshake(clientName: "Bough", clientVersion: clientVersion)
+        let initializationID = try client.initializeHandshake(clientName: "Bough", clientVersion: clientVersion)
+        initializationState.setRequestID(initializationID)
+        guard initializationState.wait(timeoutSeconds: timeoutSeconds) else {
+            throw CodexRateLimitMonitorReaderError.requestTimedOut
+        }
+        _ = try initializationState.resolvedResult()
+
         let requestID = try client.sendRequest(method: "account/rateLimits/read", params: nil)
         state.setRequestID(requestID)
 
@@ -59,9 +68,14 @@ public final class CodexAppServerRateLimitMonitorReader: CodexRateLimitMonitorRe
 private final class CodexRateLimitReadState: @unchecked Sendable {
     private let lock = NSLock()
     private let semaphore = DispatchSemaphore(value: 0)
+    private let requiresObjectResult: Bool
     private var requestID: CodexRequestID?
     private var bufferedMessages: [CodexJSONRPCMessage] = []
     private var result: Result<[String: AnyCodableLike], Error>?
+
+    init(requiresObjectResult: Bool = true) {
+        self.requiresObjectResult = requiresObjectResult
+    }
 
     func setRequestID(_ requestID: CodexRequestID) {
         let messages: [CodexJSONRPCMessage]
@@ -94,6 +108,8 @@ private final class CodexRateLimitReadState: @unchecked Sendable {
         case .response(let responseID) where responseID == requestID:
             if let payload = message.raw["result"]?.asObject {
                 resolved = .success(payload)
+            } else if !requiresObjectResult {
+                resolved = .success([:])
             } else {
                 resolved = .failure(CodexRateLimitMonitorReaderError.invalidRateLimitResponse)
             }

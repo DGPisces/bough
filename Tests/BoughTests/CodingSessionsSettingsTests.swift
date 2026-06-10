@@ -54,8 +54,14 @@ final class CodingSessionsSettingsTests: XCTestCase {
     }
 
     func testCopyKeysResolveToPreservationContract() {
+        TestHelpers.processStateLock.lock()
+        let savedLanguage = L10n.shared.language
+        let savedLanguageDefaultValue = UserDefaults.standard.object(forKey: SettingsKey.appLanguage)
         L10n.shared.language = "en"
-        defer { L10n.shared.language = "system" }
+        defer {
+            TestHelpers.restoreSharedLanguage(savedLanguage, savedDefaultValue: savedLanguageDefaultValue)
+            TestHelpers.processStateLock.unlock()
+        }
 
         XCTAssertEqual(CodingSessionsSettings.titleLocalizationKey, "coding_sessions")
 

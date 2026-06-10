@@ -158,20 +158,19 @@ final class MusicSettingsAndModelsTests: XCTestCase {
 
     private func sources(under relativePath: String) throws -> String {
         let root = Self.repoRoot.appendingPathComponent(relativePath, isDirectory: true)
-        guard let enumerator = FileManager.default.enumerator(
+        let enumerator = try XCTUnwrap(FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
-        ) else {
-            return ""
-        }
+        ), "Failed to enumerate source scan root: \(root.path)")
 
-        return try enumerator
+        let sources = try enumerator
             .compactMap { $0 as? URL }
             .filter { $0.pathExtension == "swift" }
             .sorted { $0.path < $1.path }
             .map { try String(contentsOf: $0, encoding: .utf8) }
-            .joined(separator: "\n")
+        XCTAssertFalse(sources.isEmpty, "Source scan must include Swift files under \(relativePath).")
+        return sources.joined(separator: "\n")
     }
 
     private static let repoRoot = TestHelpers.repoRoot(from: #filePath)

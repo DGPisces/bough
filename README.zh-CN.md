@@ -47,7 +47,7 @@ Bough 是一款 macOS 刘海实用工具，把 AI 编码智能体、用量、音
 
 ## 安装
 
-当前稳定版是 `v1.0.3`。
+当前稳定版是 `v1.0.5`。
 
 ### Homebrew Cask
 
@@ -65,7 +65,7 @@ brew install --cask DGPisces/tap/bough
 ### GitHub Releases DMG
 
 1. 打开 [GitHub Releases](https://github.com/DGPisces/bough/releases)。
-2. 下载最新 `Bough.dmg`。
+2. 下载最新的版本化 Bough DMG 资产，例如 `Bough-vX.Y.Z.dmg`。
 3. 打开 DMG，将 `Bough.app` 拖入 `/Applications`。
 4. 首次启动时，按 macOS 提示完成打开确认和必要权限设置。
 

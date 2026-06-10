@@ -66,6 +66,10 @@ final class UsageStore {
         static let claudeStaleKey = "usage_claude_stale"
     }
 
+    private func sampleTimestampIsFresh(_ receivedAt: Date) -> Bool {
+        UsageMonitorRunner.sampleTimestampIsFresh(receivedAt: receivedAt, now: now())
+    }
+
     @ObservationIgnored
     let defaults: UserDefaults
 
@@ -413,13 +417,11 @@ final class UsageStore {
         let command = UsageMonitorCommand(enabledTools: enabledTools)
         let url = URL(fileURLWithPath: usageMonitorCommandPath)
         do {
-            try FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
+            try ensureUsageFileDirectory(for: url)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try encoder.encode(command).write(to: url, options: .atomic)
+            protectUsageFileIfPrivate(url)
         } catch {
             // The helper command file is advisory. App-side preferences remain
             // authoritative and will be re-synced on the next settings change.
@@ -527,11 +529,7 @@ final class UsageStore {
         claudeUsageWatcher = nil
 
         let directory = (claudeUsageFilePath as NSString).deletingLastPathComponent
-        try? FileManager.default.createDirectory(
-            atPath: directory,
-            withIntermediateDirectories: true,
-            attributes: nil
-        )
+        try? ensureUsageFileDirectory(for: URL(fileURLWithPath: claudeUsageFilePath))
 
         let fd = open(directory, O_EVTONLY)
         guard fd >= 0 else { return }
@@ -577,7 +575,7 @@ final class UsageStore {
         }
 
         let priorWeekly = acceptedWeeklySnapshot(for: .claudeCode)
-        let sourceIsFresh = now().timeIntervalSince(currentDate) <= Constants.sampleFreshnessInterval
+        let sourceIsFresh = sampleTimestampIsFresh(currentDate)
         let today: TodayValue? = {
             guard sourceIsFresh else { return nil }
             guard case .available(let weekly) = parsed.weekly else { return nil }
@@ -835,11 +833,12 @@ final class UsageStore {
     }
 
     private func acceptedWeeklySnapshot(for tool: UsageTool) -> UsageWindowSnapshot? {
-        guard let snapshot = snapshots[tool],
-              case .available(let weekly) = snapshot.weekly else {
-            return nil
+        if let continuityStore,
+           let recorded = try? continuityStore.latestRecordedSnapshot(tool: tool),
+           let weekly = recorded.weeklySnapshotForForecast {
+            return weekly
         }
-        return weekly
+        return snapshots[tool]?.weeklySnapshotForForecast
     }
 
     func evaluateStaleness() {
@@ -850,7 +849,7 @@ final class UsageStore {
     private func evaluateCodexStaleness() {
         guard var snapshot = snapshots[.codex] else { return }
         guard let lastRefresh = snapshot.lastRefresh else { return }
-        let stale = now().timeIntervalSince(lastRefresh) > Constants.sampleFreshnessInterval
+        let stale = !sampleTimestampIsFresh(lastRefresh)
         guard stale else { return }
 
         snapshot = UsageSnapshot(
@@ -870,7 +869,7 @@ final class UsageStore {
     private func evaluateClaudeCodeStaleness() {
         guard var snapshot = snapshots[.claudeCode] else { return }
         guard let lastRefresh = snapshot.lastRefresh else { return }
-        let stale = now().timeIntervalSince(lastRefresh) > Constants.sampleFreshnessInterval
+        let stale = !sampleTimestampIsFresh(lastRefresh)
         guard stale else { return }
 
         let reason = localized(Constants.claudeStaleKey)
@@ -1031,13 +1030,7 @@ final class UsageStore {
     }
 
     private func claudeStatusLineHookIsInstalled() -> Bool {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: claudeSettingsFilePath)),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let statusLine = json["statusLine"] as? [String: Any],
-              let command = statusLine["command"] as? String else {
-            return false
-        }
-        return command.contains("bough-statusline-bridge.sh")
+        ConfigInstaller.boughClaudeCodeStatusLineIsInstalled(settingsPath: claudeSettingsFilePath)
     }
 
     private func localized(_ key: String) -> String {
@@ -1047,6 +1040,23 @@ final class UsageStore {
     private func bumpSnapshotRevision() {
         snapshotRevision += 1
     }
+
+    private func ensureUsageFileDirectory(for fileURL: URL) throws {
+        let directoryURL = fileURL.deletingLastPathComponent()
+        if directoryURL.lastPathComponent == ".bough" {
+            try BoughPrivateStorage.ensurePrivateDirectory(at: directoryURL)
+        } else {
+            try FileManager.default.createDirectory(
+                at: directoryURL,
+                withIntermediateDirectories: true
+            )
+        }
+    }
+
+    private func protectUsageFileIfPrivate(_ fileURL: URL) {
+        guard fileURL.deletingLastPathComponent().lastPathComponent == ".bough" else { return }
+        BoughPrivateStorage.protectPrivateFileIfPresent(atPath: fileURL.path)
+    }
 }
 
 private extension UsageSnapshot {
@@ -1054,6 +1064,18 @@ private extension UsageSnapshot {
         switch kind {
         case .fiveHour: return fiveHour
         case .weekly: return weekly
+        }
+    }
+
+    var weeklySnapshotForForecast: UsageWindowSnapshot? {
+        switch availability {
+        case .available, .partial:
+            if case .available(let snapshot) = self.weekly {
+                return snapshot
+            }
+            return nil
+        case .loading, .stale, .unavailable:
+            return nil
         }
     }
 }

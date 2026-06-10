@@ -89,11 +89,66 @@ final class CodexAppServerClientTests: XCTestCase {
         XCTAssertFalse(client.isRunning)
     }
 
+    func testHandlerPropertiesCanBeChangedConcurrently() {
+        let client = CodexAppServerClient(
+            executableURL: URL(fileURLWithPath: "/bin/cat"),
+            arguments: [],
+            callbackQueue: DispatchQueue(label: "dev.dgpisces.bough.codex-client-test-callbacks")
+        )
+        let queue = DispatchQueue(label: "dev.dgpisces.bough.codex-client-test-callback-race", attributes: .concurrent)
+        let group = DispatchGroup()
+
+        for index in 0..<2_000 {
+            group.enter()
+            queue.async {
+                if index.isMultiple(of: 2) {
+                    client.onMessage = { _ in }
+                    client.onExit = { _ in }
+                } else {
+                    client.onMessage = nil
+                    client.onExit = nil
+                }
+                _ = client.onMessage
+                _ = client.onExit
+                group.leave()
+            }
+        }
+
+        if group.wait(timeout: .now() + 3) == .timedOut {
+            XCTFail("handler property access should not deadlock under concurrent mutation")
+        }
+    }
+
+    func testReadBufferLifecycleIsSerializedOnIOQueue() throws {
+        let source = try sourceFile("Sources/BoughCore/CodexAppServerClient.swift")
+        let startBody = try sourceSlice(source, from: "public func start() throws {", to: "public func stop()")
+
+        XCTAssertFalse(startBody.contains("self.readBuffer.removeAll"))
+        XCTAssertTrue(source.contains("resetReadBufferIfCurrent(generation: generation)"))
+        XCTAssertTrue(source.contains("ingest(data: data, generation: generation)"))
+        XCTAssertTrue(source.contains("handleProcessExit(status: status, generation: generation)"))
+    }
+
     private func openFileDescriptorCount() throws -> Int {
         try FileManager.default
             .contentsOfDirectory(atPath: "/dev/fd")
             .compactMap(Int.init)
             .count
+    }
+
+    private func sourceFile(_ relativePath: String) throws -> String {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        return try String(contentsOf: repoRoot.appendingPathComponent(relativePath), encoding: .utf8)
+    }
+
+    private func sourceSlice(_ source: String, from start: String, to end: String) throws -> String {
+        let startRange = try XCTUnwrap(source.range(of: start))
+        let afterStart = source[startRange.lowerBound...]
+        let endRange = try XCTUnwrap(afterStart.range(of: end))
+        return String(afterStart[..<endRange.lowerBound])
     }
 
     private func assertOpenFileDescriptorCountSettles(

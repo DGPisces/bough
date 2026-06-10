@@ -102,13 +102,13 @@ func debugLog(_ message: String) {
     guard ProcessInfo.processInfo.environment["BOUGH_DEBUG"] != nil else { return }
     let ts = ISO8601DateFormatter().string(from: Date())
     let line = "[\(ts)] \(message)\n"
-    let path = "/tmp/bough-bridge.log"
-    if let handle = FileHandle(forWritingAtPath: path) {
-        handle.seekToEndOfFile()
-        handle.write(Data(line.utf8))
-        handle.closeFile()
-    } else {
-        FileManager.default.createFile(atPath: path, contents: Data(line.utf8))
+    let path = "/tmp/bough-bridge-\(getuid()).log"
+    let fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0o600)
+    guard fd >= 0 else { return }
+    defer { close(fd) }
+    _ = fchmod(fd, 0o600)
+    line.withCString { ptr in
+        _ = write(fd, ptr, strlen(ptr))
     }
 }
 
@@ -330,7 +330,7 @@ if resolvedTrackedPID != immediateParentPID {
 
 // Validate: must have non-empty session_id
 if json["session_id"] == nil,
-   let source = sourceTag,
+   let source = effectiveSource ?? sourceTag,
    !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
     // Fallback for third-party providers that don't include a stable session ID.
     // Use the root same-source binary in the ancestry so sub-agent processes
@@ -339,7 +339,7 @@ if json["session_id"] == nil,
     // (one per sub-agent ppid).
     let sessionPID = CLIProcessResolver.resolvedSessionPID(
         immediateParentPID: Int32(immediateParentPID),
-        source: effectiveSource ?? source,
+        source: source,
         ancestry: coreAncestry
     )
     json["session_id"] = "\(source)-ppid-\(sessionPID)"

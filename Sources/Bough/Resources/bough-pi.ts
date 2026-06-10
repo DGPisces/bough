@@ -9,7 +9,7 @@
  *   pi (this extension)  ──→  /tmp/bough-{uid}.sock  ──→  Bough.app
  *
  * The extension is a socket CLIENT — no server is started. If Bough is not
- * running the socket does not exist and all send calls fail silently.
+ * running, non-blocking lifecycle/tool telemetry fails silently.
  *
  * Event mapping:
  *   session_start          →  SessionStart
@@ -24,8 +24,10 @@
  * Permission handling:
  *   Dangerous bash commands (`rm -rf`, `sudo`, `chmod 777`) are intercepted and
  *   sent as a blocking PermissionRequest via the bough-bridge binary. The
- *   extension waits for Bough's decision and returns allow/block accordingly.
- *   This replaces the built-in permission-gate.ts when Bough is active.
+ *   extension waits for Bough's decision and returns allow/block accordingly;
+ *   if Bough is unavailable or does not return an explicit allow, the command
+ *   is blocked. This replaces the built-in permission-gate.ts for those
+ *   commands while the extension is installed.
  *
  * Installation:
  *   Drop this file in ~/.pi/agent/extensions/ — it is auto-discovered.
@@ -69,13 +71,59 @@ const ENV_KEYS = [
 // ── Dangerous bash patterns (mirrors permission-gate.ts) ──────────────────────
 
 const DANGEROUS_PATTERNS: RegExp[] = [
-  /\brm\s+(-rf?|--recursive)/i,
   /\bsudo\b/i,
   /\b(chmod|chown)\b.*777/i,
 ];
 
 function isDangerous(command: string): boolean {
-  return DANGEROUS_PATTERNS.some((p) => p.test(command));
+  return containsRecursiveRm(command) || DANGEROUS_PATTERNS.some((p) => p.test(command));
+}
+
+function containsRecursiveRm(command: string): boolean {
+  for (const segment of command.split(/[;&|]+/)) {
+    const tokens = segment.trim().split(/\s+/).filter(Boolean).map(stripShellQuotes);
+    const rmIndex = tokens.findIndex((token) => token === "rm" || token.endsWith("/rm"));
+    if (rmIndex === -1) continue;
+    for (const token of tokens.slice(rmIndex + 1)) {
+      if (token === "--") break;
+      if (token === "--recursive" || token.startsWith("--recursive=")) return true;
+      if (/^-[^-]*[rR]/.test(token)) return true;
+    }
+  }
+  return false;
+}
+
+function stripShellQuotes(token: string): string {
+  let output = "";
+  let quote: "'" | "\"" | null = null;
+  let escaped = false;
+
+  for (const char of token) {
+    if (escaped) {
+      output += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+      } else {
+        output += char;
+      }
+      continue;
+    }
+    if (char === "'" || char === "\"") {
+      quote = char;
+    } else {
+      output += char;
+    }
+  }
+
+  return escaped ? `${output}\\` : output;
 }
 
 // ── Environment / TTY helpers ─────────────────────────────────────────────────
@@ -125,16 +173,24 @@ function detectTty(): string | null {
  */
 function sendToSocket(payload: object): Promise<boolean> {
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
     try {
       const sock = connect({ path: SOCKET_PATH }, () => {
         sock.write(JSON.stringify(payload));
         sock.end();
-        resolve(true);
       });
-      sock.on("error", () => resolve(false));
+      sock.on("data", () => {});
+      sock.on("end", () => finish(true));
+      sock.on("close", (hadError) => finish(!hadError));
+      sock.on("error", () => finish(false));
       sock.setTimeout(3_000, () => {
         sock.destroy();
-        resolve(false);
+        finish(false);
       });
     } catch {
       resolve(false);
@@ -147,12 +203,12 @@ function sendToSocket(payload: object): Promise<boolean> {
  * Used exclusively for blocking permission/question requests.
  *
  * @param payload    - Blocking request object.
- * @param timeoutMs  - Maximum wait time in milliseconds (default 30 s).
+ * @param timeoutMs  - Maximum wait time in milliseconds (default 24 h).
  * @returns Parsed response JSON, or `null` on error / timeout.
  */
 function sendAndWaitResponse(
   payload: object,
-  timeoutMs = 30_000,
+  timeoutMs = 86_400_000,
 ): Promise<Record<string, unknown> | null> {
   return new Promise((resolve) => {
     if (!existsSync(BRIDGE_PATH)) {
@@ -176,8 +232,12 @@ function sendAndWaitResponse(
           }
         },
       );
-      child.stdin!.write(JSON.stringify(payload));
-      child.stdin!.end();
+      if (!child.stdin) {
+        resolve(null);
+        return;
+      }
+      child.stdin.write(JSON.stringify(payload));
+      child.stdin.end();
     } catch {
       resolve(null);
     }
@@ -301,7 +361,7 @@ export default function boughExtension(pi: ExtensionAPI) {
       base(sessionId, ctx.cwd, {
         hook_event_name: "Stop",
         last_assistant_message: lastAssistantMessage || undefined,
-        ...(sessionName ? { codex_title: sessionName } : {}),
+        ...(sessionName ? { session_title: sessionName } : {}),
       }, tty),
     );
   });
@@ -311,6 +371,7 @@ export default function boughExtension(pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     const sessionId = ctx.sessionManager.getSessionId();
     const sid = `pi-${sessionId}`;
+    const toolUseId = event.toolCallId;
     const toolName = displayToolName(event.toolName);
 
     // Build a tool_input object appropriate for the tool type.
@@ -336,7 +397,8 @@ export default function boughExtension(pi: ExtensionAPI) {
         hook_event_name: "PermissionRequest",
         tool_name: toolName,
         tool_input: toolInput,
-        _pi_tool_call_id: event.toolCallId,
+        tool_use_id: toolUseId,
+        _pi_tool_call_id: toolUseId,
       }, tty);
 
       let response: Record<string, unknown> | null = null;
@@ -353,6 +415,9 @@ export default function boughExtension(pi: ExtensionAPI) {
       if (behavior?.behavior === "deny") {
         return { block: true, reason: "Blocked by Bough" };
       }
+      if (behavior?.behavior !== "allow") {
+        return { block: true, reason: "Bough is unavailable for permission review" };
+      }
 
       // Approved — fall through to normal PreToolUse event below.
     }
@@ -364,6 +429,8 @@ export default function boughExtension(pi: ExtensionAPI) {
           hook_event_name: "PreToolUse",
           tool_name: toolName,
           tool_input: toolInput,
+          tool_use_id: toolUseId,
+          _pi_tool_call_id: toolUseId,
         }, tty),
       );
     }
@@ -371,14 +438,18 @@ export default function boughExtension(pi: ExtensionAPI) {
     return undefined;
   });
 
-  pi.on("tool_result", async (_event, ctx) => {
+  pi.on("tool_result", async (event, ctx) => {
     const sessionId = ctx.sessionManager.getSessionId();
     const sid = `pi-${sessionId}`;
 
     if (pendingPermissionSessions.has(sid)) return;
 
     await sendToSocket(
-      base(sessionId, ctx.cwd, { hook_event_name: "PostToolUse" }, tty),
+      base(sessionId, ctx.cwd, {
+        hook_event_name: "PostToolUse",
+        tool_use_id: event.toolCallId,
+        _pi_tool_call_id: event.toolCallId,
+      }, tty),
     );
   });
 

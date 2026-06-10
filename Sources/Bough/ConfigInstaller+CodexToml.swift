@@ -243,7 +243,7 @@ extension ConfigInstaller {
             passOneOutput.append("\n")
         }
 
-        guard removedByPassOne || passOneOutput.contains("bough-bridge") || codexTomlMayContainHooksTable(passOneOutput) else {
+        guard removedByPassOne || containsBoughBridgeCommand(passOneOutput) || codexTomlMayContainHooksTable(passOneOutput) else {
             return .nothingToDo
         }
 
@@ -1300,7 +1300,10 @@ extension ConfigInstaller {
         lines.contains { line in
             let stripped = codexTomlLineWithoutTrailingComment(line)
                 .trimmingCharacters(in: .whitespaces)
-            return codexStringAssignmentValue(stripped, key: "command")?.contains("bough-bridge") == true
+            guard let command = codexStringAssignmentValue(stripped, key: "command") else {
+                return false
+            }
+            return containsBoughBridgeCommand(command)
         }
     }
 

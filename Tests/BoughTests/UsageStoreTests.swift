@@ -6,11 +6,19 @@ import Observation
 @MainActor
 final class UsageStoreTests: XCTestCase {
     private var defaults: UserDefaults!
+    private var suiteName: String!
 
     override func setUp() {
-        let suiteName = "UsageStoreTests-\(name)"
+        suiteName = "UsageStoreTests-\(name)"
         defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    override func tearDown() {
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults = nil
+        suiteName = nil
+        super.tearDown()
     }
 
     func testSelectedProviderPersistsAndRestoresSupportedProvider() {
@@ -166,7 +174,7 @@ final class UsageStoreTests: XCTestCase {
         await store.refreshCodex(using: FakeUsageRateLimitReader(error: UsageStoreTestError.failed))
 
         let snapshot = store.snapshot(for: .codex)
-        XCTAssertEqual(snapshot.availability, .stale(reason: "Refresh failed"))
+        XCTAssertEqual(snapshot.availability, .stale(reason: L10n.shared["usage_refresh_failed"]))
         XCTAssertEqual(snapshot.weekly.snapshot?.usedPercent, 20)
         XCTAssertNil(snapshot.today)
     }
@@ -185,7 +193,7 @@ final class UsageStoreTests: XCTestCase {
 
         await store.refreshCodex(using: FakeUsageRateLimitReader(result: ["rateLimitsByLimitId": .object([:])]))
 
-        XCTAssertEqual(store.snapshot(for: .codex).availability, .unavailable(reason: "Refresh failed"))
+        XCTAssertEqual(store.snapshot(for: .codex).availability, .unavailable(reason: L10n.shared["usage_refresh_failed"]))
     }
 
     func testPastWeeklyResetTriggersRefreshAndRestoresForecast() async {
@@ -339,6 +347,25 @@ final class UsageStoreTests: XCTestCase {
         let data = try Data(contentsOf: commandURL)
         let command = try JSONDecoder().decode(UsageMonitorCommand.self, from: data)
         XCTAssertEqual(command.enabledTools, [.codex])
+    }
+
+    func testStatisticsToggleProtectsBoughHelperCommandFilePermissions() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("UsageStoreTests-\(UUID().uuidString)", isDirectory: true)
+        let boughDir = root.appendingPathComponent(".bough", isDirectory: true)
+        let commandURL = boughDir.appendingPathComponent("usage-monitor-command.json")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = UsageStore(
+            defaults: defaults,
+            scheduler: RecordingUsageRefreshScheduler(),
+            usageMonitorCommandPath: commandURL.path,
+            now: { Date(timeIntervalSince1970: 1_000) }
+        )
+
+        store.setUsageStatisticsEnabled(tool: .claudeCode, isEnabled: false)
+
+        XCTAssertEqual(try posixPermissions(of: boughDir), 0o700)
+        XCTAssertEqual(try posixPermissions(of: commandURL), 0o600)
     }
 
     func testDisabledCodingSessionsPauseStopsRefreshAndPreservesPreferences() async throws {
@@ -584,7 +611,7 @@ final class UsageStoreTests: XCTestCase {
 
         XCTAssertEqual(
             store.snapshot(for: .claudeCode).availability,
-            .unavailable(reason: "Claude Code payload-missing-rate-limits")
+            .unavailable(reason: L10n.shared["usage_claude_payload-missing-rate-limits"])
         )
     }
 
@@ -595,12 +622,13 @@ final class UsageStoreTests: XCTestCase {
 
         XCTAssertEqual(
             store.snapshot(for: .claudeCode).availability,
-            .unavailable(reason: "Claude Code parse-failure")
+            .unavailable(reason: L10n.shared["usage_claude_parse-failure"])
         )
     }
 
     func testClaudeUsageFileMissingWithoutInstalledHookMarksHookNotInstalled() {
         let paths = Self.temporaryClaudePaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         let store = UsageStore(
             defaults: defaults,
             scheduler: RecordingUsageRefreshScheduler(),
@@ -614,12 +642,13 @@ final class UsageStoreTests: XCTestCase {
 
         XCTAssertEqual(
             store.snapshot(for: .claudeCode).availability,
-            .unavailable(reason: "Claude Code statusLine hook-not-installed")
+            .unavailable(reason: L10n.shared["usage_claude_hook-not-installed"])
         )
     }
 
     func testClaudeUsageFileMissingWithInstalledHookMarksInstalledNotTriggered() throws {
         let paths = Self.temporaryClaudePaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         try FileManager.default.createDirectory(
             at: paths.settings.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -639,12 +668,74 @@ final class UsageStoreTests: XCTestCase {
 
         XCTAssertEqual(
             store.snapshot(for: .claudeCode).availability,
-            .unavailable(reason: "Claude Code statusLine hook-installed-not-triggered")
+            .unavailable(reason: L10n.shared["usage_claude_hook-installed-not-triggered"])
+        )
+    }
+
+    func testClaudeUsageFileMissingWithWrapperHookMarksInstalledNotTriggered() throws {
+        let paths = Self.temporaryClaudePaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+        try FileManager.default.createDirectory(
+            at: paths.settings.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let wrapperPath = ConfigInstaller.claudeCodeStatusLineWrapperInstallPath()
+        try Data(#"{"statusLine":{"command":"\#(wrapperPath)"}}"#.utf8)
+            .write(to: paths.settings)
+        let store = UsageStore(
+            defaults: defaults,
+            scheduler: RecordingUsageRefreshScheduler(),
+            monitorClaudeCode: false,
+            claudeUsageFilePath: paths.usage.path,
+            claudeSettingsFilePath: paths.settings.path,
+            now: { Date(timeIntervalSince1970: 1_000) }
+        )
+
+        XCTAssertFalse(store.refreshClaudeCodeUsageFromDisk())
+
+        XCTAssertEqual(
+            store.snapshot(for: .claudeCode).availability,
+            .unavailable(reason: L10n.shared["usage_claude_hook-installed-not-triggered"])
+        )
+    }
+
+    func testClaudeUsageFileMissingWithJSONCInstalledHookMarksInstalledNotTriggered() throws {
+        let paths = Self.temporaryClaudePaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+        try FileManager.default.createDirectory(
+            at: paths.settings.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data(
+            """
+            {
+              // Claude settings can be JSONC.
+              "statusLine": {
+                "command": "/Applications/Bough.app/Contents/Resources/bough-statusline-bridge.sh"
+              }
+            }
+            """.utf8
+        ).write(to: paths.settings)
+        let store = UsageStore(
+            defaults: defaults,
+            scheduler: RecordingUsageRefreshScheduler(),
+            monitorClaudeCode: false,
+            claudeUsageFilePath: paths.usage.path,
+            claudeSettingsFilePath: paths.settings.path,
+            now: { Date(timeIntervalSince1970: 1_000) }
+        )
+
+        XCTAssertFalse(store.refreshClaudeCodeUsageFromDisk())
+
+        XCTAssertEqual(
+            store.snapshot(for: .claudeCode).availability,
+            .unavailable(reason: L10n.shared["usage_claude_hook-installed-not-triggered"])
         )
     }
 
     func testClaudeUsageDiskRefreshUsesFileMTimeForAutomaticAndManualAttempt() throws {
         let paths = Self.temporaryClaudePaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         try FileManager.default.createDirectory(
             at: paths.usage.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -674,6 +765,7 @@ final class UsageStoreTests: XCTestCase {
 
     func testClaudeUsageDiskRefreshMarksOldPayloadStaleImmediately() throws {
         let paths = Self.temporaryClaudePaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         try FileManager.default.createDirectory(
             at: paths.usage.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -700,6 +792,35 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertNil(snapshot.today)
     }
 
+    func testClaudeUsageDiskRefreshMarksFuturePayloadStaleImmediately() throws {
+        let paths = Self.temporaryClaudePaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+        try FileManager.default.createDirectory(
+            at: paths.usage.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Self.claudePayload().write(to: paths.usage)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 1_120)],
+            ofItemAtPath: paths.usage.path
+        )
+        let store = UsageStore(
+            defaults: defaults,
+            scheduler: RecordingUsageRefreshScheduler(),
+            monitorClaudeCode: false,
+            claudeUsageFilePath: paths.usage.path,
+            claudeSettingsFilePath: paths.settings.path,
+            now: { Date(timeIntervalSince1970: 1_000) }
+        )
+
+        XCTAssertTrue(store.refreshClaudeCodeUsageFromDisk(markRefreshAttempt: true))
+        let snapshot = store.snapshot(for: .claudeCode)
+        XCTAssertEqual(snapshot.availability, .stale(reason: "Usage data is stale"))
+        XCTAssertEqual(snapshot.fiveHour.staleReason, "Usage data is stale")
+        XCTAssertEqual(snapshot.weekly.staleReason, "Usage data is stale")
+        XCTAssertNil(snapshot.today)
+    }
+
     func testClaudeSnapshotStalesAfterFifteenMinutes() {
         var current = Date(timeIntervalSince1970: 1_000)
         let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { current })
@@ -709,8 +830,21 @@ final class UsageStoreTests: XCTestCase {
         store.evaluateStaleness()
 
         let snapshot = store.snapshot(for: .claudeCode)
-        XCTAssertEqual(snapshot.availability, .stale(reason: "Claude Code usage data is stale"))
-        XCTAssertEqual(snapshot.weekly.staleReason, "Claude Code usage data is stale")
+        XCTAssertEqual(snapshot.availability, .stale(reason: L10n.shared["usage_claude_stale"]))
+        XCTAssertEqual(snapshot.weekly.staleReason, L10n.shared["usage_claude_stale"])
+        XCTAssertNil(snapshot.today)
+    }
+
+    func testFutureClaudeSnapshotStalesImmediately() {
+        let current = Date(timeIntervalSince1970: 1_000)
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { current })
+        store.applyClaudeCodePayload(Self.claudePayload(), receivedAt: current.addingTimeInterval(120))
+
+        store.evaluateStaleness()
+
+        let snapshot = store.snapshot(for: .claudeCode)
+        XCTAssertEqual(snapshot.availability, .stale(reason: L10n.shared["usage_claude_stale"]))
+        XCTAssertEqual(snapshot.weekly.staleReason, L10n.shared["usage_claude_stale"])
         XCTAssertNil(snapshot.today)
     }
 
@@ -773,6 +907,13 @@ final class UsageStoreTests: XCTestCase {
             .appendingPathComponent("UsageStoreTests-\(UUID().uuidString)", isDirectory: true)
             .appendingPathComponent("usage-continuity.sqlite")
     }
+
+    private func posixPermissions(of url: URL) throws -> Int {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let permissions = try XCTUnwrap(attributes[.posixPermissions] as? NSNumber)
+        return permissions.intValue & 0o777
+    }
+
 }
 
 private enum UsageStoreTestError: Error { case failed }
@@ -991,11 +1132,19 @@ final class UsageStoreRefreshTrackingTests: XCTestCase {
     /// .standard suite during local `swift test` runs. Mirrors the pattern
     /// already used by UsageStoreTests in this file.
     private var defaults: UserDefaults!
+    private var suiteName: String!
 
     override func setUp() {
-        let suiteName = "UsageStoreRefreshTrackingTests-\(name)"
+        suiteName = "UsageStoreRefreshTrackingTests-\(name)"
         defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    override func tearDown() {
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults = nil
+        suiteName = nil
+        super.tearDown()
     }
 
     /// Stub reader that lets the test observe the in-flight counter mid-flight

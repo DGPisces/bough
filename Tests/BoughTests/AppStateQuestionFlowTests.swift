@@ -33,8 +33,10 @@ final class AppStateQuestionFlowTests: XCTestCase {
 
         let responseData = await responseTask.value
         let answers = try extractAnswers(from: responseData)
+        let answerValues = try extractAnswerValues(from: responseData)
         XCTAssertEqual(answers["工作模式"] as? String, "先给方案")
         XCTAssertEqual(answers["输出风格"] as? String, "平衡")
+        XCTAssertEqual(answerValues, ["先给方案", "平衡"])
     }
 
     // MARK: - Single question
@@ -62,6 +64,64 @@ final class AppStateQuestionFlowTests: XCTestCase {
         let responseData = await responseTask.value
         let answers = try extractAnswers(from: responseData)
         XCTAssertEqual(answers["语言偏好"] as? String, "中文")
+    }
+
+    func testAskUserQuestionMultiSelectPreservesCommaContainingAnswers() async throws {
+        let appState = AppState()
+        let event = try makeAskUserQuestionEvent(
+            sessionId: "s-multi-comma",
+            questions: [
+                question(
+                    header: "范围",
+                    text: "选择要处理的范围",
+                    options: ["API, docs", "Tests"],
+                    multiple: true
+                )
+            ]
+        )
+
+        let responseTask = Task<Data, Never> {
+            await withCheckedContinuation { continuation in
+                appState.handleAskUserQuestion(event, continuation: continuation)
+            }
+        }
+
+        await Task.yield()
+        appState.answerQuestionMulti([
+            (question: "选择要处理的范围", answer: .multiple(["API, docs", "Other, custom"])),
+        ])
+
+        let responseData = await responseTask.value
+        let answers = try extractAnswers(from: responseData)
+        let answerValues = try extractRawAnswerValues(from: responseData)
+        XCTAssertEqual(answers["范围"] as? [String], ["API, docs", "Other, custom"])
+        XCTAssertEqual(answerValues.first as? [String], ["API, docs", "Other, custom"])
+    }
+
+    func testNotificationQuestionMultiAnswerSerializesJSONValue() async throws {
+        let appState = AppState()
+        let event = try makeNotificationQuestionEvent(
+            sessionId: "s-notification-question",
+            text: "Choose an action",
+            options: ["Continue", "Stop"]
+        )
+
+        let responseTask = Task<Data, Never> {
+            await withCheckedContinuation { continuation in
+                appState.handleQuestion(event, continuation: continuation)
+            }
+        }
+
+        await Task.yield()
+        appState.answerQuestionMulti([
+            (question: "Choose an action", answer: .multiple(["Continue", "Stop"])),
+        ])
+
+        let responseData = await responseTask.value
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: responseData) as? [String: Any])
+        let output = try XCTUnwrap(json["hookSpecificOutput"] as? [String: Any])
+        XCTAssertEqual(output["hookEventName"] as? String, "Notification")
+        XCTAssertEqual(output["answer"] as? [String], ["Continue", "Stop"])
     }
 
     // MARK: - Skip returns deny
@@ -281,7 +341,7 @@ final class AppStateQuestionFlowTests: XCTestCase {
             ]
         )
 
-        _ = Task<Data, Never> {
+        let responseTask = Task<Data, Never> {
             await withCheckedContinuation { continuation in
                 appState.handleAskUserQuestion(event, continuation: continuation)
             }
@@ -290,6 +350,48 @@ final class AppStateQuestionFlowTests: XCTestCase {
         await Task.yield()
         appState.answerQuestion("A")
         XCTAssertEqual(appState.questionQueue.count, 1, "Queue should not be drained by direct answerQuestion")
+        appState.skipQuestion()
+        _ = await responseTask.value
+    }
+
+    func testAskUserQuestionDoesNotStealVisibleApprovalCard() async throws {
+        let appState = AppState()
+        let permissionEvent = try makePermissionRequestEvent(
+            sessionId: "s-visible-approval",
+            description: "needs approval",
+            command: "echo approve"
+        )
+        let askEvent = try makeAskUserQuestionEvent(
+            sessionId: "s-ask",
+            questions: [
+                question(header: "Q1", text: "Question?", options: ["A", "B"]),
+            ]
+        )
+
+        let permissionTask = Task<Data, Never> {
+            await withCheckedContinuation { continuation in
+                appState.handlePermissionRequest(permissionEvent, continuation: continuation)
+            }
+        }
+        await Task.yield()
+        let askTask = Task<Data, Never> {
+            await withCheckedContinuation { continuation in
+                appState.handleAskUserQuestion(askEvent, continuation: continuation)
+            }
+        }
+        await Task.yield()
+
+        XCTAssertEqual(appState.surface, .approvalCard(sessionId: "s-visible-approval"))
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+        XCTAssertEqual(appState.questionQueue.count, 1)
+
+        appState.denyPermission()
+        let permissionResponse = await permissionTask.value
+        XCTAssertEqual(try extractPermissionBehavior(from: permissionResponse), "deny")
+        XCTAssertEqual(appState.surface, .questionCard(sessionId: "s-ask"))
+
+        appState.skipQuestion()
+        _ = await askTask.value
     }
 
     // MARK: - Helpers
@@ -329,10 +431,26 @@ final class AppStateQuestionFlowTests: XCTestCase {
         return event
     }
 
-    private func question(header: String?, text: String, options: [String]) -> [String: Any] {
+    private func makeNotificationQuestionEvent(sessionId: String, text: String, options: [String]) throws -> HookEvent {
+        let payload: [String: Any] = [
+            "hook_event_name": "Notification",
+            "session_id": sessionId,
+            "question": text,
+            "options": options,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        guard let event = HookEvent(from: data) else {
+            XCTFail("Failed to parse HookEvent")
+            throw NSError(domain: "AppStateQuestionFlowTests", code: 3)
+        }
+        return event
+    }
+
+    private func question(header: String?, text: String, options: [String], multiple: Bool = false) -> [String: Any] {
         var result: [String: Any] = [
             "question": text,
-            "options": options.map { ["label": $0, "description": ""] }
+            "options": options.map { ["label": $0, "description": ""] },
+            "multiSelect": multiple
         ]
         if let header {
             result["header"] = header
@@ -346,6 +464,18 @@ final class AppStateQuestionFlowTests: XCTestCase {
         let decision = try XCTUnwrap(hookSpecificOutput["decision"] as? [String: Any])
         let updatedInput = try XCTUnwrap(decision["updatedInput"] as? [String: Any])
         return try XCTUnwrap(updatedInput["answers"] as? [String: Any])
+    }
+
+    private func extractAnswerValues(from responseData: Data) throws -> [String] {
+        try extractRawAnswerValues(from: responseData).compactMap { $0 as? String }
+    }
+
+    private func extractRawAnswerValues(from responseData: Data) throws -> [Any] {
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: responseData) as? [String: Any])
+        let hookSpecificOutput = try XCTUnwrap(json["hookSpecificOutput"] as? [String: Any])
+        let decision = try XCTUnwrap(hookSpecificOutput["decision"] as? [String: Any])
+        let updatedInput = try XCTUnwrap(decision["updatedInput"] as? [String: Any])
+        return try XCTUnwrap(updatedInput["answerValues"] as? [Any])
     }
 
     private func extractPermissionBehavior(from responseData: Data) throws -> String {

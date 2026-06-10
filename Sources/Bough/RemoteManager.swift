@@ -18,6 +18,8 @@ final class RemoteManager: ObservableObject {
     // Auto-reconnect (#92): when an ssh tunnel drops without the user asking for
     // it (laptop sleep / network blip / server bounce), schedule a retry with
     // exponential backoff instead of leaving the host silently disconnected.
+    private var connectTasks: [String: Task<Void, Never>] = [:]
+    private var installTasks: [String: Task<Void, Never>] = [:]
     private var reconnectTasks: [String: Task<Void, Never>] = [:]
     private var reconnectAttempts: [String: Int] = [:]
 
@@ -87,12 +89,13 @@ final class RemoteManager: ObservableObject {
 
     private func connectInternal(id: String) {
         guard let host = hosts.first(where: { $0.id == id }) else { return }
-        guard !host.sshTarget.isEmpty else {
+        guard host.validatedSSHTarget != nil else {
             connectionStatus[id] = .failed("invalid host")
             lastMessage[id] = "invalid host"
             return
         }
 
+        connectTasks[id]?.cancel()
         let forwarder = forwarders[id] ?? SSHForwarder()
         forwarders[id] = forwarder
         forwarder.onStatusChange = { [weak self] status in
@@ -104,9 +107,17 @@ final class RemoteManager: ObservableObject {
         connectionStatus[id] = .connecting
         lastMessage[id] = host.displayAddress
 
-        Task {
+        connectTasks[id] = Task { [weak self, weak forwarder] in
             await RemoteInstaller.cleanupRemoteSocket(host: host)
+            guard !Task.isCancelled else { return }
             await MainActor.run {
+                guard let self, let forwarder else { return }
+                guard self.forwarders[id] === forwarder,
+                      self.connectionStatus[id] == .connecting
+                else {
+                    return
+                }
+                self.connectTasks[id] = nil
                 forwarder.connect(host: host, localSocketPath: HookServer.socketPath)
             }
         }
@@ -114,9 +125,15 @@ final class RemoteManager: ObservableObject {
 
     func disconnect(id: String) {
         cancelScheduledReconnect(id: id)
+        connectTasks[id]?.cancel()
+        connectTasks[id] = nil
+        installTasks[id]?.cancel()
+        installTasks[id] = nil
         reconnectAttempts[id] = nil
-        forwarders[id]?.disconnect()
+        let forwarder = forwarders[id]
         forwarders[id] = nil
+        forwarder?.onStatusChange = nil
+        forwarder?.disconnect()
         connectionStatus[id] = .disconnected
         installRunning[id] = false
         onDisconnect?(id)
@@ -127,16 +144,26 @@ final class RemoteManager: ObservableObject {
 
         switch status {
         case .connected:
+            connectTasks[host.id] = nil
             // Tunnel is up again — forget previous failure counter.
             reconnectAttempts[host.id] = nil
             cancelScheduledReconnect(id: host.id)
-            Task { await installHooks(for: host) }
+            installTasks[host.id]?.cancel()
+            installTasks[host.id] = Task { [weak self] in
+                await self?.installHooks(for: host)
+            }
         case .failed(let message):
+            connectTasks[host.id] = nil
+            installTasks[host.id]?.cancel()
+            installTasks[host.id] = nil
             installRunning[host.id] = false
             lastMessage[host.id] = message
             onDisconnect?(host.id)
             scheduleReconnect(for: host)
         case .disconnected:
+            connectTasks[host.id] = nil
+            installTasks[host.id]?.cancel()
+            installTasks[host.id] = nil
             // User-initiated disconnects go through disconnect(id:) which already
             // cleared reconnect state before we get here.
             installRunning[host.id] = false
@@ -181,13 +208,36 @@ final class RemoteManager: ObservableObject {
     }
 
     private func installHooks(for host: RemoteHost) async {
+        guard hosts.contains(where: { $0.id == host.id }),
+              connectionStatus[host.id] == .connected else { return }
         installRunning[host.id] = true
         let result = await RemoteInstaller.installAll(host: host)
+        guard !Task.isCancelled,
+              hosts.contains(where: { $0.id == host.id }),
+              connectionStatus[host.id] == .connected else { return }
+        installTasks[host.id] = nil
         installRunning[host.id] = false
         lastMessage[host.id] = result.message
         if !result.ok {
-            connectionStatus[host.id] = .failed(result.message)
+            handleInstallFailure(result.message, for: host)
         }
+    }
+
+    private func handleInstallFailure(_ message: String, for host: RemoteHost) {
+        installTasks[host.id] = nil
+        installRunning[host.id] = false
+        connectTasks[host.id]?.cancel()
+        connectTasks[host.id] = nil
+
+        let forwarder = forwarders[host.id]
+        forwarders[host.id] = nil
+        forwarder?.onStatusChange = nil
+        forwarder?.disconnect()
+
+        connectionStatus[host.id] = .failed(message)
+        lastMessage[host.id] = message
+        onDisconnect?(host.id)
+        scheduleReconnect(for: host)
     }
 
     private func load() {

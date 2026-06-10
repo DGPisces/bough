@@ -88,4 +88,21 @@ final class RemoteInstallerSourceHygieneTests: XCTestCase {
         XCTAssertTrue(source.contains("timeout=5"),
                       "Python helper must use timeout=5 in subprocess.run to match Swift 5-second detect timeout")
     }
+
+    func testConfigureRemoteHooksBase64DecodeSupportsMacOSAndLinux() {
+        guard let source = loadRemoteInstallerSource() else { return }
+        XCTAssertTrue(source.contains("base64 -D 2>/dev/null"))
+        XCTAssertTrue(source.contains("base64 -d 2>/dev/null"))
+        XCTAssertTrue(source.contains("printf '%s'"))
+    }
+
+    func testRemoteHookUploadUsesPrivateDirectoryAndAtomicReplace() {
+        guard let source = loadRemoteInstallerSource() else { return }
+
+        XCTAssertTrue(source.contains("os.chmod(target.parent, 0o700)"))
+        XCTAssertTrue(source.contains("tmp.write_bytes(base64.b64decode"))
+        XCTAssertTrue(source.contains("os.chmod(tmp, 0o700)"))
+        XCTAssertTrue(source.contains("os.replace(tmp, target)"))
+        XCTAssertTrue(source.contains("os.chmod(target, 0o700)"))
+    }
 }

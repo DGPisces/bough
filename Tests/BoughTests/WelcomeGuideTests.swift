@@ -226,9 +226,9 @@ final class WelcomeGuideTests: XCTestCase {
         let source = try sourceFile("Sources/Bough/WelcomeGuideBackendIntegrator.swift")
 
         XCTAssertTrue(source.contains("WelcomeGuideBackendIntegrator"))
-        XCTAssertTrue(source.contains("ChainInstallCoordinator.shared.install"))
+        XCTAssertTrue(source.contains("ChainInstallCoordinator.shared.installClaudeIntegration"))
         XCTAssertTrue(source.contains("ConfigInstaller.setEnabled"))
-        XCTAssertTrue(source.contains("ConfigInstaller.uninstallClaudeCodeStatusLine"))
+        XCTAssertTrue(source.contains("ChainInstallCoordinator.shared.uninstallClaudeIntegration"))
         XCTAssertTrue(source.contains("UsageStore(defaults: defaults"))
         XCTAssertTrue(source.contains("UsageMonitorService().enable"))
         XCTAssertTrue(source.contains("UsageMonitorService().disableForCodingSessionsOff"))

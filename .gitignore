@@ -16,6 +16,8 @@ dist/
 # Local logs and temp files
 *.log
 *.tmp
+__pycache__/
+*.py[cod]
 
 # Local tool caches and agent config
 .codex/

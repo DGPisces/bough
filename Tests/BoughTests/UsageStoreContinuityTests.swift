@@ -5,20 +5,35 @@ import XCTest
 @MainActor
 final class UsageStoreContinuityTests: XCTestCase {
     private var defaults: UserDefaults!
+    private var suiteName: String!
     private var tempDir: URL!
+    private var lockedEnvironment = false
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        let suiteName = "UsageStoreContinuityTests-\(name)"
+        suiteName = "UsageStoreContinuityTests-\(name)"
         defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
         tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("UsageStoreContinuityTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        TestHelpers.processEnvironmentLock.lock()
+        lockedEnvironment = true
     }
 
     override func tearDownWithError() throws {
-        try? FileManager.default.removeItem(at: tempDir)
+        if let defaults, let suiteName {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        if let tempDir {
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+        defaults = nil
+        suiteName = nil
+        if lockedEnvironment {
+            TestHelpers.processEnvironmentLock.unlock()
+            lockedEnvironment = false
+        }
         try super.tearDownWithError()
     }
 

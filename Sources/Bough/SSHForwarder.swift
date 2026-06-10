@@ -20,13 +20,13 @@ final class SSHForwarder {
 
     private var process: Process?
     private var stderrPipe: Pipe?
+    private var pendingStderrMessage: String?
     private var generation: UInt64 = 0
 
     func connect(host: RemoteHost, localSocketPath: String) {
         disconnect()
 
-        let target = host.sshTarget
-        guard !target.isEmpty else {
+        guard host.validatedSSHTarget != nil else {
             status = .failed("invalid host")
             return
         }
@@ -34,6 +34,7 @@ final class SSHForwarder {
         generation &+= 1
         let currentGeneration = generation
         status = .connecting
+        pendingStderrMessage = nil
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -58,7 +59,14 @@ final class SSHForwarder {
                 self.process = nil
                 if case .disconnected = self.status { return }
                 let code = proc.terminationStatus
-                self.status = .failed("ssh exited (\(code))")
+                if case .connecting = self.status,
+                   let message = self.pendingStderrMessage,
+                   !message.isEmpty {
+                    self.status = .failed(message)
+                } else {
+                    self.status = .failed("ssh exited (\(code))")
+                }
+                self.pendingStderrMessage = nil
             }
         }
 
@@ -80,6 +88,7 @@ final class SSHForwarder {
         } catch {
             self.process = nil
             self.stderrPipe = nil
+            self.pendingStderrMessage = nil
             status = .failed("ssh launch failed")
         }
     }
@@ -87,16 +96,26 @@ final class SSHForwarder {
     func disconnect() {
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe = nil
+        pendingStderrMessage = nil
 
         if let process {
             status = .disconnected
             if process.isRunning {
                 process.terminate()
+                let processID = process.processIdentifier
+                let disconnectGeneration = generation
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self, weak process] in
+                    guard let self else { return }
+                    guard self.generation == disconnectGeneration else { return }
+                    guard let process, process.isRunning else { return }
+                    kill(processID, SIGKILL)
+                }
+            } else {
+                self.process = nil
             }
         } else {
             status = .disconnected
         }
-        self.process = nil
     }
 
     private func buildArguments(host: RemoteHost, localSocketPath: String) -> [String] {
@@ -121,7 +140,8 @@ final class SSHForwarder {
         }
 
         args += ["-R", "\(host.remoteSocketPath):\(localSocketPath)"]
-        args.append(host.sshTarget)
+        guard let target = host.validatedSSHTarget else { return [] }
+        args += ["--", target]
         return args
     }
 
@@ -150,9 +170,7 @@ final class SSHForwarder {
             DispatchQueue.main.async {
                 guard let self else { return }
                 guard self.generation == generation else { return }
-                if case .connecting = self.status {
-                    self.status = .failed(message)
-                }
+                self.pendingStderrMessage = message
             }
         }
     }

@@ -1,4 +1,5 @@
 import XCTest
+@testable import Bough
 
 /// Binds `Tools/Release/check-version-consistency.sh` into the `swift test`
 /// gate so every test run asserts version SSOT (per REQUIREMENTS.md
@@ -16,7 +17,6 @@ import XCTest
     ///      `SUEnableAutomaticChecks` from the source plist and asserts the
     ///      public stable appcast feed plus automatic checks.
 final class VersionConsistencyTests: XCTestCase {
-
     // MARK: - Test methods
 
     func testCheckScriptStandaloneExits() throws {
@@ -47,6 +47,10 @@ final class VersionConsistencyTests: XCTestCase {
         )
     }
 
+    func testAppVersionFallbackMatchesBundleShortVersion() throws {
+        XCTAssertEqual(AppVersion.fallback, try Self.plistExtract("CFBundleShortVersionString"))
+    }
+
     func testBundleShortVersionRejectsPrereleaseLabels() throws {
         XCTAssertFalse(
             try Self.isNumericBundleShortVersion("1.0.0-rc.1"),
@@ -56,6 +60,7 @@ final class VersionConsistencyTests: XCTestCase {
 
     func testManualDownloadPrereleaseTagMapsToNumericBundleBaseVersion() throws {
         let fixture = try Self.makeVersionFixture(shortVersion: "1.0.0", build: "1")
+        defer { try? FileManager.default.removeItem(at: fixture) }
         let script = fixture.appendingPathComponent("Tools/Release/check-version-consistency.sh").path
         let result = try Self.runCheckScript(
             scriptPath: script,
@@ -75,6 +80,22 @@ final class VersionConsistencyTests: XCTestCase {
             result.stderr.contains("BOUGH_RELEASE_TAG=v1.0.0-rc.1"),
             "Shell gate should report the explicit RC release tag instead of silently ignoring it."
         )
+    }
+
+    func testExplicitMissingAppcastFailsClosed() throws {
+        let fixture = try Self.makeVersionFixture(shortVersion: "1.0.0", build: "1")
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        let script = fixture.appendingPathComponent("Tools/Release/check-version-consistency.sh").path
+        let missingAppcast = fixture.appendingPathComponent("Tools/Release/missing-appcast.xml")
+
+        let result = try Self.runCheckScript(
+            ["--appcast", missingAppcast.path],
+            scriptPath: script,
+            environment: ["BOUGH_RELEASE_TAG": "v1.0.0"]
+        )
+
+        XCTAssertEqual(result.exitCode, 2)
+        XCTAssertTrue(result.stderr.contains("appcast not found at \(missingAppcast.path)"))
     }
 
     func testSUFeedURLAndAutomaticChecks() throws {
@@ -97,7 +118,7 @@ final class VersionConsistencyTests: XCTestCase {
     }
 
     func testReleaseLabelUsesStablePublicVersion() throws {
-        XCTAssertEqual(try Self.plistExtract("BoughReleaseLabel"), "1.0.4")
+        XCTAssertEqual(try Self.plistExtract("BoughReleaseLabel"), "1.0.5")
     }
 
     // MARK: - Helpers
@@ -240,11 +261,5 @@ final class VersionConsistencyTests: XCTestCase {
         return stdoutString
     }
 
-    /// Repo-root derivation: this file lives at
-    /// `Tests/BoughTests/VersionConsistencyTests.swift`; three
-    /// `deletingLastPathComponent()` pops yield the repo root.
-    private static let repoRoot = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent() // BoughTests/
-        .deletingLastPathComponent() // Tests/
-        .deletingLastPathComponent() // repo root
+    private static let repoRoot = TestHelpers.repoRoot(from: #filePath)
 }

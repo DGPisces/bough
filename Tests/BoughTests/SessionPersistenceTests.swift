@@ -75,4 +75,37 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(decoded.cliPid, 456)
         XCTAssertEqual(decoded.cliStartTime, cliStartTime)
     }
+
+    func testClearDeletesSessionsFromAtomicStoreHomeOverride() throws {
+        TestHelpers.processEnvironmentLock.lock()
+        let originalHome = ProcessInfo.processInfo.environment["HOME"]
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SessionPersistenceTests-\(UUID().uuidString)")
+        setenv("HOME", home.path, 1)
+        defer {
+            if let originalHome {
+                setenv("HOME", originalHome, 1)
+            } else {
+                unsetenv("HOME")
+            }
+            try? FileManager.default.removeItem(at: home)
+            TestHelpers.processEnvironmentLock.unlock()
+        }
+
+        let sessionsFile = home.appendingPathComponent(".bough/sessions.json")
+        try FileManager.default.createDirectory(
+            at: sessionsFile.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("[]".utf8).write(to: sessionsFile)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sessionsFile.path))
+
+        SessionPersistence.clear()
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: sessionsFile.path),
+            "clear() must delete the same $HOME-scoped AtomicJSONStore file that load/save use"
+        )
+    }
 }

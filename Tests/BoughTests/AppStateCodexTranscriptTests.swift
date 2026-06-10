@@ -78,6 +78,47 @@ final class AppStateCodexTranscriptTests: XCTestCase {
         XCTAssertNil(AppState.codeBuddyLatestTerminalTurnTimestamp(in: transcript))
     }
 
+#if DEBUG
+    func testCodexSessionDiscoveryScansNewestMTimeBeforeFilenameLimit() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AppStateCodexTranscriptTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let now = Date()
+        let cal = Calendar.current
+        let y = String(format: "%04d", cal.component(.year, from: now))
+        let m = String(format: "%02d", cal.component(.month, from: now))
+        let d = String(format: "%02d", cal.component(.day, from: now))
+        let dir = root.appendingPathComponent("\(y)/\(m)/\(d)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        for index in 0..<21 {
+            let url = dir.appendingPathComponent(String(format: "zz-%02d.jsonl", index))
+            try #"{"payload":{"cwd":"/other"}}"#.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes(
+                [.modificationDate: now.addingTimeInterval(TimeInterval(index))],
+                ofItemAtPath: url.path
+            )
+        }
+
+        let target = dir.appendingPathComponent("aa-target.jsonl")
+        try #"{"payload":{"cwd":"/target"}}"#.write(to: target, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.modificationDate: now.addingTimeInterval(120)],
+            ofItemAtPath: target.path
+        )
+
+        let found = AppState.testFindRecentCodexSession(
+            base: root.path,
+            cwd: "/target",
+            after: now.addingTimeInterval(-10),
+            fm: .default
+        )
+
+        XCTAssertEqual(found, target.path)
+    }
+#endif
+
     private func timestampFrom(_ raw: String) throws -> Date {
         let fractional = ISO8601DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]

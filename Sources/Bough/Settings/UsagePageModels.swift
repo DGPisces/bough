@@ -3,6 +3,8 @@ import BoughCore
 
 // MARK: - Usage Page Models
 
+private let maxClaudeStatusLineConnectivityProbeBytes = 2 * 1024 * 1024
+
 struct UsagePageActions {
     var refresh: () -> Void
     var enableCodexHooks: () -> Bool = { ConfigInstaller.setEnabled(source: "codex", enabled: true) }
@@ -254,9 +256,9 @@ struct ClaudeCodeStatusLineConnectivityModel: Equatable {
 }
 
 /// Reads `~/.bough/claude-usage.json` synchronously and classifies the
-/// data-source connectivity. Disk I/O is cheap (single small JSON), so this
-/// runs on the calling thread; it is called from `body` and recomputes on
-/// every render dependency change (e.g. statusLineMutationTick bump).
+/// data-source connectivity. The expected file is a small JSON statusLine
+/// payload; oversized files are treated as invalid so Settings does not block
+/// on an accidental large file during render.
 ///
 /// - Parameters:
 ///   - path: Override the default `~/.bough/claude-usage.json` path. Tests
@@ -281,15 +283,9 @@ func evaluateClaudeCodeStatusLineConnectivity(
     // (tests) can inject `statusLineInstalled:` to exercise this branch
     // deterministically; the default reads ConfigInstaller live.
     let installed: Bool = statusLineInstalled ?? {
-        guard let cmd = ConfigInstaller.currentClaudeCodeStatusLineCommand() else { return false }
-        let wrapper = ConfigInstaller.claudeCodeStatusLineWrapperInstallPath()
-        if cmd == wrapper { return true }
-        if let proposed = ConfigInstaller.proposedClaudeCodeStatusLineCommand(),
-           cmd == proposed { return true }
-        // Anything else (a third-party tool, an old Bough path, etc.) is
-        // treated as "Bough's pipeline is not the active source" — UI
-        // should show .absent until the user explicitly installs.
-        return false
+        ConfigInstaller.isBoughClaudeCodeStatusLineCommand(
+            ConfigInstaller.currentClaudeCodeStatusLineCommand()
+        )
     }()
     guard installed else {
         return ClaudeCodeStatusLineConnectivityModel(
@@ -302,8 +298,15 @@ func evaluateClaudeCodeStatusLineConnectivity(
         )
     }
     let url = URL(fileURLWithPath: path)
+    let attributes = try? fm.attributesOfItem(atPath: path)
+    if let fileSize = attributes?[.size] as? NSNumber,
+       fileSize.int64Value > Int64(maxClaudeStatusLineConnectivityProbeBytes) {
+        return ClaudeCodeStatusLineConnectivityModel(
+            fileExists: true, payloadValid: false, isFresh: nil
+        )
+    }
     let data = (try? Data(contentsOf: url)) ?? Data()
-    let mtime = (try? fm.attributesOfItem(atPath: path)[.modificationDate] as? Date) ?? nil
+    let mtime = (attributes?[.modificationDate] as? Date) ?? nil
     let isFresh = mtime.map { now.timeIntervalSince($0) <= freshnessWindow } ?? false
 
     // Probe just the rate_limits shape — we accept the same key variants the
@@ -479,38 +482,6 @@ enum UsageRelativeTimeFormatter {
 private extension String {
     func localized(using localized: (String) -> String) -> String {
         localized(self)
-    }
-}
-
-private extension UsageSnapshot {
-    var providerSourceLabel: String? {
-        for slot in [fiveHour, weekly] {
-            switch slot {
-            case .available(let snapshot), .stale(let snapshot, _):
-                if !snapshot.sourceLabel.isEmpty { return snapshot.sourceLabel }
-            case .loading, .unavailable:
-                continue
-            }
-        }
-        return nil
-    }
-}
-
-private extension UsageAvailability {
-    var reason: String? {
-        switch self {
-        case .partial(let reason), .stale(let reason), .unavailable(let reason):
-            return reason
-        case .loading:
-            return L10n.shared["loading"]
-        case .available:
-            return nil
-        }
-    }
-
-    var isPlainAvailable: Bool {
-        if case .available = self { return true }
-        return false
     }
 }
 

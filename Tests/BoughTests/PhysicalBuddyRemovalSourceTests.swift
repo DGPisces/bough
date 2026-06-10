@@ -54,7 +54,7 @@ final class PhysicalBuddyRemovalSourceTests: XCTestCase {
             in: [
                 "Sources/Bough/Settings/SettingsNavigationModel.swift",
                 "Sources/Bough/Settings/SettingsSearchIndex.swift",
-                "Sources/Bough/Settings/SettingsTargetCatalog.swift",
+                "Sources/Bough/Settings/SettingsTargetHighlight.swift",
                 "Sources/Bough/SettingsView.swift",
                 "Platform/Apple/Info.plist",
                 "Platform/Apple/Bough.entitlements",
@@ -188,22 +188,20 @@ final class PhysicalBuddyRemovalSourceTests: XCTestCase {
 
     private func sourceFiles(at url: URL) throws -> [SourceFile] {
         var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
-            return []
-        }
+        let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+        _ = try XCTUnwrap(exists ? url : nil, "Missing source scan path: \(url.path)")
 
         if !isDirectory.boolValue {
-            guard isScannableSource(url) else { return [] }
+            let scannable = isScannableSource(url)
+            _ = try XCTUnwrap(scannable ? url : nil, "Unexpected non-scannable source path: \(url.path)")
             return [SourceFile(url: url.standardizedFileURL, relativePath: relativePath(for: url))]
         }
 
-        guard let enumerator = FileManager.default.enumerator(
+        let enumerator = try XCTUnwrap(FileManager.default.enumerator(
             at: url,
             includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles]
-        ) else {
-            return []
-        }
+        ), "Failed to enumerate source scan root: \(url.path)")
 
         var files: [SourceFile] = []
         for case let fileURL as URL in enumerator {
@@ -220,6 +218,7 @@ final class PhysicalBuddyRemovalSourceTests: XCTestCase {
             }
             files.append(SourceFile(url: standardized, relativePath: relativePath))
         }
+        XCTAssertFalse(files.isEmpty, "Source scan must include files under \(url.path).")
         return files
     }
 

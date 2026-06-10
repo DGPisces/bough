@@ -58,4 +58,32 @@ enum ProcessRunner {
         _ = drained.wait(timeout: .now() + 1)
         return proc.terminationStatus == 0 ? box.data : nil
     }
+
+    @discardableResult
+    static func waitUntilExitOrTerminate(
+        _ proc: Process,
+        timeout: TimeInterval,
+        killGrace: TimeInterval = 1
+    ) -> Bool {
+        let exited = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            proc.waitUntilExit()
+            exited.signal()
+        }
+
+        if exited.wait(timeout: .now() + timeout) == .success {
+            return true
+        }
+        if proc.isRunning {
+            proc.terminate()
+        }
+        if exited.wait(timeout: .now() + killGrace) == .success {
+            return false
+        }
+        if proc.isRunning {
+            kill(proc.processIdentifier, SIGKILL)
+        }
+        _ = exited.wait(timeout: .now() + killGrace)
+        return false
+    }
 }

@@ -1,6 +1,16 @@
 import XCTest
 
 final class ReleaseFlowScriptTests: XCTestCase {
+    private var temporaryArtifacts: [URL] = []
+
+    override func tearDownWithError() throws {
+        for artifact in temporaryArtifacts {
+            try? FileManager.default.removeItem(at: artifact)
+        }
+        temporaryArtifacts.removeAll()
+        try super.tearDownWithError()
+    }
+
     func testAssetAPIURLFlagIsRemoved() throws {
         let result = try Self.run([
             "update-appcast",
@@ -44,6 +54,23 @@ final class ReleaseFlowScriptTests: XCTestCase {
         XCTAssertFalse(result.stdout.contains(Self.legacyRepoName))
     }
 
+    func testUpdateAppcastDryRunUsesCustomAppcastPath() throws {
+        let downloadURL = "https://github.com/DGPisces/bough/releases/download/v1.0.0/Bough-v1.0.0.dmg"
+        let appcastPath = "/tmp/custom-appcast.xml"
+        let result = try Self.run([
+            "update-appcast",
+            "--tag", "v1.0.0",
+            "--dmg", "/tmp/Bough.dmg",
+            "--download-url", downloadURL,
+            "--appcast", appcastPath,
+            "--dry-run"
+        ])
+
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("BOUGH_APPCAST_PATH=\(appcastPath)"))
+        XCTAssertTrue(result.stdout.contains("Tools/Release/update-appcast.sh /tmp/Bough.dmg"))
+    }
+
     func testPrepareAcceptsPublicRCMetadata() throws {
         let result = try Self.run([
             "prepare",
@@ -72,6 +99,8 @@ final class ReleaseFlowScriptTests: XCTestCase {
 
     func testVerifyDryRunForStableChecksAppcastDownloadURL() throws {
         let downloadURL = "https://github.com/DGPisces/bough/releases/download/v1.0.0/Bough.dmg"
+        let appcastPath = Self.repoRoot.appendingPathComponent("Tools/Release/appcast.xml").path
+        let printedAppcastPath = appcastPath.replacingOccurrences(of: " ", with: "\\ ")
         let result = try Self.run([
             "verify",
             "--tag", "v1.0.0",
@@ -81,10 +110,43 @@ final class ReleaseFlowScriptTests: XCTestCase {
         ])
 
         XCTAssertEqual(result.exitCode, 0, result.stderr)
-        XCTAssertTrue(result.stdout.contains("xmllint --noout Tools/Release/appcast.xml"))
-        XCTAssertTrue(result.stdout.contains("Tools/Release/release-flow.sh _assert-stable-appcast-url --download-url \(downloadURL)"))
+        XCTAssertTrue(result.stdout.contains("xmllint --noout \(printedAppcastPath)"))
+        XCTAssertTrue(result.stdout.contains("Tools/Release/release-flow.sh _assert-stable-appcast-url --appcast \(printedAppcastPath) --download-url \(downloadURL)"))
         XCTAssertTrue(result.stdout.contains("Tools/Release/release-flow.sh _assert-settings-entry --dmg /tmp/Bough.dmg"))
         XCTAssertTrue(result.stdout.contains("Tools/Release/release-flow.sh _assert-macos-sdk --dmg /tmp/Bough.dmg --min-macos 14.0 --min-sdk 26.0"))
+    }
+
+    func testReleaseFlowGuardsAgainstGeneratedResourceFilesBeforeBuildAndVerify() throws {
+        let source = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent("Tools/Release/release-flow.sh"),
+            encoding: .utf8
+        )
+        let buildCommand = try XCTUnwrap(source.slice(from: "cmd_build() {", to: "cmd_publish_asset() {"))
+        let verifyCommand = try XCTUnwrap(source.slice(from: "cmd_verify() {", to: "homebrew_cask_url_for_compare() {"))
+
+        XCTAssertTrue(source.contains("assert_resource_tree_clean()"))
+        XCTAssertTrue(source.contains("Sources/Bough/Resources"))
+        XCTAssertTrue(source.contains("-name '__pycache__'"))
+        XCTAssertTrue(source.contains("-name '*.pyc'"))
+        XCTAssertTrue(buildCommand.contains("assert_resource_tree_clean"))
+        XCTAssertTrue(verifyCommand.contains("assert_resource_tree_clean"))
+    }
+
+    func testVerifyDryRunUsesCustomAppcastPath() throws {
+        let downloadURL = "https://github.com/DGPisces/bough/releases/download/v1.0.0/Bough.dmg"
+        let appcastPath = "/tmp/custom-appcast.xml"
+        let result = try Self.run([
+            "verify",
+            "--tag", "v1.0.0",
+            "--dmg", "/tmp/Bough.dmg",
+            "--download-url", downloadURL,
+            "--appcast", appcastPath,
+            "--dry-run"
+        ])
+
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("xmllint --noout \(appcastPath)"))
+        XCTAssertTrue(result.stdout.contains("Tools/Release/release-flow.sh _assert-stable-appcast-url --appcast \(appcastPath) --download-url \(downloadURL)"))
     }
 
     func testVerifyDryRunForRCDoesNotTouchDefaultAppcast() throws {
@@ -97,6 +159,7 @@ final class ReleaseFlowScriptTests: XCTestCase {
         ])
 
         XCTAssertEqual(result.exitCode, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("BOUGH_SKIP_APPCAST_VERSION_CHECK=1"))
         XCTAssertTrue(result.stdout.contains("Tools/Release/check-version-consistency.sh --with-dmg /tmp/Bough.dmg"))
         XCTAssertTrue(result.stdout.contains("Tools/Release/release-flow.sh _assert-settings-entry --dmg /tmp/Bough.dmg"))
         XCTAssertTrue(result.stdout.contains("Tools/Release/release-flow.sh _assert-macos-sdk --dmg /tmp/Bough.dmg --min-macos 14.0 --min-sdk 26.0"))
@@ -114,8 +177,44 @@ final class ReleaseFlowScriptTests: XCTestCase {
         XCTAssertTrue(workflow.contains("[[ \"$PUBLISHED_SHA\" == \"$LOCAL_SHA\" ]]"))
         XCTAssertTrue(workflow.contains("echo \"BOUGH_DMG_SHA256=$LOCAL_SHA\" >> \"$GITHUB_ENV\""))
         XCTAssertTrue(workflow.contains("Tools/Release/release-flow.sh verify"))
-        XCTAssertTrue(workflow.range(of: "Publish GitHub Release")!.lowerBound < workflow.range(of: "Verify published GitHub asset")!.lowerBound)
-        XCTAssertTrue(workflow.range(of: "Verify published GitHub asset")!.lowerBound < workflow.range(of: "Publish stable appcast branch")!.lowerBound)
+        let publishRelease = try XCTUnwrap(workflow.range(of: "Publish GitHub Release"))
+        let verifyAsset = try XCTUnwrap(workflow.range(of: "Verify published GitHub asset"))
+        let publishAppcast = try XCTUnwrap(workflow.range(of: "Publish stable appcast branch"))
+        XCTAssertTrue(publishRelease.lowerBound < verifyAsset.lowerBound)
+        XCTAssertTrue(verifyAsset.lowerBound < publishAppcast.lowerBound)
+    }
+
+    func testReleaseWorkflowRegistersTemporaryKeychainBeforeImportCanFail() throws {
+        let workflow = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent(".github/workflows/release.yml"),
+            encoding: .utf8
+        )
+
+        let createKeychain = try XCTUnwrap(workflow.range(of: #"security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH""#))
+        let registerKeychain = try XCTUnwrap(workflow.range(of: #"echo "BOUGH_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV""#))
+        let importCertificate = try XCTUnwrap(workflow.range(of: #"security import "$CERTIFICATE_PATH""#))
+        XCTAssertTrue(createKeychain.lowerBound < registerKeychain.lowerBound)
+        XCTAssertTrue(registerKeychain.lowerBound < importCertificate.lowerBound)
+    }
+
+    func testReleaseBuildSkipsPreAppcastVersionCheckOnlyForDmgBuild() throws {
+        let result = try Self.run(["build", "--dry-run"])
+
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("BOUGH_SKIP_APPCAST_VERSION_CHECK=1 BUILD_ARCH=arm64 Tools/Build/build-dmg.sh"))
+    }
+
+    func testReleaseWorkflowSkipsPreAppcastVersionCheckForSignedDmgBuild() throws {
+        let workflow = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent(".github/workflows/release.yml"),
+            encoding: .utf8
+        )
+
+        let buildStep = try XCTUnwrap(workflow.range(of: "- name: Build signed universal DMG"))
+        let notesStep = try XCTUnwrap(workflow.range(of: "- name: Create release notes"))
+        let stepBody = String(workflow[buildStep.lowerBound..<notesStep.lowerBound])
+        XCTAssertTrue(stepBody.contains("BOUGH_SKIP_APPCAST_VERSION_CHECK=1"))
+        XCTAssertTrue(workflow.contains("Tools/Release/release-flow.sh verify"))
     }
 
     func testReleaseWorkflowOpensHomebrewTapPRAfterStableRemoteVerification() throws {
@@ -128,7 +227,9 @@ final class ReleaseFlowScriptTests: XCTestCase {
         XCTAssertTrue(workflow.contains("GH_TOKEN: ${{ secrets.BOUGH_HOMEBREW_TAP_TOKEN }}"))
         XCTAssertTrue(workflow.contains("Tools/Release/release-flow.sh open-tap-pr"))
         XCTAssertTrue(workflow.contains("--asset-sha256 \"$BOUGH_DMG_SHA256\""))
-        XCTAssertTrue(workflow.range(of: "Verify stable remote feed")!.lowerBound < workflow.range(of: "Open Homebrew tap PR")!.lowerBound)
+        let verifyRemoteFeed = try XCTUnwrap(workflow.range(of: "Verify stable remote feed"))
+        let openTapPR = try XCTUnwrap(workflow.range(of: "Open Homebrew tap PR"))
+        XCTAssertTrue(verifyRemoteFeed.lowerBound < openTapPR.lowerBound)
         XCTAssertFalse(workflow.contains("gh pr merge"))
     }
 
@@ -196,7 +297,7 @@ final class ReleaseFlowScriptTests: XCTestCase {
     }
 
     func testVerifyRemoteUsesNoAuthHeadersForPublicFeedAndAsset() throws {
-        let fakeCurl = try Self.makeFakeCurl()
+        let fakeCurl = try makeFakeCurl()
         var environment = ProcessInfo.processInfo.environment
         environment["PATH"] = "\(fakeCurl.binDirectory.path):\(environment["PATH"] ?? "/usr/bin:/bin")"
         environment["CURL_LOG"] = fakeCurl.logFile.path
@@ -224,6 +325,7 @@ final class ReleaseFlowScriptTests: XCTestCase {
     func testUpdateHomebrewCaskUpdatesVersionChecksumAndKeepsMatchingTemplateURL() throws {
         let cask = FileManager.default.temporaryDirectory
             .appendingPathComponent("BoughCask-\(UUID().uuidString).rb")
+        defer { try? FileManager.default.removeItem(at: cask) }
         try """
         cask "bough" do
           version "1.0.3"
@@ -300,6 +402,7 @@ final class ReleaseFlowScriptTests: XCTestCase {
     func testExtractChangelogRejectsSingleLanguageReleaseNotes() throws {
         let changelog = FileManager.default.temporaryDirectory
             .appendingPathComponent("BoughSingleLanguageChangelog-\(UUID().uuidString).md")
+        temporaryArtifacts.append(changelog)
         try """
         # Changelog
 
@@ -317,7 +420,7 @@ final class ReleaseFlowScriptTests: XCTestCase {
     }
 
     func testBumpWritesNextBuildFromStableAppcast() throws {
-        let fixture = try Self.makeReleaseFixture(shortVersion: "1.0.0", build: "1")
+        let fixture = try makeReleaseFixture(shortVersion: "1.0.0", build: "1")
         let script = fixture.root.appendingPathComponent("Tools/Release/release-flow.sh")
 
         let result = try Self.run(
@@ -335,7 +438,7 @@ final class ReleaseFlowScriptTests: XCTestCase {
     }
 
     func testAssertNewBuildRejectsBuildAlreadyInStableAppcast() throws {
-        let fixture = try Self.makeReleaseFixture(shortVersion: "1.0.0", build: "1")
+        let fixture = try makeReleaseFixture(shortVersion: "1.0.0", build: "1")
         let script = fixture.root.appendingPathComponent("Tools/Release/release-flow.sh")
 
         let result = try Self.run(
@@ -351,7 +454,7 @@ final class ReleaseFlowScriptTests: XCTestCase {
     }
 
     func testAssertNewBuildAcceptsBuildNewerThanStableAppcast() throws {
-        let fixture = try Self.makeReleaseFixture(shortVersion: "1.0.1", build: "2")
+        let fixture = try makeReleaseFixture(shortVersion: "1.0.1", build: "2")
         let script = fixture.root.appendingPathComponent("Tools/Release/release-flow.sh")
 
         let result = try Self.run(
@@ -420,9 +523,10 @@ final class ReleaseFlowScriptTests: XCTestCase {
         return environment
     }
 
-    private static func makeReleaseFixture(shortVersion: String, build: String) throws -> ReleaseFixture {
+    private func makeReleaseFixture(shortVersion: String, build: String) throws -> ReleaseFixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("BoughReleaseFixture-\(UUID().uuidString)")
+        temporaryArtifacts.append(root)
         let tools = root.appendingPathComponent("Tools/Release")
         let platform = root.appendingPathComponent("Platform/Apple")
         try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: true)
@@ -430,7 +534,7 @@ final class ReleaseFlowScriptTests: XCTestCase {
 
         let script = tools.appendingPathComponent("release-flow.sh")
         try FileManager.default.copyItem(
-            at: repoRoot.appendingPathComponent("Tools/Release/release-flow.sh"),
+            at: Self.repoRoot.appendingPathComponent("Tools/Release/release-flow.sh"),
             to: script
         )
 
@@ -513,9 +617,10 @@ final class ReleaseFlowScriptTests: XCTestCase {
         )
     }
 
-    private static func makeFakeCurl() throws -> FakeCurl {
+    private func makeFakeCurl() throws -> FakeCurl {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("BoughReleaseFlowCurl-\(UUID().uuidString)")
+        temporaryArtifacts.append(root)
         let bin = root.appendingPathComponent("bin")
         let curl = bin.appendingPathComponent("curl")
         let log = root.appendingPathComponent("curl.log")
@@ -572,8 +677,15 @@ final class ReleaseFlowScriptTests: XCTestCase {
         return FakeCurl(binDirectory: bin, logFile: log)
     }
 
-    private static let repoRoot = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
+    private static let repoRoot = TestHelpers.repoRoot(from: #filePath)
+}
+
+private extension String {
+    func slice(from start: String, to end: String) -> String? {
+        guard let lower = range(of: start)?.lowerBound,
+              let upper = self[lower...].range(of: end)?.lowerBound else {
+            return nil
+        }
+        return String(self[lower..<upper])
+    }
 }

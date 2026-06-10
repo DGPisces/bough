@@ -47,7 +47,7 @@ Bough is a macOS notch utility that keeps AI coding agents, usage, music, lyrics
 
 ## Install
 
-The current stable release is `v1.0.3`.
+The current stable release is `v1.0.5`.
 
 ### Homebrew Cask
 
@@ -65,7 +65,7 @@ brew install --cask DGPisces/tap/bough
 ### GitHub Releases DMG
 
 1. Open [GitHub Releases](https://github.com/DGPisces/bough/releases).
-2. Download the latest `Bough.dmg`.
+2. Download the latest versioned Bough DMG asset, for example `Bough-vX.Y.Z.dmg`.
 3. Open the DMG and drag `Bough.app` into `/Applications`.
 4. On first launch, follow macOS prompts for opening the app and granting required permissions.
 

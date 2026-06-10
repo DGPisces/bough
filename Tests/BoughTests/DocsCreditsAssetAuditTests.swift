@@ -37,7 +37,10 @@ final class DocsCreditsAssetAuditTests: XCTestCase {
 
         for source in approvedSources {
             let data = try Data(contentsOf: gifRoot.appendingPathComponent("\(source).gif"))
-            XCTAssertGreaterThanOrEqual(data.count, 10)
+            guard data.count >= 10 else {
+                XCTFail("\(source).gif should contain at least a GIF header and logical screen descriptor")
+                continue
+            }
             XCTAssertEqual(String(data: data.prefix(6), encoding: .ascii), "GIF89a")
             XCTAssertEqual(gifDimension(data[6], data[7]), 128, "\(source).gif width")
             XCTAssertEqual(gifDimension(data[8], data[9]), 128, "\(source).gif height")

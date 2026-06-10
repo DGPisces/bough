@@ -18,7 +18,7 @@ extension UsageStore {
         guard usageStatisticsEnabled(tool: tool) else { return }
         guard currentContinuityWriteMode == .appOwned else { return }
         guard let continuityStore, let snapshot = snapshots[tool] else { return }
-        let priorSnapshot = try? continuityStore.latestSnapshot(tool: tool)
+        let priorSnapshot = try? continuityStore.latestRecordedSnapshot(tool: tool)
         let priorSequence = try? continuityStore.latestAcceptedSampleSequence(tool: tool)
         let acceptedAt = snapshot.lastRefresh ?? now()
         guard let seq = try? continuityStore.recordAcceptedSnapshot(snapshot, acceptedAt: acceptedAt) else {
@@ -106,7 +106,7 @@ extension UsageStore {
                 windowKind: windowKind,
                 priorSlot: priorSnapshot.windowSlot(for: windowKind).acceptedForRecovery,
                 currentSlot: currentWindow,
-                priorAvailability: .available,
+                priorAvailability: priorSnapshot.availability,
                 currentAvailability: currentSnapshot.availability,
                 priorAcceptedSequence: priorSequence,
                 currentAcceptedSequence: currentSequence,

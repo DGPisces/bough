@@ -1,6 +1,16 @@
 import XCTest
 
 final class BoughStatuslineBridgeTests: XCTestCase {
+    private var temporaryHomes: [URL] = []
+
+    override func tearDownWithError() throws {
+        for home in temporaryHomes {
+            try? FileManager.default.removeItem(at: home)
+        }
+        temporaryHomes.removeAll()
+        try super.tearDownWithError()
+    }
+
     func testDropsExtraPayloadFieldsAndWritesOnlyClosedFieldSet() throws {
         let result = try runBridge(
             """
@@ -40,7 +50,7 @@ final class BoughStatuslineBridgeTests: XCTestCase {
         XCTAssertNotNil(try Self.jsonObject(at: sevenDay.usageFile)["rate_limits"])
     }
 
-    func testDebounceFloodDoesNotRewritePayloadButTouchesMTimeWhenRateLimitsAreUnchanged() throws {
+    func testDebounceFloodDoesNotRewritePayloadButTouchesMTimeWhenClosedPayloadIsUnchanged() throws {
         let first = try runBridge(#"{"version":1,"rate_limits":{"five_hour":{"used_percent":12}},"model":"sonnet"}"#)
         let original = try String(contentsOf: first.usageFile, encoding: .utf8)
         let oldMtime = Date(timeIntervalSince1970: 100)
@@ -50,7 +60,7 @@ final class BoughStatuslineBridgeTests: XCTestCase {
         )
 
         let second = try runBridge(
-            #"{"version":2,"rate_limits":{"five_hour":{"used_percent":12}},"model":"opus"}"#,
+            #"{"version":1,"rate_limits":{"five_hour":{"used_percent":12}},"model":"sonnet"}"#,
             home: first.home
         )
 
@@ -62,11 +72,65 @@ final class BoughStatuslineBridgeTests: XCTestCase {
         XCTAssertGreaterThan(touchedMtime, oldMtime)
     }
 
+    func testSameRateLimitsRewriteWhenModelChanges() throws {
+        let first = try runBridge(#"{"version":1,"rate_limits":{"five_hour":{"used_percent":12}},"model":"sonnet"}"#)
+        let original = try String(contentsOf: first.usageFile, encoding: .utf8)
+        let oldMtime = Date(timeIntervalSince1970: 100)
+        try FileManager.default.setAttributes(
+            [.modificationDate: oldMtime],
+            ofItemAtPath: first.usageFile.path
+        )
+
+        let second = try runBridge(
+            #"{"version":1,"rate_limits":{"five_hour":{"used_percent":12}},"model":"opus"}"#,
+            home: first.home
+        )
+
+        XCTAssertEqual(second.usageFile, first.usageFile)
+        let rewritten = try String(contentsOf: second.usageFile, encoding: .utf8)
+        XCTAssertNotEqual(rewritten, original)
+        let json = try Self.jsonObject(at: second.usageFile)
+        XCTAssertEqual(json["model"] as? String, "opus")
+    }
+
+    func testBridgeDoesNotRequireJQOnPath() throws {
+        let result = try runBridge(
+            #"{"version":1,"rate_limits":{"five_hour":{"used_percent":12}},"model":"sonnet"}"#,
+            path: "/bin:/usr/bin:/usr/sbin:/sbin"
+        )
+
+        XCTAssertEqual(result.stdout, " \n")
+        XCTAssertEqual(result.stderr, "")
+        let json = try Self.jsonObject(at: result.usageFile)
+        XCTAssertNotNil(json["rate_limits"])
+    }
+
     func testHookServerDownStillWritesFlatFileOnly() throws {
         let result = try runBridge(#"{"version":1,"rate_limits":{"seven_day":{"used_percent":40,"resets_at":100000}}}"#)
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: result.usageFile.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: result.home.appendingPathComponent(".bough/hook-server.json").path))
+    }
+
+    func testUsageFileAndDirectoryAreUserPrivate() throws {
+        let result = try runBridge(#"{"version":1,"rate_limits":{"five_hour":{"used_percent":12}}}"#)
+        let directory = result.usageFile.deletingLastPathComponent()
+        let fm = FileManager.default
+
+        let directoryMode = try XCTUnwrap(fm.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber)
+        let fileMode = try XCTUnwrap(fm.attributesOfItem(atPath: result.usageFile.path)[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(directoryMode.intValue & 0o777, 0o700)
+        XCTAssertEqual(fileMode.intValue & 0o777, 0o600)
+    }
+
+    func testStatusLineWrapperPureBashFallbackKillsProcessGroup() throws {
+        let template = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent("Sources/Bough/Resources/bough-statusline-wrapper.sh.template"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(template.contains("set -m"))
+        XCTAssertTrue(template.contains(#"kill -TERM "-$prev_pid""#))
     }
 
     private struct BridgeRun {
@@ -76,16 +140,25 @@ final class BoughStatuslineBridgeTests: XCTestCase {
         let stderr: String
     }
 
-    private func runBridge(_ input: String, home existingHome: URL? = nil) throws -> BridgeRun {
-        try Self.requireJQ()
-        let home = existingHome ?? FileManager.default.temporaryDirectory
-            .appendingPathComponent("BoughStatuslineBridgeTests-\(UUID().uuidString)")
+    private func runBridge(
+        _ input: String,
+        home existingHome: URL? = nil,
+        path: String = ProcessInfo.processInfo.environment["PATH"] ?? ""
+    ) throws -> BridgeRun {
+        let home: URL
+        if let existingHome {
+            home = existingHome
+        } else {
+            home = FileManager.default.temporaryDirectory
+                .appendingPathComponent("BoughStatuslineBridgeTests-\(UUID().uuidString)")
+            temporaryHomes.append(home)
+        }
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
 
         let process = Process()
         process.executableURL = Self.repoRoot
             .appendingPathComponent("Sources/Bough/Resources/bough-statusline-bridge.sh")
-        process.environment = ["HOME": home.path, "PATH": ProcessInfo.processInfo.environment["PATH"] ?? ""]
+        process.environment = ["HOME": home.path, "PATH": path]
 
         let stdin = Pipe()
         let stdout = Pipe()
@@ -113,19 +186,5 @@ final class BoughStatuslineBridgeTests: XCTestCase {
         return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
-    private static func requireJQ() throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["bash", "-lc", "command -v jq >/dev/null"]
-        try process.run()
-        process.waitUntilExit()
-        if process.terminationStatus != 0 {
-            throw XCTSkip("jq not installed")
-        }
-    }
-
-    private static let repoRoot = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
+    private static let repoRoot = TestHelpers.repoRoot(from: #filePath)
 }

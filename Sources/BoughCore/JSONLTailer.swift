@@ -54,8 +54,17 @@ public final class JSONLTailer: @unchecked Sendable {
     }
 
     private let queue: DispatchQueue
+    private let queueKey = DispatchSpecificKey<Void>()
     private let onDelta: DeltaHandler
     private var watches: [String: Watch] = [:]
+    private var lifecycleTokens: [String: UInt64] = [:]
+    private let reattachDelays: [DispatchTimeInterval] = [
+        .milliseconds(50),
+        .milliseconds(100),
+        .milliseconds(200),
+        .milliseconds(500),
+        .seconds(1),
+    ]
 
     public init(
         queue: DispatchQueue = DispatchQueue(label: "com.dgpisces.bough.jsonl-tailer"),
@@ -63,6 +72,7 @@ public final class JSONLTailer: @unchecked Sendable {
     ) {
         self.queue = queue
         self.onDelta = onDelta
+        self.queue.setSpecific(key: queueKey, value: ())
     }
 
     deinit {
@@ -75,39 +85,49 @@ public final class JSONLTailer: @unchecked Sendable {
 
     public func attach(sessionId: String, filePath: String) {
         queue.async { [weak self] in
-            self?.detachOnQueue(sessionId: sessionId)
-            self?.attachOnQueue(sessionId: sessionId, filePath: filePath, initialOffset: nil)
+            guard let self else { return }
+            _ = self.advanceLifecycle(sessionId: sessionId)
+            self.detachWatchOnQueue(sessionId: sessionId)
+            self.attachOnQueue(sessionId: sessionId, filePath: filePath, initialOffset: nil)
         }
     }
 
     public func detach(sessionId: String) {
         queue.async { [weak self] in
-            self?.detachOnQueue(sessionId: sessionId)
+            guard let self else { return }
+            _ = self.advanceLifecycle(sessionId: sessionId)
+            self.detachWatchOnQueue(sessionId: sessionId)
         }
     }
 
     public func detachAll() {
         queue.async { [weak self] in
             guard let self else { return }
-            for key in Array(self.watches.keys) {
-                self.detachOnQueue(sessionId: key)
+            let sessionIds = Set(self.watches.keys).union(self.lifecycleTokens.keys)
+            for key in sessionIds {
+                _ = self.advanceLifecycle(sessionId: key)
+                self.detachWatchOnQueue(sessionId: key)
             }
         }
     }
 
     public var activeSessionCount: Int {
-        queue.sync { watches.count }
+        if DispatchQueue.getSpecific(key: queueKey) != nil {
+            return watches.count
+        }
+        return queue.sync { watches.count }
     }
 
     // MARK: - Watch lifecycle
 
-    private func attachOnQueue(sessionId: String, filePath: String, initialOffset: off_t?) {
+    @discardableResult
+    private func attachOnQueue(sessionId: String, filePath: String, initialOffset: off_t?) -> Bool {
         let fd = open(filePath, O_RDONLY | O_NONBLOCK)
-        guard fd >= 0 else { return }
+        guard fd >= 0 else { return false }
         var fileStat = stat()
         guard fstat(fd, &fileStat) == 0 else {
             close(fd)
-            return
+            return false
         }
 
         let offset = initialOffset ?? fileStat.st_size
@@ -136,11 +156,48 @@ public final class JSONLTailer: @unchecked Sendable {
 
         watches[sessionId] = watch
         source.resume()
+        return true
     }
 
-    private func detachOnQueue(sessionId: String) {
+    private func detachWatchOnQueue(sessionId: String) {
         guard let watch = watches.removeValue(forKey: sessionId) else { return }
         watch.source.cancel()
+    }
+
+    private func advanceLifecycle(sessionId: String) -> UInt64 {
+        let next = (lifecycleTokens[sessionId] ?? 0) &+ 1
+        lifecycleTokens[sessionId] = next
+        return next
+    }
+
+    private func scheduleReattachOnQueue(
+        sessionId: String,
+        filePath: String,
+        initialOffset: off_t,
+        attempt: Int,
+        token: UInt64
+    ) {
+        guard attempt < reattachDelays.count else {
+            if lifecycleTokens[sessionId] == token {
+                lifecycleTokens[sessionId] = nil
+            }
+            return
+        }
+
+        queue.asyncAfter(deadline: .now() + reattachDelays[attempt]) { [weak self] in
+            guard let self else { return }
+            guard self.lifecycleTokens[sessionId] == token else { return }
+            if self.attachOnQueue(sessionId: sessionId, filePath: filePath, initialOffset: initialOffset) {
+                return
+            }
+            self.scheduleReattachOnQueue(
+                sessionId: sessionId,
+                filePath: filePath,
+                initialOffset: initialOffset,
+                attempt: attempt + 1,
+                token: token
+            )
+        }
     }
 
     // MARK: - Event handling
@@ -151,11 +208,9 @@ public final class JSONLTailer: @unchecked Sendable {
         if events.contains(.delete) || events.contains(.rename) || events.contains(.revoke) {
             let path = watch.filePath
             let sid = watch.sessionId
-            detachOnQueue(sessionId: sid)
-            // Give the writer a moment to finish writing the new file before we reopen.
-            queue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
-                self?.attachOnQueue(sessionId: sid, filePath: path, initialOffset: 0)
-            }
+            let token = advanceLifecycle(sessionId: sid)
+            detachWatchOnQueue(sessionId: sid)
+            scheduleReattachOnQueue(sessionId: sid, filePath: path, initialOffset: 0, attempt: 0, token: token)
             return
         }
 
@@ -165,7 +220,7 @@ public final class JSONLTailer: @unchecked Sendable {
                 // Inode swap without a delete/rename event — reopen from scratch.
                 let path = watch.filePath
                 let sid = watch.sessionId
-                detachOnQueue(sessionId: sid)
+                detachWatchOnQueue(sessionId: sid)
                 attachOnQueue(sessionId: sid, filePath: path, initialOffset: 0)
                 return
             }
@@ -181,7 +236,7 @@ public final class JSONLTailer: @unchecked Sendable {
 
         let scan = JSONLTailer.scanLines(combined)
         watch.pendingFragment = scan.trailingFragment
-        watch.offset += off_t(combined.count - scan.trailingFragment.count)
+        watch.offset += off_t(appended.count)
 
         if !scan.delta.isEmpty {
             let delta = ConversationTailDelta(
@@ -291,6 +346,7 @@ public final class JSONLTailer: @unchecked Sendable {
     enum QuickTypeKind: Equatable {
         case user
         case assistant
+        case unknown
         case irrelevant
     }
 
@@ -300,15 +356,13 @@ public final class JSONLTailer: @unchecked Sendable {
     /// `.irrelevant` when neither `"user"` nor `"assistant"` appears as a
     /// `type` value, letting the caller skip the JSON parser entirely.
     ///
-    /// Limitations: does not tolerate whitespace between the colon and the
-    /// opening quote (e.g. `"type" : "user"`). Claude's JSONL writer never
-    /// emits that shape, so lines which do fall through to the parser via the
-    /// `.irrelevant` path get a correct — if slightly more expensive — answer
-    /// by returning nothing, which is safe (we just miss those updates).
+    /// Lines that mention `"type"` but do not use the compact marker return
+    /// `.unknown`, making the caller fall back to a full JSON parse for
+    /// whitespace-tolerant JSONL.
     static func quickTypeProbe(lineBytes: Data) -> QuickTypeKind {
         guard lineBytes.count >= typeMarker.count + 2 else { return .irrelevant }
 
-        return lineBytes.withUnsafeBytes { rawBuffer -> QuickTypeKind in
+        let compactKind = lineBytes.withUnsafeBytes { rawBuffer -> QuickTypeKind in
             guard let base = rawBuffer.baseAddress else { return .irrelevant }
             let ptr = base.assumingMemoryBound(to: UInt8.self)
             let total = rawBuffer.count
@@ -348,11 +402,16 @@ public final class JSONLTailer: @unchecked Sendable {
             }
             return .irrelevant
         }
+        if compactKind != .irrelevant {
+            return compactKind
+        }
+        return lineBytes.range(of: Data(typeKeyMarker)) == nil ? .irrelevant : .unknown
     }
 
     /// The `"type":"` prefix before the type value. Placed in the header so
     /// the scanner can bail early on typical tool/meta lines.
     private static let typeMarker: [UInt8] = Array(#""type":""#.utf8)
+    private static let typeKeyMarker: [UInt8] = Array(#""type""#.utf8)
     private static let userBytes: [UInt8] = Array(#"user""#.utf8)
     private static let assistantBytes: [UInt8] = Array(#"assistant""#.utf8)
 

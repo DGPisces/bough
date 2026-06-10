@@ -72,9 +72,9 @@ final class UsageMonitorRunnerTests: XCTestCase {
 
     func testHelperRunnerRecordsRecoveryEdgeOnce() throws {
         let store = try UsageContinuityStore(path: continuityPath())
-        let runner = makeRunner(store: store)
         let firstAt = date(2026, 5, 19, 9)
-        let secondAt = date(2026, 5, 19, 10)
+        let secondAt = firstAt.addingTimeInterval(300)
+        let runner = makeRunner(store: store, now: { secondAt })
 
         XCTAssertEqual(
             runner.acceptClaudePayload(claudePayload(weeklyUsed: 100, updatedAt: firstAt), receivedAt: firstAt),
@@ -96,10 +96,10 @@ final class UsageMonitorRunnerTests: XCTestCase {
 
     func testHelperRunnerPersistsCandidateForTwoSampleRecoveryConfirmation() throws {
         let store = try UsageContinuityStore(path: continuityPath())
-        let runner = makeRunner(store: store)
         let firstAt = date(2026, 5, 19, 9)
-        let secondAt = date(2026, 5, 19, 10)
-        let thirdAt = date(2026, 5, 19, 11)
+        let secondAt = firstAt.addingTimeInterval(300)
+        let thirdAt = firstAt.addingTimeInterval(600)
+        let runner = makeRunner(store: store, now: { thirdAt })
         let resetAt = Int(firstAt.addingTimeInterval(86_400 * 7).timeIntervalSince1970)
 
         XCTAssertEqual(
@@ -126,6 +126,59 @@ final class UsageMonitorRunnerTests: XCTestCase {
         XCTAssertNil(try store.recoveryCandidate(tool: .claudeCode, windowKind: .weekly, resetIntervalID: resetIntervalID))
     }
 
+    func testHelperRunnerDoesNotRecordRecoveryFromStalePriorSample() throws {
+        let store = try UsageContinuityStore(path: continuityPath())
+        let runner = makeRunner(store: store)
+        let staleAt = date(2026, 5, 19, 8)
+        let freshAt = date(2026, 5, 19, 9)
+        let resetAt = Int(freshAt.addingTimeInterval(86_400 * 7).timeIntervalSince1970)
+
+        XCTAssertEqual(
+            runner.acceptClaudePayload(
+                claudePayload(weeklyUsed: 100, updatedAt: staleAt, weeklyReset: resetAt),
+                receivedAt: staleAt
+            ),
+            .stale(tool: .claudeCode)
+        )
+        XCTAssertEqual(
+            runner.acceptClaudePayload(
+                claudePayload(weeklyUsed: 20, updatedAt: freshAt, weeklyReset: resetAt),
+                receivedAt: freshAt
+            ),
+            .accepted(tool: .claudeCode)
+        )
+
+        XCTAssertEqual(try store.recoveryEdgeRecords(tool: .claudeCode), [])
+        XCTAssertNil(try store.recoveryCandidate(tool: .claudeCode, windowKind: .weekly, resetIntervalID: "weekly:10080:\(resetAt)"))
+    }
+
+    func testFreshSampleDoesNotUseStalePriorForTodayResetProvenance() throws {
+        let store = try UsageContinuityStore(path: continuityPath())
+        let runner = makeRunner(store: store)
+        let staleAt = date(2026, 5, 19, 8)
+        let freshAt = date(2026, 5, 19, 9)
+        let staleReset = Int(freshAt.addingTimeInterval(86_400 * 7).timeIntervalSince1970)
+        let freshReset = Int(freshAt.addingTimeInterval(86_400 * 6).timeIntervalSince1970)
+
+        XCTAssertEqual(
+            runner.acceptClaudePayload(
+                claudePayload(weeklyUsed: 95, updatedAt: staleAt, weeklyReset: staleReset),
+                receivedAt: staleAt
+            ),
+            .stale(tool: .claudeCode)
+        )
+        XCTAssertEqual(
+            runner.acceptClaudePayload(
+                claudePayload(weeklyUsed: 10, updatedAt: freshAt, weeklyReset: freshReset),
+                receivedAt: freshAt
+            ),
+            .accepted(tool: .claudeCode)
+        )
+
+        let recorded = try XCTUnwrap(store.latestRecordedSnapshot(tool: .claudeCode))
+        XCTAssertEqual(recorded.today?.basis.resetProvenance, .ordinaryProgress)
+    }
+
     func testStatusPayloadContainsNoSensitiveInputFields() throws {
         let store = try UsageContinuityStore(path: continuityPath())
         let statusURL = tempDir.appendingPathComponent("status.json")
@@ -149,6 +202,10 @@ final class UsageMonitorRunnerTests: XCTestCase {
         let store = try UsageContinuityStore(path: continuityPath())
         let claudeURL = tempDir.appendingPathComponent("claude-usage.json")
         try claudePayload(weeklyUsed: 42, updatedAt: date(2026, 5, 19, 9)).write(to: claudeURL)
+        try FileManager.default.setAttributes(
+            [.modificationDate: date(2026, 5, 19, 9)],
+            ofItemAtPath: claudeURL.path
+        )
         let codexReader = FakeCodexRateLimitMonitorReader(result: .success(codexResult(weeklyUsed: 24)))
         let runner = makeRunner(store: store, codexRateLimitReader: codexReader)
 
@@ -174,6 +231,52 @@ final class UsageMonitorRunnerTests: XCTestCase {
         XCTAssertEqual(outcomes, [.accepted(tool: .codex), .skipped(tool: .claudeCode)])
         XCTAssertEqual(try store.acceptedSampleCount(tool: .codex), 1)
         XCTAssertEqual(try store.acceptedSampleCount(tool: .claudeCode), 0)
+    }
+
+    func testRunOnceDoesNotLetSkippedProviderMaskCycleFailure() throws {
+        let store = try UsageContinuityStore(path: continuityPath())
+        let statusURL = tempDir.appendingPathComponent("status.json")
+        let commandURL = tempDir.appendingPathComponent("command.json")
+        try writeCommand(UsageMonitorCommand(enabledTools: [.codex]), to: commandURL)
+        let codexReader = FakeCodexRateLimitMonitorReader(
+            result: .failure(CodexAppServerError.processLaunchFailed("launch failed"))
+        )
+        let runner = makeRunner(
+            store: store,
+            statusPath: statusURL.path,
+            commandPath: commandURL.path,
+            codexRateLimitReader: codexReader
+        )
+
+        let outcomes = runner.runOnce()
+
+        XCTAssertEqual(outcomes, [.failed(reason: "Codex usage source read failed"), .skipped(tool: .claudeCode)])
+        let status = try decodedStatus(at: statusURL)
+        XCTAssertEqual(status.state, .failed)
+        XCTAssertEqual(status.reason, "Usage monitor cycle failed")
+    }
+
+    func testRunOnceDoesNotLetSkippedProviderMaskUnavailableCycle() throws {
+        let store = try UsageContinuityStore(path: continuityPath())
+        let statusURL = tempDir.appendingPathComponent("status.json")
+        let commandURL = tempDir.appendingPathComponent("command.json")
+        try writeCommand(UsageMonitorCommand(enabledTools: [.codex]), to: commandURL)
+        let codexReader = FakeCodexRateLimitMonitorReader(
+            result: .failure(CodexAppServerError.executableMissing("/Applications/Codex.app/Contents/Resources/codex"))
+        )
+        let runner = makeRunner(
+            store: store,
+            statusPath: statusURL.path,
+            commandPath: commandURL.path,
+            codexRateLimitReader: codexReader
+        )
+
+        let outcomes = runner.runOnce()
+
+        XCTAssertEqual(outcomes, [.unavailable(reason: "Codex usage source unavailable"), .skipped(tool: .claudeCode)])
+        let status = try decodedStatus(at: statusURL)
+        XCTAssertEqual(status.state, .unavailable)
+        XCTAssertEqual(status.reason, "Usage sources unavailable")
     }
 
     func testCodexExecutableUnavailableDoesNotWriteFakeAvailableSample() throws {
@@ -230,6 +333,37 @@ final class UsageMonitorRunnerTests: XCTestCase {
         XCTAssertNil(restored.today)
     }
 
+    func testFutureClaudeSourceMarksFiveHourAndWeeklyStale() throws {
+        let store = try UsageContinuityStore(path: continuityPath())
+        let runner = makeRunner(store: store)
+        let futureAt = date(2026, 5, 19, 9).addingTimeInterval(120)
+
+        let outcome = runner.acceptClaudePayload(
+            claudePayload(weeklyUsed: 42, updatedAt: futureAt),
+            receivedAt: futureAt
+        )
+
+        XCTAssertEqual(outcome, .stale(tool: .claudeCode))
+        let restored = try XCTUnwrap(store.latestSnapshot(tool: .claudeCode))
+        XCTAssertNotNil(restored.fiveHour.staleReason)
+        XCTAssertNotNil(restored.weekly.staleReason)
+        XCTAssertNil(restored.today)
+    }
+
+    func testFutureCodexSourceMarksFiveHourAndWeeklyStale() throws {
+        let store = try UsageContinuityStore(path: continuityPath())
+        let runner = makeRunner(store: store)
+        let futureAt = date(2026, 5, 19, 9).addingTimeInterval(120)
+
+        let outcome = runner.acceptCodexRateLimitResult(codexResult(weeklyUsed: 42), receivedAt: futureAt)
+
+        XCTAssertEqual(outcome, .stale(tool: .codex))
+        let restored = try XCTUnwrap(store.latestSnapshot(tool: .codex))
+        XCTAssertNotNil(restored.fiveHour.staleReason)
+        XCTAssertNotNil(restored.weekly.staleReason)
+        XCTAssertNil(restored.today)
+    }
+
     func testAppClosedIdleIntervalIsFiveMinutes() {
         XCTAssertEqual(UsageMonitorRunner.appClosedIdleInterval, 300)
     }
@@ -240,7 +374,8 @@ final class UsageMonitorRunnerTests: XCTestCase {
         store: UsageContinuityStore,
         statusPath: String? = nil,
         commandPath: String? = nil,
-        codexRateLimitReader: CodexRateLimitMonitorReading? = nil
+        codexRateLimitReader: CodexRateLimitMonitorReading? = nil,
+        now: (() -> Date)? = nil
     ) -> UsageMonitorRunner {
         let storage = BaselineMemoryStore()
         let accumulator = UsageDailyAccumulator(
@@ -256,7 +391,7 @@ final class UsageMonitorRunnerTests: XCTestCase {
             statusPath: statusPath ?? tempDir.appendingPathComponent("usage-monitor-status.json").path,
             commandPath: commandPath ?? tempDir.appendingPathComponent("usage-monitor-command.json").path,
             codexRateLimitReader: codexRateLimitReader,
-            now: { self.date(2026, 5, 19, 9) },
+            now: now ?? { self.date(2026, 5, 19, 9) },
             calendar: cal,
             timeZone: utc
         )

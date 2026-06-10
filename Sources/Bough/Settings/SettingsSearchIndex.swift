@@ -66,9 +66,13 @@ enum SettingsSearchIndex {
 
     static func entries(
         codingSessionsEnabled: Bool,
-        isHomebrewInstall: Bool
+        isHomebrewInstall: Bool,
+        notchHeightMode: NotchHeightMode? = nil
     ) -> [SettingsSearchEntry] {
-        SettingsSearchCatalog.entries(isHomebrewInstall: isHomebrewInstall).filter {
+        SettingsSearchCatalog.entries(
+            isHomebrewInstall: isHomebrewInstall,
+            notchHeightMode: notchHeightMode
+        ).filter {
             SettingsSidebarModel.isVisible(page: $0.page, codingSessionsEnabled: codingSessionsEnabled)
                 && $0.isVisible()
         }
@@ -77,12 +81,17 @@ enum SettingsSearchIndex {
     static func search(
         _ query: String,
         codingSessionsEnabled: Bool = CodingSessionsSettings.isEnabled(),
-        isHomebrewInstall: Bool = currentIsHomebrewInstall
+        isHomebrewInstall: Bool = currentIsHomebrewInstall,
+        notchHeightMode: NotchHeightMode? = nil
     ) -> [SettingsSearchResult] {
         let normalizedQuery = normalized(query)
         guard !normalizedQuery.isEmpty else { return [] }
 
-        return entries(codingSessionsEnabled: codingSessionsEnabled, isHomebrewInstall: isHomebrewInstall).enumerated()
+        return entries(
+            codingSessionsEnabled: codingSessionsEnabled,
+            isHomebrewInstall: isHomebrewInstall,
+            notchHeightMode: notchHeightMode
+        ).enumerated()
             .compactMap { offset, entry -> (rank: Int, offset: Int, result: SettingsSearchResult)? in
                 guard let rank = rank(entry: entry, query: normalizedQuery) else { return nil }
                 return (rank, offset, makeResult(entry))
@@ -153,8 +162,13 @@ enum SettingsSearchIndex {
 }
 
 enum SettingsSearchCatalog {
-    static func entries(isHomebrewInstall: Bool) -> [SettingsSearchEntry] {
-        pages + sections(isHomebrewInstall: isHomebrewInstall) + controls(isHomebrewInstall: isHomebrewInstall)
+    static func entries(
+        isHomebrewInstall: Bool,
+        notchHeightMode: NotchHeightMode? = nil
+    ) -> [SettingsSearchEntry] {
+        pages
+            + sections(isHomebrewInstall: isHomebrewInstall)
+            + controls(isHomebrewInstall: isHomebrewInstall, notchHeightMode: notchHeightMode)
     }
 
     private static var pages: [SettingsSearchEntry] {
@@ -230,9 +244,12 @@ enum SettingsSearchCatalog {
         ]
     }
 
-    private static func controls(isHomebrewInstall: Bool) -> [SettingsSearchEntry] {
+    private static func controls(
+        isHomebrewInstall: Bool,
+        notchHeightMode: NotchHeightMode?
+    ) -> [SettingsSearchEntry] {
         generalControls
-            + notchControls
+            + notchControls(notchHeightMode: notchHeightMode)
             + musicControls
             + airDropControls
             + sessionDisplayControls
@@ -253,8 +270,15 @@ enum SettingsSearchCatalog {
         ]
     }
 
-    private static var notchControls: [SettingsSearchEntry] {
-        [
+    private static func notchControls(notchHeightMode: NotchHeightMode?) -> [SettingsSearchEntry] {
+        let customNotchHeightVisible: () -> Bool = {
+            if let notchHeightMode {
+                return notchHeightMode == .custom
+            }
+            return Self.customNotchHeightVisible()
+        }
+
+        let controls: [SettingsSearchEntry] = [
             .control(.notch, .notchDisplayChoice, "display", "settings_search_desc_notch_display", ["appearance", "display"], ["screen", "monitor", "built-in display", "显示器", "屏幕"], "display"),
             .control(.notch, .notchHorizontalDrag, "allow_horizontal_drag", "allow_horizontal_drag_desc", ["appearance", "display"], ["drag notch", "move island", "水平拖动", "移动灵动岛"], "arrow.left.and.right"),
             .control(.notch, .notchHideInFullscreen, "hide_in_fullscreen", "hide_in_fullscreen_desc", ["appearance", "settings_section_visibility"], ["fullscreen hide", "全屏隐藏"], "rectangle.on.rectangle.slash"),
@@ -266,6 +290,7 @@ enum SettingsSearchCatalog {
             .control(.notch, .notchTopBarHeight, "notch_height_mode", "notch_height_mode_desc", ["appearance", "settings_section_size_layout"], ["top bar height", "custom height", "menu bar height", "顶部高度", "自定义高度"], "rectangle.topthird.inset.filled"),
             .control(.notch, .notchCustomHeight, "custom_notch_height", "notch_height_mode_desc", ["appearance", "settings_section_size_layout"], ["custom height", "自定义高度"], "slider.horizontal.3", priority: -5, visible: customNotchHeightVisible),
         ]
+        return controls
     }
 
     private static var musicControls: [SettingsSearchEntry] {

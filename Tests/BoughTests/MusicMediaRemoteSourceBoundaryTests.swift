@@ -80,6 +80,10 @@ final class MusicMediaRemoteSourceBoundaryTests: XCTestCase {
         XCTAssertTrue(adapter.contains("Bundle(path: frameworkBundlePath)?.load()"))
         XCTAssertTrue(adapter.contains("localNowPlayingItem"))
         XCTAssertTrue(adapter.contains("localNowPlayingPlayerPath"))
+        XCTAssertTrue(adapter.contains("let playbackState = await currentPlaybackState()"))
+        XCTAssertTrue(adapter.contains("currentRequestPayload(playbackState: playbackState)"))
+        XCTAssertTrue(adapter.contains("playbackStateValue: playbackState"))
+        XCTAssertFalse(adapter.contains("objectValue(from: requestClass, selector: \"localPlaybackState\")"))
         XCTAssertTrue(adapter.contains("requestPayload.hasDisplayableMediaRemoteMetadata"))
     }
 
@@ -95,7 +99,7 @@ final class MusicMediaRemoteSourceBoundaryTests: XCTestCase {
         XCTAssertTrue(adapter.contains("albumMidCache"))
         XCTAssertFalse(adapter.contains("prefersScriptPayload"))
 
-        let nativeRange = try XCTUnwrap(adapter.range(of: "if let requestPayload = currentRequestPayload()"))
+        let nativeRange = try XCTUnwrap(adapter.range(of: "if let requestPayload = currentRequestPayload(playbackState: playbackState)"))
         let scriptRange = try XCTUnwrap(
             adapter.range(of: "if let scriptPayload = await scriptPayloadReader.currentPayload(")
         )
@@ -145,37 +149,34 @@ final class MusicMediaRemoteSourceBoundaryTests: XCTestCase {
 
     private func swiftFiles(under root: URL) throws -> [URL] {
         var result: [URL] = []
-        guard let enumerator = FileManager.default.enumerator(
+        let enumerator = try XCTUnwrap(FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: nil
-        ) else {
-            return result
-        }
+        ), "Failed to enumerate source scan root: \(root.path)")
         for case let url as URL in enumerator where url.pathExtension == "swift" {
             result.append(url)
         }
+        XCTAssertFalse(result.isEmpty, "Source scan must include Swift files under \(root.path).")
         return result.sorted { $0.path < $1.path }
     }
 
     private func sourceText(at url: URL) throws -> String {
         var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
-            return ""
-        }
+        let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+        _ = try XCTUnwrap(exists ? url : nil, "Missing source scan path: \(url.path)")
         if !isDirectory.boolValue {
             return try String(contentsOf: url, encoding: .utf8)
         }
-        guard let enumerator = FileManager.default.enumerator(
+        let enumerator = try XCTUnwrap(FileManager.default.enumerator(
             at: url,
             includingPropertiesForKeys: nil
-        ) else {
-            return ""
-        }
-        return try enumerator
+        ), "Failed to enumerate source scan root: \(url.path)")
+        let sources = try enumerator
             .compactMap { $0 as? URL }
             .filter { $0.pathExtension == "swift" }
             .sorted { $0.path < $1.path }
             .map { try String(contentsOf: $0, encoding: .utf8) }
-            .joined(separator: "\n")
+        XCTAssertFalse(sources.isEmpty, "Source scan must include Swift files under \(url.path).")
+        return sources.joined(separator: "\n")
     }
 }

@@ -79,6 +79,7 @@ final class UsageMonitorServiceTests: XCTestCase {
 
         XCTAssertEqual(fakeClient.calls, [.unregister])
         XCTAssertEqual(fakeProcessTerminator.terminatedNames, [UsageMonitorService.helperExecutableName])
+        XCTAssertEqual(fakeProcessTerminator.terminatedPaths, [helperURL().path])
         XCTAssertEqual(status.state, .stopped)
         XCTAssertTrue(FileManager.default.fileExists(atPath: continuityURL().path))
         XCTAssertEqual(defaults.string(forKey: SettingsKey.usageContinuityWriterOwner), "app")
@@ -144,6 +145,8 @@ final class UsageMonitorServiceTests: XCTestCase {
         let status = try makeService().repair()
 
         XCTAssertEqual(fakeClient.calls, [.unregister, .register])
+        XCTAssertEqual(fakeProcessTerminator.terminatedNames, [UsageMonitorService.helperExecutableName])
+        XCTAssertEqual(fakeProcessTerminator.terminatedPaths, [helperURL().path])
         XCTAssertEqual(status.state, .installed)
         XCTAssertTrue(FileManager.default.fileExists(atPath: continuityURL().path))
     }
@@ -326,8 +329,10 @@ private final class FakeUsageMonitorAppServiceClient: UsageMonitorAppServiceClie
 
 private final class FakeUsageMonitorProcessTerminator: UsageMonitorProcessTerminating {
     var terminatedNames: [String] = []
+    var terminatedPaths: [String] = []
 
-    func terminateProcesses(named executableName: String) {
+    func terminateProcesses(named executableName: String, matchingExecutablePath executablePath: String) {
         terminatedNames.append(executableName)
+        terminatedPaths.append(executablePath)
     }
 }

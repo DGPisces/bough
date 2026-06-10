@@ -152,6 +152,56 @@ final class CodexAppServerServiceTests: XCTestCase {
         XCTAssertEqual(usageMethods, [])
     }
 
+    func testStartDoesNotRouteNotificationsBeforeInitializeCompletes() async throws {
+        let transport = FakeCodexTransport()
+        let sleeper = ManualSleeper()
+        let service = CodexAppServerService(transport: transport, timeoutSeconds: 10, sleeper: sleeper)
+        var threadMethods: [String] = []
+        service.onThreadNotification = { message in
+            if case .notification(let method) = message.kind {
+                threadMethods.append(method)
+            }
+        }
+
+        try service.start(clientVersion: "dev")
+        transport.deliver(try parse(#"{"method":"thread/status/changed","params":{}}"#))
+        await Task.yield()
+        XCTAssertEqual(threadMethods, [])
+
+        transport.deliver(responseId: .int(0), result: [:])
+        for _ in 0..<3 { await Task.yield() }
+        sleeper.complete()
+        transport.deliver(try parse(#"{"method":"thread/status/changed","params":{}}"#))
+        await Task.yield()
+
+        XCTAssertEqual(threadMethods, ["thread/status/changed"])
+        service.stop()
+    }
+
+    func testRateLimitReadWaitsForInitializeResponse() async throws {
+        let transport = FakeCodexTransport()
+        let sleeper = ManualSleeper()
+        let service = CodexAppServerService(transport: transport, timeoutSeconds: 10, sleeper: sleeper)
+
+        try service.start(clientVersion: "dev")
+        let task = Task { try await service.readRateLimits() }
+        await Task.yield()
+        XCTAssertEqual(transport.sentRequests.map(\.method), [])
+
+        transport.deliver(responseId: .int(0), result: [:])
+        for _ in 0..<10 {
+            if !transport.sentRequests.isEmpty { break }
+            await Task.yield()
+        }
+        sleeper.complete()
+        XCTAssertEqual(transport.sentRequests.map(\.method), ["account/rateLimits/read"])
+
+        transport.deliver(responseId: .int(1), result: ["ok": .bool(true)])
+        let result = try await task.value
+        XCTAssertEqual(result["ok"]?.asBool, true)
+        service.stop()
+    }
+
     func testStartStopsTransportOnHandshakeFailure() {
         let transport = FakeCodexTransport()
         transport.initializeHandshakeResult = .failure(CodexAppServerServiceTestsError.handshakeFailed)

@@ -3,8 +3,18 @@ import XCTest
 @testable import Bough
 
 final class ConfigInstallerClaudeCodeTests: XCTestCase {
+    private var temporaryRoots: [URL] = []
+
+    override func tearDownWithError() throws {
+        for root in temporaryRoots {
+            try? FileManager.default.removeItem(at: root)
+        }
+        temporaryRoots.removeAll()
+        try super.tearDownWithError()
+    }
+
     func testAbsentSettingsCreatesValidStatusLineCommand() throws {
-        let paths = Self.paths()
+        let paths = paths()
 
         let result = ConfigInstaller.testInstallClaudeCodeStatusLine(
             settingsPath: paths.settings.path,
@@ -25,8 +35,33 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
         )
     }
 
+    func testAbsentSettingsUsesStableStatusLineBridgeCopy() throws {
+        let paths = paths()
+        let bundledBridge = paths.root
+            .appendingPathComponent("Volumes/Bough Test/Bough.app/Contents/Resources/bough-statusline-bridge.sh")
+        let stableBridge = paths.root.appendingPathComponent(".bough/bough-statusline-bridge.sh")
+        try FileManager.default.createDirectory(at: bundledBridge.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("#!/usr/bin/env bash\nexit 0\n".utf8).write(to: bundledBridge)
+
+        let result = ConfigInstaller.testInstallClaudeCodeStatusLineUsingStableBridge(
+            settingsPath: paths.settings.path,
+            bundledBridgePath: bundledBridge.path,
+            stableBridgePath: stableBridge.path
+        )
+
+        XCTAssertEqual(result, .installed)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stableBridge.path))
+        let root = try Self.jsonObject(at: paths.settings)
+        let statusLine = try XCTUnwrap(root["statusLine"] as? [String: Any])
+        XCTAssertEqual(statusLine["command"] as? String, stableBridge.path)
+        XCTAssertNotEqual(statusLine["command"] as? String, bundledBridge.path)
+        let attrs = try FileManager.default.attributesOfItem(atPath: stableBridge.path)
+        let permissions = ((attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0) & 0o777
+        XCTAssertEqual(permissions, 0o755)
+    }
+
     func testExistingSettingsWithoutStatusLinePreservesOtherKeys() throws {
-        let paths = Self.paths()
+        let paths = paths()
         try Self.writeJSON(#"{"theme":"dark","permissions":{"allow":["Bash"]}}"#, to: paths.settings)
 
         let result = ConfigInstaller.testInstallClaudeCodeStatusLine(
@@ -47,7 +82,7 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
     }
 
     func testExistingUserStatusLineReturnsConflictUnlessReplaceRequested() throws {
-        let paths = Self.paths()
+        let paths = paths()
         try Self.writeJSON(#"{"statusLine":{"command":"/usr/local/bin/user-status"}}"#, to: paths.settings)
 
         let conflict = ConfigInstaller.testInstallClaudeCodeStatusLine(
@@ -66,8 +101,28 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
         XCTAssertEqual(ConfigInstaller.testCurrentClaudeCodeStatusLineCommand(settingsPath: paths.settings.path), paths.bridge.path)
     }
 
+    func testCurrentStatusLineCommandReadsJSONCSettings() throws {
+        let paths = paths()
+        try Self.writeJSON(
+            """
+            {
+              // user-authored JSONC comment
+              "statusLine": {
+                "command": "/usr/local/bin/starship"
+              }
+            }
+            """,
+            to: paths.settings
+        )
+
+        XCTAssertEqual(
+            ConfigInstaller.testCurrentClaudeCodeStatusLineCommand(settingsPath: paths.settings.path),
+            "/usr/local/bin/starship"
+        )
+    }
+
     func testMalformedSettingsFailsClosedWithoutTruncation() throws {
-        let paths = Self.paths()
+        let paths = paths()
         try Self.writeJSON(#"{"statusLine":"#, to: paths.settings)
 
         let result = ConfigInstaller.testInstallClaudeCodeStatusLine(
@@ -82,9 +137,61 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
         }
     }
 
+    func testMalformedMixedBracketSettingsFailClosedWithoutRewrite() throws {
+        let paths = paths()
+        let malformed = #"{"statusLine": {"command": "old"]}"#
+        try Self.writeJSON(malformed, to: paths.settings)
+
+        let result = ConfigInstaller.testInstallClaudeCodeStatusLine(
+            settingsPath: paths.settings.path,
+            proposedBridgePath: paths.bridge.path
+        )
+
+        if case .failed = result {
+            XCTAssertEqual(try String(contentsOf: paths.settings), malformed)
+        } else {
+            XCTFail("Expected malformed settings to fail closed")
+        }
+    }
+
+    func testMalformedLiteralSettingsFailClosedWithoutRewrite() throws {
+        let paths = paths()
+        let malformed = #"{"statusLine": truue}"#
+        try Self.writeJSON(malformed, to: paths.settings)
+
+        let result = ConfigInstaller.testInstallClaudeCodeStatusLine(
+            settingsPath: paths.settings.path,
+            proposedBridgePath: paths.bridge.path
+        )
+
+        if case .failed = result {
+            XCTAssertEqual(try String(contentsOf: paths.settings), malformed)
+        } else {
+            XCTFail("Expected malformed settings to fail closed")
+        }
+    }
+
+    func testStatusLineInstallMalformedSettingsDoesNotRemoveExistingHooks() throws {
+        let paths = paths()
+        let malformed = #"{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"~/.bough/bough-hook.sh"}]}]},"statusLine": truue}"#
+        try Self.writeJSON(malformed, to: paths.settings)
+
+        let result = ConfigInstaller.testInstallClaudeCodeStatusLine(
+            settingsPath: paths.settings.path,
+            proposedBridgePath: paths.bridge.path
+        )
+
+        if case .failed = result {
+            XCTAssertEqual(try String(contentsOf: paths.settings), malformed)
+        } else {
+            XCTFail("Expected malformed settings to fail closed")
+        }
+    }
+
     func testUnwritableSettingsDirectoryFailsClosed() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ConfigInstallerClaudeCodeTests-\(UUID().uuidString)")
+        temporaryRoots.append(root)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let claudeFile = root.appendingPathComponent(".claude")
         FileManager.default.createFile(atPath: claudeFile.path, contents: Data("not a directory".utf8))
@@ -104,7 +211,7 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
     }
 
     func testPathDriftRepairsOnlyExactOldBoughBridgePath() throws {
-        let paths = Self.paths()
+        let paths = paths()
         try Self.writeJSON(
             #"{"statusLine":{"command":"/tmp/Old/Bough.app/Contents/Resources/bough-statusline-bridge.sh"}}"#,
             to: paths.settings
@@ -117,8 +224,22 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
         XCTAssertEqual(ConfigInstaller.testCurrentClaudeCodeStatusLineCommand(settingsPath: paths.settings.path), paths.bridge.path)
     }
 
+    func testPathDriftRepairsNestedBundleBoughBridgePath() throws {
+        let paths = paths()
+        try Self.writeJSON(
+            #"{"statusLine":{"command":"/tmp/Old/Bough.app/Contents/Resources/Bough_Bough.bundle/Resources/bough-statusline-bridge.sh"}}"#,
+            to: paths.settings
+        )
+
+        XCTAssertTrue(ConfigInstaller.testVerifyClaudeCodeStatusLinePathDrift(
+            settingsPath: paths.settings.path,
+            proposedBridgePath: paths.bridge.path
+        ))
+        XCTAssertEqual(ConfigInstaller.testCurrentClaudeCodeStatusLineCommand(settingsPath: paths.settings.path), paths.bridge.path)
+    }
+
     func testPathDriftDoesNotRewriteUserComposition() throws {
-        let paths = Self.paths()
+        let paths = paths()
         let composed = "bash -c 'tee >(cat >/tmp/old) | /tmp/Old/Bough.app/Contents/Resources/bough-statusline-bridge.sh'"
         try Self.writeJSON(#"{"statusLine":{"command":"\#(composed)"}}"#, to: paths.settings)
 
@@ -130,7 +251,7 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
     }
 
     func testUninstallRestoresPreExistingStatusLineFromBackup() throws {
-        let paths = Self.paths()
+        let paths = paths()
         try Self.writeJSON(#"{"statusLine":{"command":"/usr/local/bin/user-status"},"theme":"dark"}"#, to: paths.settings)
         XCTAssertEqual(
             ConfigInstaller.testInstallClaudeCodeStatusLine(
@@ -147,8 +268,39 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
         XCTAssertEqual(try Self.jsonObject(at: paths.settings)["theme"] as? String, "dark")
     }
 
+    func testUninstallRestoresPreExistingStatusLineFromJSONCBackup() throws {
+        let paths = paths()
+        try Self.writeJSON(
+            """
+            {
+              // preserved in backup; parser must still restore statusLine
+              "statusLine": {
+                "command": "/usr/local/bin/user-status"
+              },
+              "theme": "dark"
+            }
+            """,
+            to: paths.settings
+        )
+        XCTAssertEqual(
+            ConfigInstaller.testInstallClaudeCodeStatusLine(
+                settingsPath: paths.settings.path,
+                proposedBridgePath: paths.bridge.path,
+                replaceExisting: true
+            ),
+            .installed
+        )
+
+        XCTAssertTrue(ConfigInstaller.testUninstallClaudeCodeStatusLine(settingsPath: paths.settings.path))
+
+        XCTAssertEqual(
+            ConfigInstaller.testCurrentClaudeCodeStatusLineCommand(settingsPath: paths.settings.path),
+            "/usr/local/bin/user-status"
+        )
+    }
+
     func testUninstallDoesNotRestoreStaleBackupOverUserEditedStatusLine() throws {
-        let paths = Self.paths()
+        let paths = paths()
         try Self.writeJSON(#"{"statusLine":{"command":"/usr/local/bin/user-status"},"theme":"dark"}"#, to: paths.settings)
         XCTAssertEqual(
             ConfigInstaller.testInstallClaudeCodeStatusLine(
@@ -210,7 +362,7 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
     /// decodes to exactly the user's prev command, points settings.json at
     /// the wrapper, and bundles the bridge path placeholder substituted.
     func testChainInstallOverPrevCommand() throws {
-        let paths = Self.paths()
+        let paths = paths()
         try Self.writeJSON(#"{"statusLine":{"command":"/usr/local/bin/starship"}}"#, to: paths.settings)
 
         let result = ConfigInstaller.testInstallClaudeCodeStatusLineChainAware(
@@ -281,6 +433,7 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
         // Build a bespoke paths layout where the bridge path contains a space.
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ConfigInstallerClaudeCodeTests-\(UUID().uuidString)")
+        temporaryRoots.append(root)
         let settings = root.appendingPathComponent(".claude/settings.json")
         // The space is in a parent directory of the bridge, mirroring the real
         // failure mode (a user installs Bough.app under `/Users/Some User/...`).
@@ -339,12 +492,56 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
         )
     }
 
+    func testChainInstallShellQuotesBridgePathDollarLiterally() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ConfigInstallerClaudeCodeTests-\(UUID().uuidString)")
+        temporaryRoots.append(root)
+        let settings = root.appendingPathComponent(".claude/settings.json")
+        let marker = root.appendingPathComponent("bridge-ran.txt")
+        let bridge = root
+            .appendingPathComponent("dir-$BOUGH_SHOULD_NOT_EXPAND")
+            .appendingPathComponent("Bough.app/Contents/Resources/bough-statusline-bridge.sh")
+        let wrapper = root.appendingPathComponent(".bough/bough-statusline-wrapper.sh")
+
+        try Self.writeJSON(#"{"statusLine":{"command":"/usr/bin/true"}}"#, to: settings)
+        try FileManager.default.createDirectory(at: bridge.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try """
+        #!/usr/bin/env bash
+        printf hit > '\(marker.path)'
+        """.write(to: bridge, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bridge.path)
+
+        let result = ConfigInstaller.testInstallClaudeCodeStatusLineChainAware(
+            settingsPath: settings.path,
+            proposedBridgePath: bridge.path,
+            wrapperPath: wrapper.path
+        )
+        guard case .chained = result else {
+            XCTFail("Expected .chained, got \(result)")
+            return
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["--noprofile", "--norc", wrapper.path]
+        let stdin = Pipe()
+        process.standardInput = stdin
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+        stdin.fileHandleForWriting.write(Data("{}".utf8))
+        try stdin.fileHandleForWriting.close()
+        process.waitUntilExit()
+
+        XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), "hit")
+    }
+
     /// D-02 sentinel restore: uninstall reads the wrapper's `RESTORE:` line,
     /// writes the decoded prev command back into settings.json, and deletes
     /// the wrapper file. settings.json must NOT be left pointing at a
     /// dangling wrapper path.
     func testChainUninstallRestoresPrevCommand() throws {
-        let paths = Self.paths()
+        let paths = paths()
         try Self.writeJSON(#"{"statusLine":{"command":"/usr/local/bin/starship"}}"#, to: paths.settings)
         _ = ConfigInstaller.testInstallClaudeCodeStatusLineChainAware(
             settingsPath: paths.settings.path,
@@ -370,13 +567,39 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
         )
     }
 
+    func testDirectUninstallRestoresOnlyStatusLineFromBackup() throws {
+        let paths = paths()
+        try Self.writeJSON(#"{"statusLine":{"command":"/usr/local/bin/starship"},"theme":"dark"}"#, to: paths.settings)
+        _ = ConfigInstaller.testInstallClaudeCodeStatusLine(
+            settingsPath: paths.settings.path,
+            proposedBridgePath: paths.bridge.path,
+            replaceExisting: true
+        )
+        try Self.writeJSON(
+            #"{"statusLine":{"command":"\#(paths.bridge.path)"},"theme":"light","newSetting":true}"#,
+            to: paths.settings
+        )
+
+        XCTAssertTrue(
+            ConfigInstaller.testUninstallClaudeCodeStatusLine(
+                settingsPath: paths.settings.path,
+                proposedBridgePath: paths.bridge.path
+            )
+        )
+
+        let root = try Self.jsonObject(at: paths.settings)
+        XCTAssertEqual((root["statusLine"] as? [String: Any])?["command"] as? String, "/usr/local/bin/starship")
+        XCTAssertEqual(root["theme"] as? String, "light")
+        XCTAssertEqual(root["newSetting"] as? Bool, true)
+    }
+
     /// T-21-08 mitigation: re-installing the chain wrapper must recover the
     /// TRUE prev command from the existing wrapper's sentinel (NOT from
     /// settings.json.statusLine.command which now points at the wrapper),
     /// then re-render with the new prev tool. No wrapper-wraps-wrapper
     /// recursion; atomic rewrite, not append.
     func testChainReInstallOverExistingBoughWrapperUpdatesSentinel() throws {
-        let paths = Self.paths()
+        let paths = paths()
         try Self.writeJSON(#"{"statusLine":{"command":"/usr/local/bin/starship"}}"#, to: paths.settings)
         _ = ConfigInstaller.testInstallClaudeCodeStatusLineChainAware(
             settingsPath: paths.settings.path,
@@ -436,7 +659,7 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
     /// — NOT use the wrapper path as the new prev (which would cause
     /// wrapper-wraps-wrapper recursion).
     func testChainReInstallWhenSettingsStillPointsAtWrapperPreservesSentinelPrev() throws {
-        let paths = Self.paths()
+        let paths = paths()
         try Self.writeJSON(#"{"statusLine":{"command":"/usr/local/bin/starship"}}"#, to: paths.settings)
         _ = ConfigInstaller.testInstallClaudeCodeStatusLineChainAware(
             settingsPath: paths.settings.path,
@@ -470,7 +693,7 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
     /// is missing or has invalid base64 must NOT cause uninstall to mutate
     /// settings.json. Refuse, return false, leave files untouched.
     func testChainUninstallRefusesOnSentinelCorruption() throws {
-        let paths = Self.paths()
+        let paths = paths()
         try Self.writeJSON(#"{"statusLine":{"command":"\#(paths.wrapper.path)"}}"#, to: paths.settings)
         try FileManager.default.createDirectory(
             at: paths.wrapper.deletingLastPathComponent(),
@@ -529,7 +752,7 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
     /// (settings.json.statusLine.command = bridge path; no wrapper file
     /// created on disk).
     func testChainInstallWhenSettingsEmptyInstallsBoughDirectly() throws {
-        let paths = Self.paths()
+        let paths = paths()
         // settings.json does not exist.
 
         let result = ConfigInstaller.testInstallClaudeCodeStatusLineChainAware(
@@ -565,7 +788,7 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
     /// confirm `"type": "command"` is present in both modes.
     func testInstallEmitsTypeCommandFieldInStatusLineBlock_directAndChain() throws {
         // Direct install (no prev statusLine).
-        let direct = Self.paths()
+        let direct = paths()
         defer { try? FileManager.default.removeItem(at: direct.root) }
         XCTAssertEqual(
             ConfigInstaller.testInstallClaudeCodeStatusLine(
@@ -583,7 +806,7 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
         XCTAssertEqual(directBlock["command"] as? String, direct.bridge.path)
 
         // Chain install (over a prev statusLine — settings.json points at the wrapper).
-        let chain = Self.paths()
+        let chain = paths()
         defer { try? FileManager.default.removeItem(at: chain.root) }
         try Self.writeJSON(#"{"statusLine":{"type":"command","command":"/usr/local/bin/starship"}}"#, to: chain.settings)
         let chainResult = ConfigInstaller.testInstallClaudeCodeStatusLineChainAware(
@@ -610,7 +833,7 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
     /// silently ignored by Claude Code (the same root cause we just fixed
     /// on the install side).
     func testChainUninstallRestoresTypeCommandField() throws {
-        let paths = Self.paths()
+        let paths = paths()
         defer { try? FileManager.default.removeItem(at: paths.root) }
         try Self.writeJSON(#"{"statusLine":{"type":"command","command":"/usr/local/bin/starship"}}"#, to: paths.settings)
         _ = ConfigInstaller.testInstallClaudeCodeStatusLineChainAware(
@@ -644,7 +867,7 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
     /// `.chained`; it must produce `.installed` so `verifyClaudeCodeStatusLinePathDrift`
     /// can still match its `if case .installed` and return true.
     func testVerifyPathDriftStillReturnsTrueAfterChainedEnumAddition() throws {
-        let paths = Self.paths()
+        let paths = paths()
         try Self.writeJSON(
             #"{"statusLine":{"command":"/tmp/Old/Bough.app/Contents/Resources/bough-statusline-bridge.sh"}}"#,
             to: paths.settings
@@ -670,7 +893,7 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
     /// exists, current statusLine command is neither the Bough bridge directly nor
     /// the Bough wrapper. The gate is pure — no UserDefaults / ~/.claude side effects.
     func testChainAutoInstallGate_proceedsWhenAllConditionsMet() throws {
-        let paths = Self.paths()
+        let paths = paths()
         try Self.writeJSON(#"{"statusLine":{"command":"/usr/local/bin/starship"}}"#, to: paths.settings)
 
         let decision = ConfigInstaller.testEvaluateChainAutoInstallGate(
@@ -687,7 +910,7 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
     /// settings.json is missing AND no Bough install exists, the gate must return
     /// `.skipFlagSet`. Asserting flag-first ordering protects the one-shot guarantee.
     func testChainAutoInstallGate_skipsWhenFlagAlreadySet() throws {
-        let paths = Self.paths()
+        let paths = paths()
         // Settings absent on purpose — flag check must win regardless.
         let decision = ConfigInstaller.testEvaluateChainAutoInstallGate(
             settingsPath: paths.settings.path,
@@ -702,7 +925,7 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
     /// User is not a Claude Code user → no settings.json on disk → gate refuses
     /// to fire so Bough never creates a config file the user did not opt into.
     func testChainAutoInstallGate_skipsWhenSettingsAbsent() throws {
-        let paths = Self.paths()
+        let paths = paths()
         // Do NOT create settings.json — emulate a non-Claude-Code user.
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.settings.path))
 
@@ -718,7 +941,7 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
 
     /// Bough bridge already in settings.json (direct install) → no auto-install needed.
     func testChainAutoInstallGate_skipsWhenBoughBridgeAlreadyInstalled() throws {
-        let paths = Self.paths()
+        let paths = paths()
         try Self.writeJSON(
             #"{"statusLine":{"command":"\#(paths.bridge.path)"}}"#,
             to: paths.settings
@@ -776,7 +999,7 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
 
     /// Bough wrapper already in settings.json (chain install present) → idempotent skip.
     func testChainAutoInstallGate_skipsWhenBoughWrapperAlreadyInstalled() throws {
-        let paths = Self.paths()
+        let paths = paths()
         try Self.writeJSON(
             #"{"statusLine":{"command":"\#(paths.wrapper.path)"}}"#,
             to: paths.settings
@@ -790,6 +1013,50 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
         )
 
         XCTAssertEqual(decision, .skipBoughWrapper)
+    }
+
+    func testHookInstallKeepsChainWrapperAndHooks() throws {
+        let paths = paths()
+        try Self.writeJSON(#"{"statusLine":{"command":"/usr/local/bin/starship"}}"#, to: paths.settings)
+        let chainResult = ConfigInstaller.testInstallClaudeCodeStatusLineChainAware(
+            settingsPath: paths.settings.path,
+            proposedBridgePath: paths.bridge.path,
+            wrapperPath: paths.wrapper.path
+        )
+        guard case .chained = chainResult else {
+            XCTFail("Expected chain install, got \(chainResult)")
+            return
+        }
+
+        XCTAssertTrue(ConfigInstaller.testInstallClaudeCodeHooks(settingsPath: paths.settings.path))
+
+        let after = try String(contentsOf: paths.settings, encoding: .utf8)
+        XCTAssertTrue(after.contains("~/.bough/bough-hook.sh"))
+        XCTAssertEqual(
+            ConfigInstaller.testCurrentClaudeCodeStatusLineCommand(settingsPath: paths.settings.path),
+            paths.wrapper.path
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.wrapper.path))
+    }
+
+    func testStatusLineInstallPreservesExistingBoughClaudeHooks() throws {
+        let paths = paths()
+
+        XCTAssertTrue(ConfigInstaller.testInstallClaudeCodeHooks(settingsPath: paths.settings.path))
+        XCTAssertTrue(try String(contentsOf: paths.settings, encoding: .utf8).contains("~/.bough/bough-hook.sh"))
+
+        let result = ConfigInstaller.testInstallClaudeCodeStatusLine(
+            settingsPath: paths.settings.path,
+            proposedBridgePath: paths.bridge.path
+        )
+
+        XCTAssertEqual(result, .installed)
+        let after = try String(contentsOf: paths.settings, encoding: .utf8)
+        XCTAssertTrue(after.contains("~/.bough/bough-hook.sh"))
+        XCTAssertEqual(
+            ConfigInstaller.testCurrentClaudeCodeStatusLineCommand(settingsPath: paths.settings.path),
+            paths.bridge.path
+        )
     }
 
     // MARK: - Phase 21 / WR-03 race serialization
@@ -867,15 +1134,21 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
         return nil
     }
 
-    private static func paths() -> (root: URL, settings: URL, bridge: URL, wrapper: URL) {
+    private func paths() -> (root: URL, settings: URL, bridge: URL, wrapper: URL) {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ConfigInstallerClaudeCodeTests-\(UUID().uuidString)")
+        temporaryRoots.append(root)
         return (
             root,
             root.appendingPathComponent(".claude/settings.json"),
             root.appendingPathComponent("Bough.app/Contents/Resources/bough-statusline-bridge.sh"),
             root.appendingPathComponent(".bough/bough-statusline-wrapper.sh")
         )
+    }
+
+    private func sourceFile(_ relativePath: String) throws -> String {
+        let url = TestHelpers.repoRoot(from: #filePath).appendingPathComponent(relativePath)
+        return try String(contentsOf: url, encoding: .utf8)
     }
 
     private static func writeJSON(_ text: String, to url: URL) throws {

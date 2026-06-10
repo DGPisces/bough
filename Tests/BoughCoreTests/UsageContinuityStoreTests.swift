@@ -26,6 +26,43 @@ final class UsageContinuityStoreTests: XCTestCase {
         XCTAssertEqual(try store.acceptedSampleCount(), 0)
     }
 
+    func testStoreProtectsDirectoryAndSQLiteFilePermissions() throws {
+        let boughDir = tempDir.appendingPathComponent(".bough", isDirectory: true)
+        let path = boughDir.appendingPathComponent("usage-continuity.sqlite").path
+
+        _ = try UsageContinuityStore(path: path)
+
+        XCTAssertEqual(try posixPermissions(at: boughDir), BoughPrivateStorage.directoryPermissions)
+        XCTAssertEqual(try posixPermissions(at: URL(fileURLWithPath: path)), BoughPrivateStorage.filePermissions)
+    }
+
+    func testSharedStoreSerializesConcurrentPublicAccess() throws {
+        let store = try makeStore()
+        let errorLock = NSLock()
+        var errors: [Error] = []
+
+        DispatchQueue.concurrentPerform(iterations: 40) { index in
+            do {
+                try store.recordThresholdCrossing(
+                    tool: .codex,
+                    windowKind: .weekly,
+                    thresholdPct: Double(index % 3),
+                    resetIntervalID: "weekly:10080:concurrent-\(index)",
+                    detectedAt: Date(timeIntervalSince1970: Double(index))
+                )
+                _ = try store.thresholdNotificationPreference(tool: .codex)
+                _ = try store.acceptedSampleCount()
+            } catch {
+                errorLock.lock()
+                errors.append(error)
+                errorLock.unlock()
+            }
+        }
+
+        XCTAssertTrue(errors.isEmpty, "Concurrent store access failed: \(errors)")
+        XCTAssertEqual(try store.pendingThresholdNotificationRecords().count, 40)
+    }
+
     func testAcceptedSamplesUseMonotonicOrderingAndIgnoreOlderProviderSamples() throws {
         let store = try makeStore()
         let first = snapshot(weeklyUsed: 20, weeklyUpdatedAt: date(2026, 5, 14, 10), acceptedAt: date(2026, 5, 14, 10))
@@ -71,7 +108,92 @@ final class UsageContinuityStoreTests: XCTestCase {
         XCTAssertEqual(try reopened.resetBreadcrumbCount(tool: .codex), 1)
     }
 
+    func testLatestRecordedSnapshotRestoresStoredAvailabilitySeparatelyFromDisplaySnapshot() throws {
+        let store = try makeStore()
+        let stale = snapshot(
+            weeklyUsed: 20,
+            weeklyUpdatedAt: date(2026, 5, 14, 10),
+            acceptedAt: date(2026, 5, 14, 10)
+        ).markingStale(reason: "Usage data is stale")
+
+        try store.recordAcceptedSnapshot(stale, acceptedAt: date(2026, 5, 14, 10))
+
+        let display = try XCTUnwrap(store.latestSnapshot(tool: .codex))
+        let recorded = try XCTUnwrap(store.latestRecordedSnapshot(tool: .codex))
+        XCTAssertEqual(display.availability, .stale(reason: UsageContinuityStore.restoredReason))
+        XCTAssertEqual(recorded.availability, .stale(reason: "Usage data is stale"))
+        XCTAssertEqual(recorded.weekly.staleReason, "Usage data is stale")
+    }
+
+    func testOpenMigratesAcceptedSamplesMissingAvailabilityColumns() throws {
+        let path = storePath()
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil), SQLITE_OK)
+        guard let handle = db else {
+            XCTFail("sqlite open failed")
+            return
+        }
+        defer { sqlite3_close_v2(handle) }
+
+        XCTAssertEqual(sqlite3_exec(handle, """
+        CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE accepted_samples(
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          tool TEXT NOT NULL,
+          plan_name TEXT,
+          accepted_at REAL NOT NULL,
+          provider_updated_at REAL NOT NULL,
+          five_hour_used REAL,
+          five_hour_resets_at REAL,
+          five_hour_updated_at REAL,
+          five_hour_duration INTEGER,
+          five_hour_source TEXT,
+          weekly_used REAL,
+          weekly_resets_at REAL,
+          weekly_updated_at REAL,
+          weekly_duration INTEGER,
+          weekly_source TEXT,
+          today_pct REAL,
+          today_allowance REAL,
+          today_severity TEXT,
+          today_local_date TEXT,
+          today_weekly_start REAL,
+          today_weekly_now REAL,
+          today_days_remaining REAL,
+          today_reset_fired INTEGER,
+          reset_provenance TEXT,
+          carry_pre REAL,
+          carry_post REAL
+        );
+        INSERT INTO accepted_samples(
+          tool, plan_name, accepted_at, provider_updated_at,
+          five_hour_used, five_hour_resets_at, five_hour_updated_at, five_hour_duration, five_hour_source,
+          weekly_used, weekly_resets_at, weekly_updated_at, weekly_duration, weekly_source
+        ) VALUES (
+          'codex', 'prolite', 1000, 1000,
+          10, 2000, 1000, 300, 'test',
+          30, 3000, 1000, 10080, 'test'
+        );
+        """, nil, nil, nil), SQLITE_OK)
+
+        let store = try UsageContinuityStore(path: path)
+        let columns = try Self.columnNames(at: path, table: "accepted_samples")
+        XCTAssertTrue(columns.contains("availability"))
+        XCTAssertTrue(columns.contains("stale_reason"))
+
+        let recorded = try XCTUnwrap(store.latestRecordedSnapshot(tool: .codex))
+        XCTAssertEqual(recorded.availability, .available)
+        XCTAssertEqual(recorded.weekly.snapshot?.usedPercent, 30)
+
+        XCTAssertNotNil(try store.recordAcceptedSnapshot(
+            snapshot(weeklyUsed: 35, weeklyUpdatedAt: date(2026, 5, 14, 11), acceptedAt: date(2026, 5, 14, 11)),
+            acceptedAt: date(2026, 5, 14, 11)
+        ))
+    }
+
     func testLegacyBaselineMigrationIsIdempotentAndLeavesJSONUntouched() throws {
+        CoreTestHelpers.processEnvironmentLock.lock()
+        defer { CoreTestHelpers.processEnvironmentLock.unlock() }
         let originalHome = ProcessInfo.processInfo.environment["HOME"]
         setenv("HOME", tempDir.path, 1)
         defer {
@@ -112,6 +234,100 @@ final class UsageContinuityStoreTests: XCTestCase {
         XCTAssertEqual(records.count, 1)
         XCTAssertTrue(FileManager.default.fileExists(atPath: records[0].preservedPath))
         XCTAssertEqual(try store.acceptedSampleCount(), 1)
+    }
+
+    func testCorruptStoreRepairPreservesWALSidecars() throws {
+        let path = storePath()
+        let fm = FileManager.default
+        try Data("not a sqlite database".utf8).write(to: URL(fileURLWithPath: path))
+        try Data("old wal".utf8).write(to: URL(fileURLWithPath: path + "-wal"))
+        try Data("old shm".utf8).write(to: URL(fileURLWithPath: path + "-shm"))
+
+        let store = try UsageContinuityStore(path: path, now: { Date(timeIntervalSince1970: 1234) })
+        let records = try store.repairRecords()
+        let preserved = try XCTUnwrap(records.first?.preservedPath)
+
+        XCTAssertTrue(fm.fileExists(atPath: preserved + "-wal"))
+        XCTAssertTrue(fm.fileExists(atPath: preserved + "-shm"))
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: preserved + "-wal")), Data("old wal".utf8))
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: preserved + "-shm")), Data("old shm".utf8))
+        if fm.fileExists(atPath: path + "-wal") {
+            XCTAssertNotEqual(try Data(contentsOf: URL(fileURLWithPath: path + "-wal")), Data("old wal".utf8))
+        }
+        if fm.fileExists(atPath: path + "-shm") {
+            XCTAssertNotEqual(try Data(contentsOf: URL(fileURLWithPath: path + "-shm")), Data("old shm".utf8))
+        }
+    }
+
+    func testCorruptStoreRepairUsesUniquePreservedPathWithinSameSecond() throws {
+        let path = storePath()
+        let fm = FileManager.default
+        var firstPreserved: String?
+        var secondPreserved: String?
+
+        try Data("first corrupt database".utf8).write(to: URL(fileURLWithPath: path))
+        do {
+            let store = try UsageContinuityStore(path: path, now: { Date(timeIntervalSince1970: 1234) })
+            firstPreserved = try store.repairRecords().first?.preservedPath
+        }
+
+        try? fm.removeItem(atPath: path)
+        try? fm.removeItem(atPath: path + "-wal")
+        try? fm.removeItem(atPath: path + "-shm")
+        try Data("second corrupt database".utf8).write(to: URL(fileURLWithPath: path))
+        do {
+            let store = try UsageContinuityStore(path: path, now: { Date(timeIntervalSince1970: 1234) })
+            secondPreserved = try store.repairRecords().first?.preservedPath
+        }
+
+        let first = try XCTUnwrap(firstPreserved)
+        let second = try XCTUnwrap(secondPreserved)
+        XCTAssertNotEqual(first, second)
+        XCTAssertTrue(fm.fileExists(atPath: first))
+        XCTAssertTrue(fm.fileExists(atPath: second))
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: first)), Data("first corrupt database".utf8))
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: second)), Data("second corrupt database".utf8))
+    }
+
+    func testBusyStoreDoesNotRepairOrMoveDatabase() throws {
+        let path = storePath()
+        let fm = FileManager.default
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil), SQLITE_OK)
+        guard let handle = db else {
+            XCTFail("sqlite open failed")
+            return
+        }
+        defer {
+            sqlite3_exec(handle, "ROLLBACK", nil, nil, nil)
+            sqlite3_close_v2(handle)
+        }
+
+        var errorMessage: UnsafeMutablePointer<CChar>?
+        let lockStatus = sqlite3_exec(
+            handle,
+            "PRAGMA journal_mode=DELETE; CREATE TABLE keep(id INTEGER); BEGIN EXCLUSIVE;",
+            nil,
+            nil,
+            &errorMessage
+        )
+        defer {
+            if let errorMessage { sqlite3_free(errorMessage) }
+        }
+        XCTAssertEqual(lockStatus, SQLITE_OK)
+
+        XCTAssertThrowsError(try UsageContinuityStore(path: path, now: { Date(timeIntervalSince1970: 1234) })) { error in
+            let text = String(describing: error)
+            XCTAssertTrue(
+                text.contains("SQLITE_BUSY") || text.lowercased().contains("locked") || text.lowercased().contains("busy"),
+                text
+            )
+        }
+
+        let filenames = try fm.contentsOfDirectory(atPath: tempDir.path)
+        XCTAssertFalse(filenames.contains { $0.contains(".corrupt-") }, "\(filenames)")
+        XCTAssertFalse(filenames.contains { $0.contains(".repair-backup-") }, "\(filenames)")
+        XCTAssertTrue(fm.fileExists(atPath: path))
     }
 
     func testRecoveryReminderPreferencesDefaultOffAndPersistPerProviderWindow() throws {
@@ -451,6 +667,11 @@ final class UsageContinuityStoreTests: XCTestCase {
         tempDir.appendingPathComponent("usage-continuity.sqlite").path
     }
 
+    private func posixPermissions(at url: URL) throws -> Int {
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+        return try XCTUnwrap(attrs[.posixPermissions] as? Int) & 0o777
+    }
+
     private func date(_ year: Int, _ month: Int, _ day: Int, _ hour: Int = 12) -> Date {
         var components = DateComponents()
         components.year = year
@@ -513,6 +734,29 @@ final class UsageContinuityStoreTests: XCTestCase {
         return Int(sqlite3_column_int(query, 0))
     }
 
+    private static func columnNames(at path: String, table: String) throws -> Set<String> {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let handle = db else {
+            if let db { sqlite3_close_v2(db) }
+            throw NSError(domain: "TestProbe", code: 4, userInfo: [NSLocalizedDescriptionKey: "open failed"])
+        }
+        defer { sqlite3_close_v2(handle) }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "PRAGMA table_info(\(table))", -1, &stmt, nil) == SQLITE_OK,
+              let query = stmt else {
+            throw NSError(domain: "TestProbe", code: 5, userInfo: [NSLocalizedDescriptionKey: "prepare failed"])
+        }
+        defer { sqlite3_finalize(query) }
+
+        var names = Set<String>()
+        while sqlite3_step(query) == SQLITE_ROW {
+            if let text = sqlite3_column_text(query, 1) {
+                names.insert(String(cString: text))
+            }
+        }
+        return names
+    }
+
     private func resetToday() -> TodayValue {
         let metadata = UsageResetSampleMetadata(
             priorUsedPercent: 80,
@@ -544,5 +788,10 @@ private extension UsageWindowSlot {
         case .loading, .unavailable:
             return nil
         }
+    }
+
+    var staleReason: String? {
+        if case .stale(_, let reason) = self { return reason }
+        return nil
     }
 }

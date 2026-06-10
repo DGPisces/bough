@@ -86,10 +86,10 @@ final class AppState {
             recentHookEvents.removeFirst(recentHookEvents.count - maxRecentHookEvents)
         }
     }
-    /// Cache of in-flight PreToolUse records keyed by tool_use_id. Used to correlate
-    /// permission requests back to their originating tool call. See AppState+ToolUseCache.
+    /// Cache of in-flight PreToolUse records keyed by session/source/tool_use_id. Used to
+    /// correlate permission requests back to their originating tool call. See AppState+ToolUseCache.
     @ObservationIgnored
-    var pendingToolUses: [String: PreToolUseRecord] = [:]
+    var pendingToolUses: [ToolUseKey: PreToolUseRecord] = [:]
     /// Records the transcript path currently watched for each session so we only
     /// reattach when the path actually changes. See AppState+TranscriptTailer.
     @ObservationIgnored
@@ -148,7 +148,10 @@ final class AppState {
     }
 
     /// Computed: first item in permission queue (backward compat for UI reads)
-    var pendingPermission: PermissionRequest? { permissionQueue.first }
+    var pendingPermission: PermissionRequest? {
+        guard let idx = nextVisiblePermissionIndex() else { return nil }
+        return permissionQueue[idx]
+    }
     /// Computed: first item in question queue
     var pendingQuestion: QuestionRequest? { questionQueue.first }
     /// Preview-only: mock question payload for DebugHarness (no continuation needed)
@@ -223,11 +226,27 @@ final class AppState {
     }
     private var modelReadRetryAt: [String: Date] = [:]
 
-    private var dismissedPermissionSessionIds: Set<String> = []
+    private var dismissedPermissionRequestIds: Set<String> = []
+    private static func normalizedSessionId(for event: HookEvent) -> String {
+        event.sessionId ?? "default"
+    }
+    func clearDismissedPermissionRequestId(_ id: String) {
+        dismissedPermissionRequestIds.remove(id)
+    }
     private func nextVisiblePermissionIndex() -> Int? {
         permissionQueue.firstIndex { request in
-            let sid = request.event.sessionId ?? "default"
-            return !dismissedPermissionSessionIds.contains(sid)
+            !dismissedPermissionRequestIds.contains(request.dismissalId)
+        }
+    }
+
+    var activePermissionQueueIndex: Int? {
+        nextVisiblePermissionIndex()
+    }
+
+    func visiblePermissionQueueIndex(forSession sessionId: String) -> Int? {
+        permissionQueue.firstIndex { request in
+            Self.normalizedSessionId(for: request.event) == sessionId
+                && !dismissedPermissionRequestIds.contains(request.dismissalId)
         }
     }
 
@@ -251,33 +270,20 @@ final class AppState {
     private func cleanupIdleSessions() {
         guard hasIdleCleanupWork else { return }
 
-        // 1. Verify monitored PIDs are still alive (DispatchSource can silently miss exits)
-        //    Also kill orphaned processes (ppid <= 1, terminal closed but process survived).
+        // 1. Verify monitored PIDs are still alive (DispatchSource can silently miss exits).
         var deadMonitors: [(String, ProcessIdentity)] = []
-        var orphaned: [(String, pid_t)] = []
         for (sessionId, monitor) in processMonitors {
             let process = monitor.process
-            let pid = process.pid
             // Check if the monitored process is still the same live process.
             if !Self.isLiveProcess(process) {
                 deadMonitors.append((sessionId, process))
                 continue
-            }
-            // Check for orphaned processes (ppid <= 1)
-            var info = proc_bsdinfo()
-            let ret = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
-            if ret > 0 && info.pbi_ppid <= 1 && shouldTerminateOrphanedProcess(sessionId: sessionId, pid: pid) {
-                orphaned.append((sessionId, pid))
             }
         }
         for (sessionId, process) in deadMonitors {
             // PID gone but monitor didn't fire — treat as process exit so session is removed
             // promptly (after 5s grace) instead of lingering for 10 minutes.
             handleProcessExit(sessionId: sessionId, exitedProcess: process)
-        }
-        for (sessionId, pid) in orphaned {
-            kill(pid, SIGTERM)
-            removeSession(sessionId)
         }
 
         // 2. Reset likely-stuck sessions only when we have no process monitor.
@@ -481,13 +487,6 @@ final class AppState {
     func setSessionProcessIdentity(_ process: ProcessIdentity, for sessionId: String) {
         sessions[sessionId]?.cliPid = process.pid
         sessions[sessionId]?.cliStartTime = process.startTime
-    }
-
-    private func shouldTerminateOrphanedProcess(sessionId: String, pid: pid_t) -> Bool {
-        guard let session = sessions[sessionId] else { return true }
-        if session.isNativeAppMode { return false }
-        guard let source = SessionSnapshot.normalizedSupportedSource(session.source) else { return true }
-        return !Self.isNativeAppProcess(pid, source: source)
     }
 
     nonisolated static func liveProcessIdentity(for pid: pid_t) -> ProcessIdentity? {
@@ -725,7 +724,7 @@ final class AppState {
         exitingSessions.removeAll()
         modelReadRetryAt.removeAll()
         completionQueue.removeAll()
-        dismissedPermissionSessionIds.removeAll()
+        dismissedPermissionRequestIds.removeAll()
 
         drainAllPermissions(reason: "coding-sessions-disabled")
         drainAllQuestions(reason: "coding-sessions-disabled")
@@ -784,7 +783,7 @@ final class AppState {
                     rotatingSessionId = top
                 }
             }
-            if rotatingSessionId == nil || !cachedActiveIds.contains(rotatingSessionId!) {
+            if rotatingSessionId.map({ !cachedActiveIds.contains($0) }) ?? true {
                 rotatingSessionId = cachedActiveIds.first
             }
             if rotationTimer == nil {
@@ -895,11 +894,13 @@ final class AppState {
         case "codex":      return findCodexPids(candidatePids: candidatePids)
         case "gemini":     return findGeminiPids(candidatePids: candidatePids)
         case "cursor":     return findCursorPids(candidatePids: candidatePids)
+        case "cursor-cli": return findCursorPids(candidatePids: candidatePids)
         case "trae":       return findTraePids(candidatePids: candidatePids)
         case "traecn":     return findTraeCNPids(candidatePids: candidatePids)
-        case "traecli":   return findTraeCliPids(candidatePids: candidatePids)
+        case "traecli":    return findTraeCliPids(candidatePids: candidatePids)
         case "copilot":    return findCopilotPids(candidatePids: candidatePids)
         case "qoder":      return findQoderPids(candidatePids: candidatePids)
+        case "qoder-cli":  return findQoderPids(candidatePids: candidatePids)
         case "droid":      return findFactoryPids(candidatePids: candidatePids)
         case "codebuddy":  return findCodeBuddyPids(candidatePids: candidatePids)
         case "codybuddycn": return findCodyBuddyCNPids(candidatePids: candidatePids)
@@ -911,6 +912,7 @@ final class AppState {
         case "qwen":       return findQwenPids(candidatePids: candidatePids)
         case "kimi":       return findKimiPids(candidatePids: candidatePids)
         case "pi":         return findPiPids(candidatePids: candidatePids)
+        case "kiro":       return findKiroPids(candidatePids: candidatePids)
         default:           return []
         }
     }
@@ -993,7 +995,7 @@ final class AppState {
 
     var toolDescription: String? {
         if let pending = pendingPermission {
-            let sessionId = pending.event.sessionId ?? activeSessionId ?? "default"
+            let sessionId = Self.normalizedSessionId(for: pending.event)
             return pending.event.toolDescription ?? sessions[sessionId]?.toolDescription
         }
         if let q = pendingQuestion {
@@ -1068,7 +1070,7 @@ final class AppState {
             return
         }
 
-        let sessionId = event.sessionId ?? "default"
+        let sessionId = Self.normalizedSessionId(for: event)
 
         // Skip Codex APP internal sessions (title generation, etc.) — they have no transcript
         if (event.rawJSON["_source"] as? String) == "codex"
@@ -1114,11 +1116,11 @@ final class AppState {
             let keepWaiting: Set<String> = ["Notification", "SessionStart", "SessionEnd", "PreCompact"]
             if !keepWaiting.contains(normalizedEventName) {
                 drainQuestions(forSession: sessionId, reason: "wasWaiting-blanket-drain-event=\(normalizedEventName)")
-                let stillHasPermission = permissionQueue.contains { $0.event.sessionId == sessionId }
-                let stillHasQuestion = questionQueue.contains { $0.event.sessionId == sessionId }
+                let stillHasPermission = permissionQueue.contains { Self.normalizedSessionId(for: $0.event) == sessionId }
+                let stillHasQuestion = questionQueue.contains { Self.normalizedSessionId(for: $0.event) == sessionId }
                 if !stillHasPermission && !stillHasQuestion,
-                   sessions[sessionId]?.status == .waitingApproval
-                    || sessions[sessionId]?.status == .waitingQuestion {
+                   (sessions[sessionId]?.status == .waitingApproval
+                    || sessions[sessionId]?.status == .waitingQuestion) {
                     sessions[sessionId]?.status = (normalizedEventName == "Stop") ? .idle : .processing
                     sessions[sessionId]?.currentTool = nil
                     sessions[sessionId]?.toolDescription = nil
@@ -1220,59 +1222,57 @@ final class AppState {
             return
         }
 
-        let sessionId = event.sessionId ?? "default"
+        let sessionId = Self.normalizedSessionId(for: event)
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
         }
         // Extract metadata so blocking-first sessions have cwd, source, cliPid, terminal info
         extractMetadata(into: &sessions, sessionId: sessionId, event: event)
         tryMonitorSession(sessionId)
-
-        // New incoming permission request means session needs user decision again.
-        dismissedPermissionSessionIds.remove(sessionId)
+        let permissionEvent = permissionEventByEnrichingFromCache(event)
 
         // Clear any pending questions for THIS session (mutually exclusive within a session)
         drainQuestions(forSession: sessionId, reason: "newPermissionRequest")
 
         sessions[sessionId]?.status = .waitingApproval
-        sessions[sessionId]?.currentTool = event.toolName
-        sessions[sessionId]?.toolDescription = event.toolDescription
+        sessions[sessionId]?.currentTool = permissionEvent.toolName
+        sessions[sessionId]?.toolDescription = permissionEvent.toolDescription
         sessions[sessionId]?.lastActivity = Date()
-        // Backfill tool name/description from cached PreToolUse when the payload is thin.
-        enrichPermissionRequestFromCache(sessionId: sessionId, event: event)
 
-        let request = PermissionRequest(event: event, continuation: continuation)
+        let request = PermissionRequest(event: permissionEvent, continuation: continuation)
+        let hadVisiblePermission = nextVisiblePermissionIndex() != nil
+        // New incoming permission request means this request needs user decision again.
+        dismissedPermissionRequestIds.remove(request.dismissalId)
 
         // Replay deduplication: if the same tool_use_id is already queued, swap the
         // continuation in place and deny the previous waiter. Preserves card order.
         if mergeDuplicatePermissionRequest(request) {
+            if !hadVisiblePermission, showNextPending() {
+                SoundManager.shared.handleEvent("PermissionRequest")
+            }
             refreshDerivedState()
             return
         }
 
         permissionQueue.append(request)
 
-        // Show UI only if this is the first (or only) queued item
-        if permissionQueue.count == 1 {
-            activeSessionId = sessionId
-            // If user is already browsing the session list, keep them there and
-            // let inline controls handle approval without stealing focus.
-            if surface != .sessionList {
-                surface = .approvalCard(sessionId: sessionId)
-            }
+        // Show UI when the queue previously had no visible approval. This covers
+        // dismissed requests that remain queued for an external terminal answer.
+        if !hadVisiblePermission, showNextPending() {
             SoundManager.shared.handleEvent("PermissionRequest")
         }
         refreshDerivedState()
     }
 
     func approvePermission(always: Bool = false) {
-        guard !permissionQueue.isEmpty else { return }
-        let pending = permissionQueue.removeFirst()
-        let sessionId = pending.event.sessionId ?? "default"
-        dismissedPermissionSessionIds.remove(sessionId)
+        guard let idx = nextVisiblePermissionIndex() else { return }
+        let pending = permissionQueue.remove(at: idx)
+        let sessionId = Self.normalizedSessionId(for: pending.event)
+        dismissedPermissionRequestIds.remove(pending.dismissalId)
         let responseData: Data
-        if always {
-            let toolName = pending.event.toolName ?? ""
+        if always,
+           let toolName = pending.event.toolName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !toolName.isEmpty {
             let obj: [String: Any] = [
                 "hookSpecificOutput": [
                     "hookEventName": "PermissionRequest",
@@ -1310,10 +1310,10 @@ final class AppState {
     /// process. Live sessions update `lastActivity` on every event so the
     /// window is generous; stale ones get skipped. (#123 review)
     func findSessionId(forSource source: String, ppid: Int) -> String? {
-        let normalized = SessionSnapshot.normalizedSupportedSource(source)
+        let normalized = SessionSnapshot.runtimeSourceGroup(source)
         let cutoff = Date().addingTimeInterval(-300)
         return sessions.first(where: { _, snap in
-            let snapSource = SessionSnapshot.normalizedSupportedSource(snap.source)
+            let snapSource = SessionSnapshot.runtimeSourceGroup(snap.source)
             return snapSource == normalized
                 && snap.cliPid == pid_t(ppid)
                 && snap.lastActivity >= cutoff
@@ -1321,10 +1321,10 @@ final class AppState {
     }
 
     func denyPermission() {
-        guard !permissionQueue.isEmpty else { return }
-        let pending = permissionQueue.removeFirst()
-        let sessionId = pending.event.sessionId ?? "default"
-        dismissedPermissionSessionIds.remove(sessionId)
+        guard let idx = nextVisiblePermissionIndex() else { return }
+        let pending = permissionQueue.remove(at: idx)
+        let sessionId = Self.normalizedSessionId(for: pending.event)
+        dismissedPermissionRequestIds.remove(pending.dismissalId)
         let response = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#
         pending.continuation.resume(returning: Data(response.utf8))
         sessions[sessionId]?.status = .idle
@@ -1340,14 +1340,12 @@ final class AppState {
     }
 
     func dismissPermissionPrompt() {
-        guard let pending = permissionQueue.first else { return }
+        guard let idx = nextVisiblePermissionIndex() else { return }
+        let pending = permissionQueue[idx]
 
-        let sessionId = pending.event.sessionId ?? "default"
-        dismissedPermissionSessionIds.insert(sessionId)
+        dismissedPermissionRequestIds.insert(pending.dismissalId)
 
-        if nextVisiblePermissionIndex() != nil {
-            showNextPending()
-        } else {
+        if !showNextPending() {
             if case .approvalCard = surface {
                 withAnimation(NotchAnimation.close) {
                     surface = .collapsed
@@ -1363,7 +1361,7 @@ final class AppState {
             return
         }
 
-        let sessionId = event.sessionId ?? "default"
+        let sessionId = Self.normalizedSessionId(for: event)
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
         }
@@ -1382,11 +1380,9 @@ final class AppState {
         let request = QuestionRequest(event: event, question: question, continuation: continuation)
         questionQueue.append(request)
 
-        if questionQueue.count == 1 {
-            activeSessionId = sessionId
-            withAnimation(NotchAnimation.open) {
-                surface = .questionCard(sessionId: sessionId)
-            }
+        if showNextPending(),
+           case .questionCard(let visibleSessionId) = surface,
+           visibleSessionId == sessionId {
             SoundManager.shared.handleEvent("PermissionRequest")
         }
         refreshDerivedState()
@@ -1398,7 +1394,7 @@ final class AppState {
             return
         }
 
-        let sessionId = event.sessionId ?? "default"
+        let sessionId = Self.normalizedSessionId(for: event)
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
         }
@@ -1488,11 +1484,9 @@ final class AppState {
         )
         questionQueue.append(request)
 
-        if questionQueue.count == 1 {
-            activeSessionId = sessionId
-            withAnimation(NotchAnimation.open) {
-                surface = .questionCard(sessionId: sessionId)
-            }
+        if showNextPending(),
+           case .questionCard(let visibleSessionId) = surface,
+           visibleSessionId == sessionId {
             SoundManager.shared.handleEvent("PermissionRequest")
         }
         refreshDerivedState()
@@ -1530,7 +1524,7 @@ final class AppState {
             responseData = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
         }
         pending.continuation.resume(returning: responseData)
-        let sessionId = pending.event.sessionId ?? "default"
+        let sessionId = Self.normalizedSessionId(for: pending.event)
         sessions[sessionId]?.status = .processing
 
         showNextPending()
@@ -1538,21 +1532,30 @@ final class AppState {
     }
 
     func answerQuestionMulti(_ answers: [(question: String, answer: String)]) {
+        answerQuestionMulti(answers.map { (question: $0.question, answer: AskUserQuestionAnswerValue.single($0.answer)) })
+    }
+
+    func answerQuestionMulti(_ answers: [(question: String, answer: AskUserQuestionAnswerValue)]) {
         guard !questionQueue.isEmpty else { return }
         let pending = questionQueue.removeFirst()
         let responseData: Data
         if pending.isFromPermission {
-            var answersDict: [String: String] = [:]
+            var answersDict: [String: Any] = [:]
+            var answerValues: [Any] = []
             if let askState = pending.askUserQuestionState {
                 // Match by position — wizard collects answers in the same order as items
                 for (index, item) in askState.items.enumerated() {
                     if index < answers.count {
-                        answersDict[item.answerKey] = answers[index].answer
+                        let answer = answers[index].answer.jsonValue
+                        answersDict[item.answerKey] = answer
+                        answerValues.append(answer)
                     }
                 }
             } else {
                 let answerKey = pending.question.header ?? "answer"
-                answersDict[answerKey] = answers.first?.answer ?? ""
+                let answer = answers.first?.answer.jsonValue ?? ""
+                answersDict[answerKey] = answer
+                answerValues.append(answer)
             }
             let obj: [String: Any] = [
                 "hookSpecificOutput": [
@@ -1560,7 +1563,8 @@ final class AppState {
                     "decision": [
                         "behavior": "allow",
                         "updatedInput": [
-                            "answers": answersDict
+                            "answers": answersDict,
+                            "answerValues": answerValues
                         ]
                     ] as [String: Any]
                 ] as [String: Any]
@@ -1570,13 +1574,13 @@ final class AppState {
             let obj: [String: Any] = [
                 "hookSpecificOutput": [
                     "hookEventName": "Notification",
-                    "answer": answers.first?.answer ?? ""
+                    "answer": answers.first?.answer.jsonValue ?? ""
                 ] as [String: Any]
             ]
             responseData = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
         }
         pending.continuation.resume(returning: responseData)
-        let sessionId = pending.event.sessionId ?? "default"
+        let sessionId = Self.normalizedSessionId(for: pending.event)
         sessions[sessionId]?.status = .processing
 
         showNextPending()
@@ -1593,7 +1597,7 @@ final class AppState {
             responseData = Data(#"{"hookSpecificOutput":{"hookEventName":"Notification"}}"#.utf8)
         }
         pending.continuation.resume(returning: responseData)
-        let sessionId = pending.event.sessionId ?? "default"
+        let sessionId = Self.normalizedSessionId(for: pending.event)
         sessions[sessionId]?.status = .processing
 
         showNextPending()
@@ -1602,10 +1606,10 @@ final class AppState {
 
     /// Drain all queued permissions for a specific session, resuming their continuations with deny
     private func drainPermissions(forSession sessionId: String, reason: String = "unknown") {
-        dismissedPermissionSessionIds.remove(sessionId)
         let denyResponse = Data(#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8)
         permissionQueue.removeAll { item in
-            guard item.event.sessionId == sessionId else { return false }
+            guard Self.normalizedSessionId(for: item.event) == sessionId else { return false }
+            dismissedPermissionRequestIds.remove(item.dismissalId)
             log.notice("⚠️ permission deny reason=drainPermissions(\(reason, privacy: .public)) session=\(sessionId, privacy: .public) toolUseId=\(item.toolUseId ?? "nil", privacy: .public) tool=\(item.event.toolName ?? "nil", privacy: .public)")
             item.continuation.resume(returning: denyResponse)
             return true
@@ -1620,12 +1624,13 @@ final class AppState {
             item.continuation.resume(returning: denyResponse)
         }
         permissionQueue.removeAll()
+        dismissedPermissionRequestIds.removeAll()
     }
 
     /// Called when the bridge socket disconnects — the question/permission was answered externally (e.g. user replied in terminal)
     func handlePeerDisconnect(sessionId: String) {
-        let hadPending = questionQueue.contains(where: { $0.event.sessionId == sessionId })
-            || permissionQueue.contains(where: { $0.event.sessionId == sessionId })
+        let hadPending = questionQueue.contains(where: { Self.normalizedSessionId(for: $0.event) == sessionId })
+            || permissionQueue.contains(where: { Self.normalizedSessionId(for: $0.event) == sessionId })
         guard hadPending else { return }
 
         drainQuestions(forSession: sessionId, reason: "peer-disconnect")
@@ -1644,7 +1649,7 @@ final class AppState {
     /// AskUserQuestion-derived requests are denied; notification questions return empty.
     private func drainQuestions(forSession sessionId: String, reason: String = "unknown") {
         questionQueue.removeAll { item in
-            guard item.event.sessionId == sessionId else { return false }
+            guard Self.normalizedSessionId(for: item.event) == sessionId else { return false }
             if item.isFromPermission {
                 log.notice("⚠️ permission deny reason=drainQuestions(\(reason, privacy: .public)) session=\(sessionId, privacy: .public) tool=AskUserQuestion")
                 let denyData = Data(
@@ -1676,7 +1681,7 @@ final class AppState {
         if let idx = nextVisiblePermissionIndex() {
             let next = permissionQueue.remove(at: idx)
             permissionQueue.insert(next, at: 0)
-            let sid = next.event.sessionId ?? "default"
+            let sid = Self.normalizedSessionId(for: next.event)
             activeSessionId = sid
             // When the session list is open, keep it open; approvals can be handled inline.
             if surface != .sessionList {
@@ -1684,7 +1689,7 @@ final class AppState {
             }
             return true
         } else if let next = questionQueue.first {
-            let sid = next.event.sessionId ?? "default"
+            let sid = Self.normalizedSessionId(for: next.event)
             activeSessionId = sid
             surface = .questionCard(sessionId: sid)
             return true
@@ -1740,7 +1745,7 @@ final class AppState {
         guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
         defer { handle.closeFile() }
         let chunk = handle.readData(ofLength: 32768)
-        guard let text = String(data: chunk, encoding: .utf8) else { return nil }
+        let text = UTF8FileChunkReader.decode(chunk)
         for line in text.components(separatedBy: "\n") {
             guard !line.isEmpty,
                   let data = line.data(using: .utf8),
@@ -1813,8 +1818,7 @@ final class AppState {
 
     private nonisolated static func readModelFromCodexStore(cwd: String?, processStart: Date?) -> String? {
         guard let cwd else { return nil }
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let base = "\(home)/.codex/sessions"
+        let base = ConfigInstaller.codexHome() + "/sessions"
         let fm = FileManager.default
         guard let path = findRecentCodexSession(base: base, cwd: cwd, after: processStart, fm: fm) else {
             return nil
@@ -1891,8 +1895,8 @@ final class AppState {
         cwd: String?,
         processStart: Date?
     ) -> String? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let statePath = "\(home)/.codex/state_5.sqlite"
+        let codexHome = ConfigInstaller.codexHome()
+        let statePath = codexHome + "/state_5.sqlite"
 
         if let path: String = withSQLiteDatabase(at: statePath, body: { db in
             guard let statement = prepareSQLiteStatement(
@@ -1917,7 +1921,7 @@ final class AppState {
         }
 
         guard let cwd else { return nil }
-        let base = "\(home)/.codex/sessions"
+        let base = codexHome + "/sessions"
         return findRecentCodexSession(base: base, cwd: cwd, after: processStart, fm: .default)
     }
 
@@ -2026,21 +2030,32 @@ final class AppState {
     }
 
     deinit {
-        MainActor.assumeIsolated {
-            rotationTimer?.invalidate()
-            cleanupTimer?.invalidate()
-            saveTimer?.invalidate()
-            if let stream = fsEventStream {
-                FSEventStreamStop(stream)
-                FSEventStreamInvalidate(stream)
-                FSEventStreamRelease(stream)
+        // The last reference can be dropped from a background task (tests do
+        // this), so deinit may run off the main thread. `DispatchQueue.main.sync`
+        // keeps self's storage valid for the duration of the teardown; the
+        // closure is non-escaping, so capturing self in deinit is safe.
+        let teardown = {
+            MainActor.assumeIsolated {
+                self.rotationTimer?.invalidate()
+                self.cleanupTimer?.invalidate()
+                self.saveTimer?.invalidate()
+                if let stream = self.fsEventStream {
+                    FSEventStreamStop(stream)
+                    FSEventStreamInvalidate(stream)
+                    FSEventStreamRelease(stream)
+                }
+                self.discoveryScanTask?.cancel()
+                for (_, m) in self.processMonitors { m.source.cancel() }
+                let center = NSWorkspace.shared.notificationCenter
+                for observer in self.runningApplicationObservers {
+                    center.removeObserver(observer)
+                }
             }
-            discoveryScanTask?.cancel()
-            for (_, m) in processMonitors { m.source.cancel() }
-            let center = NSWorkspace.shared.notificationCenter
-            for observer in runningApplicationObservers {
-                center.removeObserver(observer)
-            }
+        }
+        if Thread.isMainThread {
+            teardown()
+        } else {
+            DispatchQueue.main.sync(execute: teardown)
         }
     }
 
@@ -2199,6 +2214,18 @@ final class AppState {
         )
     }
 
+    private nonisolated static func sourceForCursorPid(_ pid: pid_t) -> String {
+        if let path = executablePath(for: pid),
+           CLIProcessResolver.sourceMatchesExecutablePath(path, source: "cursor-cli") {
+            return "cursor-cli"
+        }
+        if let args = getProcessArgs(pid),
+           args.contains(where: { CLIProcessResolver.sourceMatchesExecutablePath($0, source: "cursor-cli") }) {
+            return "cursor-cli"
+        }
+        return "cursor"
+    }
+
     private nonisolated static func findQoderPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
         findPids(
             matchingPathSubstrings: [
@@ -2208,6 +2235,18 @@ final class AppState {
             ],
             candidatePids: candidatePids
         )
+    }
+
+    private nonisolated static func sourceForQoderPid(_ pid: pid_t) -> String {
+        if let path = executablePath(for: pid),
+           CLIProcessResolver.sourceMatchesExecutablePath(path, source: "qoder-cli") {
+            return "qoder-cli"
+        }
+        if let args = getProcessArgs(pid),
+           args.contains(where: { CLIProcessResolver.sourceMatchesExecutablePath($0, source: "qoder-cli") }) {
+            return "qoder-cli"
+        }
+        return "qoder"
     }
 
     private nonisolated static func findFactoryPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
@@ -2392,6 +2431,22 @@ final class AppState {
         )
     }
 
+    private nonisolated static func findKiroPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
+        findPids(
+            matchingPathSubstrings: [
+                "/kiro.app/contents/macos/kiro",
+                "/.kiro/",
+            ],
+            argSubstrings: [
+                "/opt/homebrew/bin/kiro",
+                "/usr/local/bin/kiro",
+                "/.local/bin/kiro",
+                "kiro --agent",
+            ],
+            candidatePids: candidatePids
+        )
+    }
+
     private nonisolated static func findPiPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
         findPids(
             matchingPathSubstrings: [
@@ -2472,14 +2527,7 @@ final class AppState {
     }
 
     private nonisolated static func readRecentFromKimiTranscript(path: String) -> (String?, [ChatMessage]) {
-        guard let handle = FileHandle(forReadingAtPath: path) else { return (nil, []) }
-        defer { handle.closeFile() }
-
-        let fileSize = handle.seekToEndOfFile()
-        let readSize: UInt64 = min(fileSize, 262_144)
-        handle.seek(toFileOffset: fileSize - readSize)
-        let data = handle.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else { return (nil, []) }
+        guard let text = readTranscriptTail(path: path, maxBytes: 262_144) else { return (nil, []) }
 
         var messages: [ChatMessage] = []
         var previousUserText: String?
@@ -2617,6 +2665,7 @@ final class AppState {
         pids: [pid_t],
         basePath: String,
         source: String,
+        sourceResolver: ((pid_t) -> String)? = nil,
         projectEncoder: (String) -> String,
         transcriptReader: (String) -> (String?, [ChatMessage])
     ) -> [DiscoveredSession] {
@@ -2648,7 +2697,7 @@ final class AppState {
                 pid: pid,
                 modifiedAt: best.modified,
                 recentMessages: messages,
-                source: source
+                source: sourceResolver?(pid) ?? source
             ))
         }
 
@@ -2790,6 +2839,7 @@ final class AppState {
             pids: findQoderPids(candidatePids: candidatePids),
             basePath: "\(home)/.qoder/projects",
             source: "qoder",
+            sourceResolver: sourceForQoderPid,
             projectEncoder: { $0.claudeProjectDirEncoded() },
             transcriptReader: { readRecentFromTranscript(path: $0) }
         )
@@ -2850,7 +2900,7 @@ final class AppState {
                 pid: pid,
                 modifiedAt: best.modified,
                 recentMessages: messages,
-                source: "cursor"
+                source: sourceForCursorPid(pid)
             ))
         }
 
@@ -2868,7 +2918,7 @@ final class AppState {
         for sessionDir in sessionDirs {
             let dirPath = "\(transcriptsBase)/\(sessionDir)"
             guard let candidate = findMostRecentJSONLFile(in: dirPath, after: processStart, fm: fm) else { continue }
-            if best == nil || candidate.modified > best!.modified {
+            if best.map({ candidate.modified > $0.modified }) ?? true {
                 best = candidate
             }
         }
@@ -2947,7 +2997,7 @@ final class AppState {
         defer { handle.closeFile() }
 
         let data = handle.readData(ofLength: 32768)
-        guard let text = String(data: data, encoding: .utf8) else { return false }
+        let text = UTF8FileChunkReader.decode(data)
 
         for line in text.components(separatedBy: "\n") where !line.isEmpty {
             guard let lineData = line.data(using: .utf8),
@@ -3011,7 +3061,7 @@ final class AppState {
         body: (OpaquePointer) -> T?
     ) -> T? {
         var db: OpaquePointer?
-        guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK,
+        guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
               let db else {
             if let db { sqlite3_close_v2(db) }
             return nil
@@ -3070,13 +3120,18 @@ final class AppState {
         bindSQLiteText(cwd, to: statement, index: 2)
 
         let minUpdatedAtMs = processStart.map { Int64($0.timeIntervalSince1970 * 1000) - 10_000 }
-        while sqlite3_step(statement) == SQLITE_ROW {
-            guard let sessionId = sqliteColumnString(statement, index: 0) else { continue }
-            let updatedAtMs = sqlite3_column_int64(statement, 1)
-            if let minUpdatedAtMs, updatedAtMs < minUpdatedAtMs { continue }
-            let modifiedAt = Date(timeIntervalSince1970: TimeInterval(updatedAtMs) / 1000)
-            return (sessionId, modifiedAt)
+        var stepStatus = sqlite3_step(statement)
+        while stepStatus == SQLITE_ROW {
+            if let sessionId = sqliteColumnString(statement, index: 0) {
+                let updatedAtMs = sqlite3_column_int64(statement, 1)
+                if minUpdatedAtMs.map({ updatedAtMs >= $0 }) ?? true {
+                    let modifiedAt = Date(timeIntervalSince1970: TimeInterval(updatedAtMs) / 1000)
+                    return (sessionId, modifiedAt)
+                }
+            }
+            stepStatus = sqlite3_step(statement)
         }
+        guard stepStatus == SQLITE_DONE else { return nil }
         return nil
     }
 
@@ -3216,9 +3271,8 @@ final class AppState {
         let codexPids = findCodexPids(candidatePids: candidatePids)
         guard !codexPids.isEmpty else { return [] }
 
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
         let fm = FileManager.default
-        let sessionsBase = "\(home)/.codex/sessions"
+        let sessionsBase = ConfigInstaller.codexHome() + "/sessions"
         guard fm.fileExists(atPath: sessionsBase) else { return [] }
 
         var results: [DiscoveredSession] = []
@@ -3287,22 +3341,31 @@ final class AppState {
         return scanCodexDir(dirs: dirs, cwd: cwd, after: after, fm: fm)
     }
 
+#if DEBUG
+    nonisolated static func testFindRecentCodexSession(base: String, cwd: String, after: Date?, fm: FileManager) -> String? {
+        findRecentCodexSession(base: base, cwd: cwd, after: after, fm: fm)
+    }
+#endif
+
     private nonisolated static func scanCodexDir(dirs: [String], cwd: String, after: Date?, fm: FileManager) -> String? {
         for dir in dirs {
             guard let files = try? fm.contentsOfDirectory(atPath: dir) else { continue }
-            // Sort descending to check newest first
-            let jsonlFiles = files.filter { $0.hasSuffix(".jsonl") }.sorted(by: >)
-
-            for file in jsonlFiles.prefix(20) {
+            let threshold = after?.addingTimeInterval(-10)
+            let candidates = files.compactMap { file -> (path: String, modified: Date)? in
+                guard file.hasSuffix(".jsonl") else { return nil }
                 let fullPath = "\(dir)/\(file)"
-                if let start = after,
-                   let attrs = try? fm.attributesOfItem(atPath: fullPath),
-                   let modified = attrs[.modificationDate] as? Date,
-                   modified < start.addingTimeInterval(-10) {
-                    continue
+                let attrs = try? fm.attributesOfItem(atPath: fullPath)
+                let modified = attrs?[.modificationDate] as? Date ?? .distantPast
+                if let threshold, modified < threshold {
+                    return nil
                 }
-                if codexSessionMatchesCwd(path: fullPath, cwd: cwd) {
-                    return fullPath
+                return (fullPath, modified)
+            }
+            .sorted { $0.modified > $1.modified }
+
+            for candidate in candidates.prefix(20) {
+                if codexSessionMatchesCwd(path: candidate.path, cwd: cwd) {
+                    return candidate.path
                 }
             }
         }
@@ -3314,8 +3377,8 @@ final class AppState {
         guard let handle = FileHandle(forReadingAtPath: path) else { return false }
         defer { handle.closeFile() }
         let data = handle.readData(ofLength: 4096) // First line is enough
-        guard let text = String(data: data, encoding: .utf8),
-              let firstLine = text.components(separatedBy: "\n").first,
+        let text = UTF8FileChunkReader.decode(data)
+        guard let firstLine = text.components(separatedBy: "\n").first,
               let lineData = firstLine.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
               let payload = json["payload"] as? [String: Any],
@@ -3357,14 +3420,7 @@ final class AppState {
     }
 
     private nonisolated static func readRecentFromCursorTranscript(path: String) -> (String?, [ChatMessage]) {
-        guard let handle = FileHandle(forReadingAtPath: path) else { return (nil, []) }
-        defer { handle.closeFile() }
-
-        let fileSize = handle.seekToEndOfFile()
-        let readSize: UInt64 = min(fileSize, 65536)
-        handle.seek(toFileOffset: fileSize - readSize)
-        let data = handle.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else { return (nil, []) }
+        guard let text = readTranscriptTail(path: path) else { return (nil, []) }
 
         var userMessages: [(Int, String)] = []
         var assistantMessages: [(Int, String)] = []
@@ -3398,14 +3454,7 @@ final class AppState {
     }
 
     private nonisolated static func readRecentFromCodeBuddyTranscript(path: String) -> (String?, [ChatMessage]) {
-        guard let handle = FileHandle(forReadingAtPath: path) else { return (nil, []) }
-        defer { handle.closeFile() }
-
-        let fileSize = handle.seekToEndOfFile()
-        let readSize: UInt64 = min(fileSize, 65536)
-        handle.seek(toFileOffset: fileSize - readSize)
-        let data = handle.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else { return (nil, []) }
+        guard let text = readTranscriptTail(path: path) else { return (nil, []) }
 
         var model: String?
         var userMessages: [(Int, String)] = []
@@ -3458,14 +3507,7 @@ final class AppState {
     }
 
     private nonisolated static func readRecentFromCopilotTranscript(path: String) -> (String?, [ChatMessage]) {
-        guard let handle = FileHandle(forReadingAtPath: path) else { return (nil, []) }
-        defer { handle.closeFile() }
-
-        let fileSize = handle.seekToEndOfFile()
-        let readSize: UInt64 = min(fileSize, 65536)
-        handle.seek(toFileOffset: fileSize - readSize)
-        let data = handle.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else { return (nil, []) }
+        guard let text = readTranscriptTail(path: path) else { return (nil, []) }
 
         var model: String?
         var userMessages: [(Int, String)] = []
@@ -3512,14 +3554,7 @@ final class AppState {
     }
 
     private nonisolated static func readTranscriptTail(path: String, maxBytes: UInt64 = 65536) -> String? {
-        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
-        defer { handle.closeFile() }
-
-        let fileSize = handle.seekToEndOfFile()
-        let readSize: UInt64 = min(fileSize, maxBytes)
-        handle.seek(toFileOffset: fileSize - readSize)
-        let data = handle.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)
+        UTF8FileChunkReader.tailText(path: path, maxBytes: maxBytes)
     }
 
     private nonisolated static func parseISO8601Timestamp(_ value: String) -> Date? {
@@ -3700,15 +3735,7 @@ final class AppState {
 
     /// Read model and last 3 user/assistant messages from a transcript file's tail
     private nonisolated static func readRecentFromTranscript(path: String) -> (String?, [ChatMessage]) {
-        guard let handle = FileHandle(forReadingAtPath: path) else { return (nil, []) }
-        defer { handle.closeFile() }
-
-        // Read last 64KB
-        let fileSize = handle.seekToEndOfFile()
-        let readSize: UInt64 = min(fileSize, 65536)
-        handle.seek(toFileOffset: fileSize - readSize)
-        let data = handle.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else { return (nil, []) }
+        guard let text = readTranscriptTail(path: path) else { return (nil, []) }
 
         var model: String?
         var userMessages: [(Int, String)] = []
@@ -3767,15 +3794,16 @@ final class AppState {
 }
 
 /// Encode a path the same way Claude Code does for project directory names:
-/// "/" → "-", non-ASCII → "-", spaces → "-"
+/// every non-alphanumeric character (/, space, ., _, ', non-ASCII, …) → "-"
 extension String {
     func claudeProjectDirEncoded() -> String {
         var result = ""
         for c in self.unicodeScalars {
-            if c == "/" || c == " " || c.value > 127 {
-                result.append("-")
-            } else {
+            switch c {
+            case "a"..."z", "A"..."Z", "0"..."9":
                 result.append(Character(c))
+            default:
+                result.append("-")
             }
         }
         return result

@@ -399,13 +399,13 @@ struct AirDropPanelView: View {
 
     private func localizedFlowMessage(_ message: String) -> String {
         switch message {
-        case "此项目无法使用 AirDrop":
+        case AirDropFlowMessageKey.unavailable:
             return l10n["airdrop_flow_unavailable_detail"]
-        case "AirDrop 未完成":
+        case AirDropFlowMessageKey.failed:
             return l10n["airdrop_flow_failed_detail"]
-        case "无法准备临时文件":
+        case AirDropFlowMessageKey.prepareTempFailed:
             return l10n["airdrop_flow_prepare_temp_failed"]
-        case "无法清理临时文件":
+        case AirDropFlowMessageKey.cleanupFailed:
             return l10n["airdrop_flow_cleanup_failed"]
         default:
             return message

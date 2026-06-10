@@ -118,10 +118,10 @@ final class FullMascotSpriteAssetTests: XCTestCase {
             for filename in expectedFiles {
                 let bitmap = try loadBitmap(source: source, filename: filename)
 
-                XCTAssertLessThan(bitmap.phase80Alpha(atX: 0, y: 0), 16, "\(source)/\(filename) first-frame top-left should be transparent.")
-                XCTAssertLessThan(bitmap.phase80Alpha(atX: 31, y: 0), 16, "\(source)/\(filename) first-frame top-right should be transparent.")
-                XCTAssertLessThan(bitmap.phase80Alpha(atX: 0, y: 31), 16, "\(source)/\(filename) first-frame bottom-left should be transparent.")
-                XCTAssertLessThan(bitmap.phase80Alpha(atX: 31, y: 31), 16, "\(source)/\(filename) first-frame bottom-right should be transparent.")
+                XCTAssertLessThan(try bitmap.phase80Alpha(atX: 0, y: 0), 16, "\(source)/\(filename) first-frame top-left should be transparent.")
+                XCTAssertLessThan(try bitmap.phase80Alpha(atX: 31, y: 0), 16, "\(source)/\(filename) first-frame top-right should be transparent.")
+                XCTAssertLessThan(try bitmap.phase80Alpha(atX: 0, y: 31), 16, "\(source)/\(filename) first-frame bottom-left should be transparent.")
+                XCTAssertLessThan(try bitmap.phase80Alpha(atX: 31, y: 31), 16, "\(source)/\(filename) first-frame bottom-right should be transparent.")
             }
         }
     }
@@ -130,7 +130,7 @@ final class FullMascotSpriteAssetTests: XCTestCase {
         for source in allSources {
             for filename in ["idle-sheet.png", "work-sheet.png", "alert-sheet.png"] {
                 let bitmap = try loadBitmap(source: source, filename: filename)
-                assertFirstFrameMatchesLastFrame(bitmap, "\(source)/\(filename)")
+                try assertFirstFrameMatchesLastFrame(bitmap, "\(source)/\(filename)")
             }
         }
     }
@@ -145,8 +145,8 @@ final class FullMascotSpriteAssetTests: XCTestCase {
 
             for (x, y) in points {
                 assertPixelChanged(
-                    from: icon.phase80Color(atX: x, y: y),
-                    to: idle.phase80Color(atX: x, y: y),
+                    from: try icon.phase80Color(atX: x, y: y),
+                    to: try idle.phase80Color(atX: x, y: y),
                     "\(source) idle closed-eye sample @ \(x),\(y)"
                 )
             }
@@ -157,7 +157,7 @@ final class FullMascotSpriteAssetTests: XCTestCase {
         for source in allSources {
             let work = try loadBitmap(source: source, filename: "work-sheet.png")
             let sampledFrames = [0, 8, 16, 24, 31]
-            let minYs = sampledFrames.compactMap { bodyMinY(in: work, frameIndex: $0) }
+            let minYs = try sampledFrames.compactMap { try bodyMinY(in: work, frameIndex: $0) }
             let bobRange = (minYs.max() ?? 0) - (minYs.min() ?? 0)
 
             XCTAssertEqual(minYs.count, sampledFrames.count, "\(source)/work-sheet.png should have visible body pixels in sampled frames.")
@@ -178,7 +178,7 @@ final class FullMascotSpriteAssetTests: XCTestCase {
         return try XCTUnwrap(NSBitmapImageRep(data: data), "\(source)/\(filename) should be readable PNG data.")
     }
 
-    private func bodyMinY(in bitmap: NSBitmapImageRep, frameIndex: Int) -> Int? {
+    private func bodyMinY(in bitmap: NSBitmapImageRep, frameIndex: Int) throws -> Int? {
         let frameX = frameIndex * 32
         var minY: Int?
 
@@ -187,7 +187,7 @@ final class FullMascotSpriteAssetTests: XCTestCase {
                 if x >= 21 && y <= 13 {
                     continue
                 }
-                if bitmap.phase80Alpha(atX: frameX + x, y: y) >= 16 {
+                if try bitmap.phase80Alpha(atX: frameX + x, y: y) >= 16 {
                     minY = min(minY ?? y, y)
                 }
             }
@@ -201,12 +201,12 @@ final class FullMascotSpriteAssetTests: XCTestCase {
         _ message: @autoclosure () -> String,
         file: StaticString = #filePath,
         line: UInt = #line
-    ) {
+    ) throws {
         let lastFrameX = bitmap.pixelsWide - 32
         for y in 0..<32 {
             for x in 0..<32 {
-                let first = bitmap.phase80Color(atX: x, y: y)
-                let last = bitmap.phase80Color(atX: lastFrameX + x, y: y)
+                let first = try bitmap.phase80Color(atX: x, y: y)
+                let last = try bitmap.phase80Color(atX: lastFrameX + x, y: y)
                 XCTAssertEqual(first.redComponent, last.redComponent, accuracy: 0.001, "\(message()) red @ \(x),\(y)", file: file, line: line)
                 XCTAssertEqual(first.greenComponent, last.greenComponent, accuracy: 0.001, "\(message()) green @ \(x),\(y)", file: file, line: line)
                 XCTAssertEqual(first.blueComponent, last.blueComponent, accuracy: 0.001, "\(message()) blue @ \(x),\(y)", file: file, line: line)
@@ -231,11 +231,14 @@ final class FullMascotSpriteAssetTests: XCTestCase {
 }
 
 private extension NSBitmapImageRep {
-    func phase80Alpha(atX x: Int, y: Int) -> CGFloat {
-        phase80Color(atX: x, y: y).alphaComponent * 255
+    func phase80Alpha(atX x: Int, y: Int) throws -> CGFloat {
+        try phase80Color(atX: x, y: y).alphaComponent * 255
     }
 
-    func phase80Color(atX x: Int, y: Int) -> NSColor {
-        colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) ?? .clear
+    func phase80Color(atX x: Int, y: Int) throws -> NSColor {
+        try XCTUnwrap(
+            colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+            "Missing mascot sprite color at \(x),\(y)"
+        )
     }
 }

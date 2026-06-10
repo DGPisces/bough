@@ -73,6 +73,7 @@ final class ProviderBuddyPreservationTests: XCTestCase {
         XCTAssertContains(terminalActivator, "\"com.tencent.codebuddy\": \"CodeBuddy\"")
         XCTAssertContains(terminalActivator, "\"com.tencent.codebuddy.cn\": \"CodyBuddyCN\"")
         XCTAssertContains(terminalActivator, "\"com.workbuddy.workbuddy\": \"WorkBuddy\"")
+        XCTAssertContains(terminalActivator, "!hasTerminalEvidence(session)")
 
         XCTAssertContains(mascotView, "MascotSpriteCatalog.spec(source: source, status: status)")
         XCTAssertEqual(MascotSpriteCatalog.normalizedApprovedSourceID("codebuddy"), "codebuddy")

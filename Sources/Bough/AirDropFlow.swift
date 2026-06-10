@@ -7,6 +7,13 @@ enum AirDropEntrySource: String, Equatable {
     case preview
 }
 
+enum AirDropFlowMessageKey {
+    static let unavailable = "airdrop_flow_unavailable_detail"
+    static let failed = "airdrop_flow_failed_detail"
+    static let prepareTempFailed = "airdrop_flow_prepare_temp_failed"
+    static let cleanupFailed = "airdrop_flow_cleanup_failed"
+}
+
 struct AirDropPasteboardPayload: Equatable {
     var fileURLs: [URL] = []
     var remoteURLs: [URL] = []
@@ -517,7 +524,7 @@ final class AirDropFlowController {
     func prepare(payload: AirDropPasteboardPayload, source: AirDropEntrySource) -> AirDropFlowState {
         switch classifier.classify(payload, source: source) {
         case .unsupported:
-            state = .unavailable("此项目无法使用 AirDrop")
+            state = .unavailable(AirDropFlowMessageKey.unavailable)
         case .supported(let draft):
             state = draft.mode == .needsTextConfirmation ? .confirmingText(draft) : .ready(draft)
         }
@@ -533,6 +540,9 @@ final class AirDropFlowController {
     }
 
     func reset() {
+        if case .opening(let transfer) = state {
+            try? textFileStore.cleanup(transfer.temporaryTextFiles)
+        }
         state = .idle
     }
 
@@ -553,7 +563,7 @@ final class AirDropFlowController {
                 sharingItems: sharingItems
             )
             guard !sharingItems.isEmpty else {
-                state = .unavailable("此项目无法使用 AirDrop")
+                state = .unavailable(AirDropFlowMessageKey.unavailable)
                 return
             }
             state = .opening(transfer)
@@ -562,10 +572,10 @@ final class AirDropFlowController {
             }
             if !started {
                 try textFileStore.cleanup(temporaryFiles)
-                state = .unavailable("此项目无法使用 AirDrop")
+                state = .unavailable(AirDropFlowMessageKey.unavailable)
             }
         } catch {
-            state = .cleanupError("无法准备临时文件")
+            state = .cleanupError(AirDropFlowMessageKey.prepareTempFailed)
         }
     }
 
@@ -575,7 +585,7 @@ final class AirDropFlowController {
                 try textFileStore.cleanup(transfer.temporaryTextFiles)
                 state = .cancelled
             } catch {
-                state = .cleanupError("无法清理临时文件")
+                state = .cleanupError(AirDropFlowMessageKey.cleanupFailed)
             }
         } else {
             state = .cancelled
@@ -608,11 +618,11 @@ final class AirDropFlowController {
         do {
             try textFileStore.cleanup(transfer.temporaryTextFiles)
             guard textFileStore.isCleanedUp(transfer.temporaryTextFiles) else {
-                state = .cleanupError("无法清理临时文件")
+                state = .cleanupError(AirDropFlowMessageKey.cleanupFailed)
                 return
             }
         } catch {
-            state = .cleanupError("无法清理临时文件")
+            state = .cleanupError(AirDropFlowMessageKey.cleanupFailed)
             return
         }
 
@@ -620,7 +630,7 @@ final class AirDropFlowController {
         case .success:
             state = .complete(AirDropCompletion(cleanedTemporaryTextFile: !transfer.temporaryTextFiles.isEmpty))
         case .failure:
-            state = .failed("AirDrop 未完成")
+            state = .failed(AirDropFlowMessageKey.failed)
         }
     }
 }
