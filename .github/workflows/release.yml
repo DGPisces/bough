@@ -179,6 +179,9 @@ jobs:
         if: ${{ !contains(github.ref_name, '-') }}
         env:
           GH_TOKEN: ${{ github.token }}
+          # The appcast branch ruleset blocks github.token; pushes go through
+          # the appcast-publisher deploy key, which has a DeployKey bypass.
+          BOUGH_APPCAST_DEPLOY_KEY: ${{ secrets.BOUGH_APPCAST_DEPLOY_KEY }}
         run: |
           APPCAST_STAGING="$RUNNER_TEMP/appcast-branch"
           if git ls-remote --exit-code --heads origin appcast >/dev/null 2>&1; then
@@ -199,7 +202,13 @@ jobs:
             -c user.name="github-actions[bot]" \
             -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             commit -m "Update appcast for ${BOUGH_RELEASE_TAG}"
-          git -C "$APPCAST_STAGING" push origin HEAD:appcast
+          [[ -n "$BOUGH_APPCAST_DEPLOY_KEY" ]] || { echo "BOUGH_APPCAST_DEPLOY_KEY secret is missing" >&2; exit 1; }
+          DEPLOY_KEY_FILE="$RUNNER_TEMP/appcast-deploy-key"
+          printf '%s\n' "$BOUGH_APPCAST_DEPLOY_KEY" > "$DEPLOY_KEY_FILE"
+          chmod 600 "$DEPLOY_KEY_FILE"
+          GIT_SSH_COMMAND="ssh -i $DEPLOY_KEY_FILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
+            git -C "$APPCAST_STAGING" push git@github.com:DGPisces/bough.git HEAD:appcast
+          rm -f "$DEPLOY_KEY_FILE"
 
       - name: Verify stable remote feed
         if: ${{ !contains(github.ref_name, '-') }}
