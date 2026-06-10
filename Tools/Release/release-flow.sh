@@ -797,7 +797,7 @@ cmd_open_tap_pr() {
     validate_homebrew_release_inputs
 
     local pr_title="Update Bough to ${TAG}"
-    local tap_dir cask_full_path existing_pr
+    local cask_full_path existing_pr
     if [[ "$DRY_RUN" == "1" ]]; then
         echo "homebrew tap PR:"
         echo "  tapRepo=$TAP_REPO"
@@ -833,7 +833,9 @@ cmd_open_tap_pr() {
     fi
 
     tap_dir="$(mktemp -d)"
-    trap 'rm -rf "$tap_dir"' EXIT
+    # Expand now: a deferred '$tap_dir' would be unbound (set -u) once this
+    # function's frame is gone when the EXIT trap fires.
+    trap "rm -rf '$tap_dir'" EXIT
 
     gh repo clone "$TAP_REPO" "$tap_dir" -- --depth 1
     git -C "$tap_dir" switch -c "$TAP_BRANCH"
