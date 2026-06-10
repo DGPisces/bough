@@ -25,15 +25,13 @@ public enum AtomicJSONStore {
         dateEncodingStrategy: JSONEncoder.DateEncodingStrategy = .iso8601
     ) throws {
         let dirURL = baseDirectoryURL()
-        try FileManager.default.createDirectory(
-            at: dirURL,
-            withIntermediateDirectories: true
-        )
+        try BoughPrivateStorage.ensurePrivateDirectory(at: dirURL)
         let fileURL = dirURL.appendingPathComponent(relativePath)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = dateEncodingStrategy
         let data = try encoder.encode(value)
         try data.write(to: fileURL, options: Data.WritingOptions.atomic)
+        try BoughPrivateStorage.protectPrivateFile(at: fileURL)
     }
 
     /// Decode JSON from `~/.bough/<relativePath>` into `type`.
@@ -51,6 +49,11 @@ public enum AtomicJSONStore {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = dateDecodingStrategy
         return try? decoder.decode(type, from: data)
+    }
+
+    public static func delete(_ relativePath: String) throws {
+        let fileURL = baseDirectoryURL().appendingPathComponent(relativePath)
+        try FileManager.default.removeItem(at: fileURL)
     }
 
     /// Resolve `~/.bough/`.

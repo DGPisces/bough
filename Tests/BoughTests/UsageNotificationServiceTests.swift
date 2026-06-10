@@ -3,6 +3,18 @@ import XCTest
 @testable import BoughCore
 
 final class UsageNotificationServiceTests: XCTestCase {
+    private var temporarySQLitePaths: [URL] = []
+
+    override func tearDownWithError() throws {
+        for url in temporarySQLitePaths {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: url.path + "-wal"))
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: url.path + "-shm"))
+        }
+        temporarySQLitePaths.removeAll()
+        try super.tearDownWithError()
+    }
+
     func testReportsPermissionStatesWithoutPrompting() async {
         let service = UsageNotificationService(client: FakeUsageNotificationClient(status: .denied))
 
@@ -220,17 +232,18 @@ final class UsageNotificationServiceTests: XCTestCase {
     }
 
     func testInfoPlistDoesNotRequestRemindersAccess() throws {
-        let data = try Data(contentsOf: URL(fileURLWithPath: "Platform/Apple/Info.plist"))
+        let data = try Data(contentsOf: TestHelpers.repoRoot(from: #filePath)
+            .appendingPathComponent("Platform/Apple/Info.plist"))
         let plist = try XCTUnwrap(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
 
         XCTAssertNil(plist["NSRemindersFullAccessUsageDescription"])
     }
 
     private func makeStore() throws -> UsageContinuityStore {
-        let path = FileManager.default.temporaryDirectory
+        let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("UsageNotificationServiceTests-\(UUID().uuidString).sqlite")
-            .path
-        return try UsageContinuityStore(path: path)
+        temporarySQLitePaths.append(url)
+        return try UsageContinuityStore(path: url.path)
     }
 
     private func recoveryEdge(resetIntervalID: String = "weekly:10080:2000") -> UsageRecoveryEdge {

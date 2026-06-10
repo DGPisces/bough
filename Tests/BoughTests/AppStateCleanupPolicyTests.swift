@@ -45,10 +45,29 @@ final class AppStateCleanupPolicyTests: XCTestCase {
         ]), ["com.openai.codex"])
     }
 
+    func testIdleCleanupDoesNotTerminateReparentedUserCLIProcesses() throws {
+        let source = try String(contentsOf: repoRoot().appendingPathComponent("Sources/Bough/AppState.swift"))
+        let cleanup = try XCTUnwrap(source.slice(from: "private func cleanupIdleSessions()", to: "private var hasIdleCleanupWork"))
+
+        XCTAssertFalse(cleanup.contains("SIGTERM"))
+        XCTAssertFalse(cleanup.contains("pbi_ppid <= 1"))
+        XCTAssertFalse(cleanup.contains("shouldTerminateOrphanedProcess"))
+    }
+
     private func repoRoot() -> URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
+    }
+}
+
+private extension String {
+    func slice(from start: String, to end: String) -> String? {
+        guard let lower = range(of: start)?.lowerBound,
+              let upper = self[lower...].range(of: end)?.lowerBound else {
+            return nil
+        }
+        return String(self[lower..<upper])
     }
 }

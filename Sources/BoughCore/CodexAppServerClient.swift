@@ -116,16 +116,38 @@ public final class CodexAppServerClient: @unchecked Sendable {
     private let ioQueue: DispatchQueue
 
     private let lock = NSLock()
+    private let writeLock = NSLock()
     private var process: Process?
     private var stdinHandle: FileHandle?
     private var stdoutReadHandle: FileHandle?
     private var stderrReadHandle: FileHandle?
     private var readBuffer: Data = Data()
     private var nextRequestId: Int64 = 1
+    private var connectionGeneration: UInt64 = 0
     private var isStopped: Bool = true
+    private var onMessageHandler: MessageHandler?
+    private var onExitHandler: ExitHandler?
 
-    public var onMessage: MessageHandler?
-    public var onExit: ExitHandler?
+    public var onMessage: MessageHandler? {
+        get {
+            lock.lock(); defer { lock.unlock() }
+            return onMessageHandler
+        }
+        set {
+            lock.lock(); defer { lock.unlock() }
+            onMessageHandler = newValue
+        }
+    }
+    public var onExit: ExitHandler? {
+        get {
+            lock.lock(); defer { lock.unlock() }
+            return onExitHandler
+        }
+        set {
+            lock.lock(); defer { lock.unlock() }
+            onExitHandler = newValue
+        }
+    }
 
     public init(
         executableURL: URL = URL(fileURLWithPath: CodexAppServerClient.defaultExecutablePath),
@@ -181,10 +203,16 @@ public final class CodexAppServerClient: @unchecked Sendable {
         let stderrReader = stderrPipe.fileHandleForReading
         let stdinWriter = stdinPipe.fileHandleForWriting
 
+        connectionGeneration &+= 1
+        let generation = connectionGeneration
+        ioQueue.async { [weak self] in
+            self?.resetReadBufferIfCurrent(generation: generation)
+        }
+
         stdoutReader.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             if data.isEmpty { return }
-            self?.ioQueue.async { self?.ingest(data: data) }
+            self?.ioQueue.async { self?.ingest(data: data, generation: generation) }
         }
         // Drain stderr to avoid filling the pipe buffer. We don't route it anywhere
         // by default; users who want the diagnostic stream can hook onto .onExit and
@@ -195,7 +223,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
 
         proc.terminationHandler = { [weak self] finished in
             let status = finished.terminationStatus
-            self?.ioQueue.async { self?.handleProcessExit(status: status) }
+            self?.ioQueue.async { self?.handleProcessExit(status: status, generation: generation) }
         }
 
         do {
@@ -218,7 +246,6 @@ public final class CodexAppServerClient: @unchecked Sendable {
         self.stdinHandle = stdinWriter
         self.stdoutReadHandle = stdoutReader
         self.stderrReadHandle = stderrReader
-        self.readBuffer.removeAll(keepingCapacity: true)
         self.isStopped = false
         lock.unlock()
     }
@@ -226,10 +253,11 @@ public final class CodexAppServerClient: @unchecked Sendable {
     public func stop() {
         lock.lock()
         isStopped = true
+        connectionGeneration &+= 1
         let handles = detachProcessHandlesLocked()
         lock.unlock()
 
-        Self.closeProcessHandles(handles, terminateProcess: true)
+        closeProcessHandlesWithWriteLock(handles, terminateProcess: true)
     }
 
     // MARK: - Send
@@ -277,13 +305,14 @@ public final class CodexAppServerClient: @unchecked Sendable {
         var payload = data
         payload.append(0x0A)  // newline terminator
 
+        writeLock.lock()
+        defer { writeLock.unlock() }
         lock.lock()
         guard !isStopped, let handle = stdinHandle else {
             lock.unlock()
             throw CodexAppServerError.notConnected
         }
         lock.unlock()
-
         do {
             try handle.write(contentsOf: payload)
         } catch {
@@ -293,27 +322,43 @@ public final class CodexAppServerClient: @unchecked Sendable {
 
     // MARK: - Receive
 
-    private func ingest(data: Data) {
+    private func resetReadBufferIfCurrent(generation: UInt64) {
+        guard isCurrentGeneration(generation) else { return }
+        readBuffer.removeAll(keepingCapacity: true)
+    }
+
+    private func ingest(data: Data, generation: UInt64) {
+        guard isCurrentGeneration(generation) else { return }
         readBuffer.append(data)
         let parsed = CodexAppServerClient.drainMessages(buffer: &readBuffer)
         guard !parsed.isEmpty else { return }
         for message in parsed {
-            let handler = self.onMessage
+            let handler = messageHandlerSnapshot()
             callbackQueue.async { handler?(message) }
         }
     }
 
-    private func handleProcessExit(status: Int32) {
+    private func messageHandlerSnapshot() -> MessageHandler? {
+        lock.lock(); defer { lock.unlock() }
+        return onMessageHandler
+    }
+
+    private func isCurrentGeneration(_ generation: UInt64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return generation == connectionGeneration
+    }
+
+    private func handleProcessExit(status: Int32, generation: UInt64) {
         lock.lock()
-        if isStopped {
+        if isStopped || generation != connectionGeneration {
             lock.unlock()
             return
         }
         isStopped = true
         let handles = detachProcessHandlesLocked()
-        let handler = onExit
+        let handler = onExitHandler
         lock.unlock()
-        Self.closeProcessHandles(handles, terminateProcess: false)
+        closeProcessHandlesWithWriteLock(handles, terminateProcess: false)
         callbackQueue.async { handler?(status) }
     }
 
@@ -348,6 +393,12 @@ public final class CodexAppServerClient: @unchecked Sendable {
         if terminateProcess, let process = handles.process, process.isRunning {
             process.terminate()
         }
+    }
+
+    private func closeProcessHandlesWithWriteLock(_ handles: DetachedProcessHandles, terminateProcess: Bool) {
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        Self.closeProcessHandles(handles, terminateProcess: terminateProcess)
     }
 
     // MARK: - Pure parser (exposed for tests)

@@ -141,7 +141,7 @@ final class ArchitectureBoundaryTests: XCTestCase {
     func testPresentationLayerDoesNotDirectlyPerformExternalMutation() throws {
         let presentationFiles = try swiftFiles(under: repoRoot.appendingPathComponent("Sources/Bough"))
             .filter { file in
-                let source = (try? sourceText(at: file)) ?? ""
+                let source = try sourceText(at: file)
                 return source.contains(": View")
                     || source.contains(": NSViewRepresentable")
                     || source.contains(": ViewModifier")
@@ -277,15 +277,12 @@ final class ArchitectureBoundaryTests: XCTestCase {
     }
 
     private func files(under root: URL) throws -> [URL] {
-        guard FileManager.default.fileExists(atPath: root.path) else {
-            return []
-        }
-        guard let enumerator = FileManager.default.enumerator(
+        let exists = FileManager.default.fileExists(atPath: root.path)
+        _ = try XCTUnwrap(exists ? root : nil, "Missing source scan root: \(root.path)")
+        let enumerator = try XCTUnwrap(FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: [.isDirectoryKey]
-        ) else {
-            return []
-        }
+        ), "Failed to enumerate source scan root: \(root.path)")
         var result: [URL] = []
         for case let url as URL in enumerator {
             let values = try url.resourceValues(forKeys: [.isDirectoryKey])

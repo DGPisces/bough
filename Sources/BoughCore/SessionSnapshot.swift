@@ -135,6 +135,18 @@ public struct SessionSnapshot: Sendable {
         return nil
     }
 
+    public static func runtimeSourceGroup(_ source: String?) -> String? {
+        guard let normalized = normalizedSupportedSource(source) else { return nil }
+        switch normalized {
+        case "cursor-cli":
+            return "cursor"
+        case "qoder-cli":
+            return "qoder"
+        default:
+            return normalized
+        }
+    }
+
     private static func loadCustomSources() -> Set<String> {
         guard let data = UserDefaults.standard.data(forKey: customCLIConfigsKey),
               let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
@@ -448,7 +460,7 @@ public func deriveSessionSummary(from sessions: [String: SessionSnapshot]) -> Se
     for session in sessions.values {
         if session.status != .idle {
             active += 1
-        } else if mostRecentIdleSource == nil || session.lastActivity > mostRecentIdleSource!.time {
+        } else if mostRecentIdleSource.map({ session.lastActivity > $0.time }) ?? true {
             mostRecentIdleSource = (session.source, session.lastActivity)
         }
 
@@ -519,7 +531,6 @@ public func reduceEvent(
 
     // Always update metadata from every event
     extractMetadata(into: &sessions, sessionId: sessionId, event: event)
-    let isRemote = sessions[sessionId]?.isRemote == true
 
     // Route subagent-specific events
     if let agentId = event.agentId {
@@ -591,11 +602,13 @@ public func reduceEvent(
             sessions[sessionId]?.toolDescription = nil
         }
     case "PermissionDenied":
-        if !isWaiting {
-            sessions[sessionId]?.status = .processing
-            sessions[sessionId]?.currentTool = nil
-            sessions[sessionId]?.toolDescription = nil
-        }
+        sessions[sessionId]?.status = .processing
+        sessions[sessionId]?.currentTool = nil
+        sessions[sessionId]?.toolDescription = nil
+    case "PermissionRequest":
+        sessions[sessionId]?.status = .waitingApproval
+        sessions[sessionId]?.currentTool = event.toolName
+        sessions[sessionId]?.toolDescription = event.toolDescription
     case "SubagentStart":
         if !isWaiting {
             sessions[sessionId]?.status = .running
@@ -638,7 +651,7 @@ public func reduceEvent(
         } else if sessions[sessionId]?.lastAssistantMessage == nil,
                   sessions[sessionId]?.recentMessages.last?.isUser == true {
             // No reply content from hook (e.g. CodeBuddy) -- add placeholder
-            sessions[sessionId]?.addRecentMessage(ChatMessage(isUser: false, text: "[回复完成]"))
+            sessions[sessionId]?.addRecentMessage(ChatMessage(isUser: false, text: "[response complete]"))
         }
         // Try to capture user prompt from Stop event if not already set
         if sessions[sessionId]?.lastUserPrompt == nil {
@@ -653,7 +666,8 @@ public func reduceEvent(
         effects.append(.stopMonitor(sessionId: sessionId))
         sessions[sessionId] = SessionSnapshot(startTime: Date())
         effects.append(.setActiveSession(sessionId: sessionId))
-        // Re-apply metadata from this event (common extraction above wrote to the old session)
+        // Re-apply metadata from this event (common extraction above wrote to the old session).
+        extractMetadata(into: &sessions, sessionId: sessionId, event: event)
         if let cwd = event.rawJSON["cwd"] as? String, !cwd.isEmpty { sessions[sessionId]?.cwd = cwd }
         if let model = event.rawJSON["model"] as? String, !model.isEmpty { sessions[sessionId]?.model = model }
         if let ppid = event.rawJSON["_ppid"] as? Int, ppid > 0 {
@@ -692,11 +706,12 @@ public func reduceEvent(
            sessions[sessionId]?.isRemote == true {
             sessions[sessionId]?.providerSessionId = providerSessionId
         }
-        if let sessionTitle = event.rawJSON["session_title"] as? String,
+        if let sessionTitle = firstStringFromEvent(event, keys: ["session_title", "codex_title"], includeNested: false),
            !sessionTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             sessions[sessionId]?.sessionTitle = sessionTitle
         }
-        if !isRemote {
+        let isRemoteAfterSessionStart = sessions[sessionId]?.isRemote == true
+        if !isRemoteAfterSessionStart {
             effects.append(.tryMonitorSession(sessionId: sessionId))
         }
     case "SessionEnd":
@@ -718,6 +733,10 @@ public func reduceEvent(
     case "PreCompact":
         sessions[sessionId]?.status = .processing
         sessions[sessionId]?.toolDescription = "Compacting context\u{2026}"
+    case "PostCompact":
+        sessions[sessionId]?.status = .processing
+        sessions[sessionId]?.currentTool = nil
+        sessions[sessionId]?.toolDescription = nil
     default:
         break
     }
@@ -725,7 +744,7 @@ public func reduceEvent(
     sessions[sessionId]?.lastActivity = Date()
 
     // Ensure process monitor is set up (covers sessions created implicitly)
-    if sessions[sessionId]?.cwd != nil, !isRemote {
+    if sessions[sessionId]?.cwd != nil, sessions[sessionId]?.isRemote != true {
         effects.append(.tryMonitorSession(sessionId: sessionId))
     }
 
@@ -853,7 +872,7 @@ public func extractMetadata(into sessions: inout [String: SessionSnapshot], sess
        !providerSessionId.isEmpty {
         sessions[sessionId]?.providerSessionId = providerSessionId
     }
-    if let sessionTitle = event.rawJSON["session_title"] as? String,
+    if let sessionTitle = firstStringFromEvent(event, keys: ["session_title", "codex_title"], includeNested: false),
        !sessionTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         sessions[sessionId]?.sessionTitle = sessionTitle
     }
@@ -878,7 +897,7 @@ private func firstStringFromEvent(_ event: HookEvent, keys: [String], includeNes
         return value
     }
     if includeNested {
-        for containerKey in ["payload", "data"] {
+        for containerKey in ["input", "payload", "data", "params"] {
             if let nested = event.rawJSON[containerKey] as? [String: Any],
                let value = firstStringFromDict(nested, keys: keys) {
                 return value

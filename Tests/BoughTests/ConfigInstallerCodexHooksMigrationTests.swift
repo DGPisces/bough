@@ -6,6 +6,7 @@ final class ConfigInstallerCodexHooksMigrationTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        TestHelpers.processEnvironmentLock.lock()
         savedCodexHome = ProcessInfo.processInfo.environment["CODEX_HOME"]
     }
 
@@ -15,6 +16,7 @@ final class ConfigInstallerCodexHooksMigrationTests: XCTestCase {
         } else {
             unsetenv("CODEX_HOME")
         }
+        TestHelpers.processEnvironmentLock.unlock()
         super.tearDown()
     }
 
@@ -27,6 +29,14 @@ final class ConfigInstallerCodexHooksMigrationTests: XCTestCase {
         let home = fm.temporaryDirectory
             .appendingPathComponent("bough-codex-home-\(UUID().uuidString)", isDirectory: true)
         try? fm.createDirectory(at: home, withIntermediateDirectories: true)
+        let previous = ProcessInfo.processInfo.environment["CODEX_HOME"]
+        defer {
+            if let previous {
+                setenv("CODEX_HOME", previous, 1)
+            } else {
+                unsetenv("CODEX_HOME")
+            }
+        }
         defer { try? fm.removeItem(at: home) }
         setenv("CODEX_HOME", home.path, 1)
         try body(home, home.appendingPathComponent("config.toml"))

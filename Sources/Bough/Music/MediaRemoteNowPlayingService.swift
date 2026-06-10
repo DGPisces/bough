@@ -290,6 +290,7 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
 
     private static let frameworkBundlePath = "/System/Library/PrivateFrameworks/MediaRemote.framework/"
     private static let frameworkPath = "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote"
+    private static let callbackTimeoutNanoseconds: UInt64 = 750_000_000
 
     private let handle: UnsafeMutableRawPointer
     private let getInfo: GetNowPlayingInfoFunction
@@ -348,14 +349,15 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
     }
 
     func currentPayload(bypassingScriptBackoff: Bool) async throws -> MusicNowPlayingPayload {
-        if let requestPayload = currentRequestPayload(),
+        let playbackState = await currentPlaybackState()
+
+        if let requestPayload = currentRequestPayload(playbackState: playbackState),
            requestPayload.hasDisplayableMediaRemoteMetadata {
             return await payloadByResolvingArtworkIfNeeded(requestPayload)
         }
 
         let dictionary = await currentInfoDictionary()
         let bundleIdentifier = await currentString(using: getApplicationDisplayID)
-        let playbackState = await currentPlaybackState()
 
         let legacyPayload = MusicNowPlayingPayload(
             bundleIdentifier: bundleIdentifier,
@@ -396,7 +398,7 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
         return payload.withArtworkData(artworkData, mimeType: "image/jpeg")
     }
 
-    private func currentRequestPayload() -> MusicNowPlayingPayload? {
+    private func currentRequestPayload(playbackState: Int?) -> MusicNowPlayingPayload? {
         guard let requestClass = NSClassFromString("MRNowPlayingRequest") as AnyObject? else {
             return nil
         }
@@ -415,7 +417,7 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
             album: stringValue(for: keys.album, in: dictionary),
             artworkData: dataValue(for: keys.artworkData, in: dictionary),
             artworkMimeType: stringValue(for: keys.artworkMIMEType, in: dictionary),
-            playbackStateValue: nil,
+            playbackStateValue: playbackState,
             playbackRate: numberValue(for: keys.playbackRate, in: dictionary),
             timestamp: dateValue(for: keys.timestamp, in: dictionary),
             lyricCandidates: lyricCandidates(from: dictionary),
@@ -433,9 +435,9 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
     }
 
     private func currentInfoDictionary() async -> NSDictionary {
-        await withCheckedContinuation { continuation in
+        await withMediaRemoteCallbackTimeout(defaultValue: NSDictionary()) { resume in
             let block: NowPlayingInfoBlock = { info in
-                continuation.resume(returning: (info as NSDictionary?) ?? NSDictionary())
+                resume((info as NSDictionary?) ?? NSDictionary())
             }
 
             getInfo(mediaRemoteQueue, block)
@@ -446,9 +448,9 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
         guard let function else {
             return nil
         }
-        return await withCheckedContinuation { continuation in
+        return await withMediaRemoteCallbackTimeout(defaultValue: nil) { resume in
             let block: NowPlayingStringBlock = { value in
-                continuation.resume(returning: value as String?)
+                resume(value as String?)
             }
             function(mediaRemoteQueue, block)
         }
@@ -458,11 +460,27 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
         guard let getApplicationPlaybackState else {
             return nil
         }
-        return await withCheckedContinuation { continuation in
+        return await withMediaRemoteCallbackTimeout(defaultValue: nil) { resume in
             let block: NowPlayingPlaybackStateBlock = { state in
-                continuation.resume(returning: Int(state))
+                resume(Int(state))
             }
             getApplicationPlaybackState(mediaRemoteQueue, block)
+        }
+    }
+
+    private func withMediaRemoteCallbackTimeout<T>(
+        defaultValue: T,
+        start: (@escaping (T) -> Void) -> Void
+    ) async -> T {
+        await withCheckedContinuation { continuation in
+            let gate = MediaRemoteContinuationGate(continuation)
+            start { value in
+                gate.resume(value)
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: Self.callbackTimeoutNanoseconds)
+                gate.resume(defaultValue)
+            }
         }
     }
 
@@ -553,6 +571,24 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
             return nil
         }
         return unsafeBitCast(pointer, to: T.self)
+    }
+}
+
+private final class MediaRemoteContinuationGate<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, Never>?
+
+    init(_ continuation: CheckedContinuation<T, Never>) {
+        self.continuation = continuation
+    }
+
+    func resume(_ value: T) {
+        let continuationToResume: CheckedContinuation<T, Never>?
+        lock.lock()
+        continuationToResume = continuation
+        continuation = nil
+        lock.unlock()
+        continuationToResume?.resume(returning: value)
     }
 }
 
@@ -879,25 +915,25 @@ private actor QQMusicArtworkResolver {
 
         let requestedAlbum = album?.trimmingCharacters(in: .whitespacesAndNewlines)
         var firstAlbumMid: String?
-        while sqlite3_step(statement) == SQLITE_ROW {
-            guard let albumMidPointer = sqlite3_column_text(statement, 0) else {
-                continue
-            }
-            let candidateAlbumMid = String(cString: albumMidPointer)
-            guard Self.isValidAlbumMid(candidateAlbumMid) else {
-                continue
-            }
+        var stepStatus = sqlite3_step(statement)
+        while stepStatus == SQLITE_ROW {
+            if let albumMidPointer = sqlite3_column_text(statement, 0) {
+                let candidateAlbumMid = String(cString: albumMidPointer)
+                if Self.isValidAlbumMid(candidateAlbumMid) {
+                    if firstAlbumMid == nil {
+                        firstAlbumMid = candidateAlbumMid
+                    }
 
-            if firstAlbumMid == nil {
-                firstAlbumMid = candidateAlbumMid
+                    let storedAlbum = sqlite3_column_text(statement, 1).map { String(cString: $0) }
+                    if Self.albumMatches(requestedAlbum: requestedAlbum, storedAlbum: storedAlbum) {
+                        return candidateAlbumMid
+                    }
+                }
             }
-
-            let storedAlbum = sqlite3_column_text(statement, 1).map { String(cString: $0) }
-            if Self.albumMatches(requestedAlbum: requestedAlbum, storedAlbum: storedAlbum) {
-                return candidateAlbumMid
-            }
+            stepStatus = sqlite3_step(statement)
         }
 
+        guard stepStatus == SQLITE_DONE else { return nil }
         return firstAlbumMid
     }
 

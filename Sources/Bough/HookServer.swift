@@ -5,6 +5,24 @@ import BoughCore
 
 private let log = Logger(subsystem: "com.dgpisces.bough", category: "HookServer")
 
+private final class UmaskRestorer: @unchecked Sendable {
+    private let lock = NSLock()
+    private let previousUmask: mode_t
+    private var didRestore = false
+
+    init(previousUmask: mode_t) {
+        self.previousUmask = previousUmask
+    }
+
+    func restore() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !didRestore else { return }
+        didRestore = true
+        umask(previousUmask)
+    }
+}
+
 @MainActor
 class HookServer {
     enum RouteKind: Equatable {
@@ -16,27 +34,33 @@ class HookServer {
     private let appState: AppState
     nonisolated static var socketPath: String { SocketPath.path }
     private var listener: NWListener?
+    private var ownedSocketPath: String?
 
     init(appState: AppState) {
         self.appState = appState
     }
 
     func start() {
-        // Clean up stale socket
-        unlink(HookServer.socketPath)
+        let path = HookServer.socketPath
+        // Clean up stale default sockets without deleting arbitrary BOUGH_SOCKET_PATH targets.
+        guard Self.prepareSocketPathForListen(path) else {
+            log.error("Refusing to remove existing socket path at \(path)")
+            return
+        }
+        ownedSocketPath = path
 
         // Set umask to 0o077 BEFORE the listener creates the socket file,
         // ensuring it is never world-readable even briefly (closes TOCTOU window).
-        let previousUmask = umask(0o077)
+        let umaskRestorer = UmaskRestorer(previousUmask: umask(0o077))
 
         let params = NWParameters()
         params.defaultProtocolStack.transportProtocol = NWProtocolTCP.Options()
-        params.requiredLocalEndpoint = NWEndpoint.unix(path: HookServer.socketPath)
+        params.requiredLocalEndpoint = NWEndpoint.unix(path: path)
 
         do {
             listener = try NWListener(using: params)
         } catch {
-            umask(previousUmask)
+            umaskRestorer.restore()
             log.error("Failed to create NWListener: \(error.localizedDescription)")
             return
         }
@@ -48,17 +72,19 @@ class HookServer {
             }
         }
 
-        listener?.stateUpdateHandler = { [previousUmask] state in
+        listener?.stateUpdateHandler = { [umaskRestorer] state in
             switch state {
             case .ready:
                 // Restore previous umask now that the socket file exists with safe permissions
-                umask(previousUmask)
+                umaskRestorer.restore()
                 // Belt-and-suspenders: explicitly set 0o700 in case umask didn't take effect
-                chmod(HookServer.socketPath, 0o700)
-                log.info("HookServer listening on \(HookServer.socketPath)")
+                chmod(path, 0o700)
+                log.info("HookServer listening on \(path)")
             case .failed(let error):
-                umask(previousUmask)
+                umaskRestorer.restore()
                 log.error("HookServer failed: \(error.localizedDescription)")
+            case .cancelled:
+                umaskRestorer.restore()
             default:
                 break
             }
@@ -70,16 +96,50 @@ class HookServer {
     func stop(removeSocketAfterDelay: Bool = true) {
         listener?.cancel()
         listener = nil
-        let path = HookServer.socketPath
+        let path = ownedSocketPath ?? HookServer.socketPath
+        let allowCustomPathRemoval = ownedSocketPath == path
+        ownedSocketPath = nil
         guard removeSocketAfterDelay else {
-            unlink(path)
+            _ = Self.removeSocketIfPresent(path, allowCustomPath: allowCustomPathRemoval)
             return
         }
         // Delay socket removal so in-flight hooks can finish sending their payload
         // before the file disappears — prevents intermittent errors on session end (#45).
         DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
-            unlink(path)
+            _ = Self.removeSocketIfPresent(path, allowCustomPath: allowCustomPathRemoval)
         }
+    }
+
+    nonisolated static func testRemoveSocketIfPresent(_ path: String) -> Bool {
+        removeSocketIfPresent(path)
+    }
+
+    nonisolated private static func prepareSocketPathForListen(_ path: String) -> Bool {
+        var info = stat()
+        if lstat(path, &info) != 0 {
+            return errno == ENOENT
+        }
+        guard (info.st_mode & S_IFMT) == S_IFSOCK else {
+            return false
+        }
+        guard SocketPath.canAutoRemoveExistingSocket(at: path) else {
+            return false
+        }
+        return unlink(path) == 0 || errno == ENOENT
+    }
+
+    nonisolated private static func removeSocketIfPresent(_ path: String, allowCustomPath: Bool = false) -> Bool {
+        var info = stat()
+        if lstat(path, &info) != 0 {
+            return errno == ENOENT
+        }
+        guard (info.st_mode & S_IFMT) == S_IFSOCK else {
+            return false
+        }
+        guard allowCustomPath || SocketPath.canAutoRemoveExistingSocket(at: path) else {
+            return false
+        }
+        return unlink(path) == 0 || errno == ENOENT
     }
 
     private func handleConnection(_ connection: NWConnection) {
@@ -198,16 +258,7 @@ class HookServer {
         }.resume()
     }
 
-    private static func hiddenPluginResponse(for raw: [String: Any]) -> Data {
-        // Hidden PermissionRequest must allow so the plugin's tool execution
-        // doesn't block waiting on a UI prompt the user said to suppress.
-        let eventName = (raw["hook_event_name"] as? String
-            ?? raw["hookEventName"] as? String
-            ?? raw["event_name"] as? String
-            ?? "").lowercased()
-        if eventName.contains("permission") {
-            return Data(#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#.utf8)
-        }
+    private static func hiddenPluginResponse(for _: [String: Any]) -> Data {
         return Data("{}".utf8)
     }
 
@@ -231,7 +282,8 @@ class HookServer {
 
     static func shouldDeferCodexPermissionToAutoReview(
         _ event: HookEvent,
-        fm: FileManager = .default
+        fm: FileManager = .default,
+        allowTranscriptScan: Bool = false
     ) -> Bool {
         guard EventNormalizer.normalize(event.eventName) == "PermissionRequest",
               event.toolName != "AskUserQuestion",
@@ -239,13 +291,35 @@ class HookServer {
               SessionSnapshot.normalizedSupportedSource(rawSource) == "codex"
         else { return false }
 
+        if codexRuntimeApprovalPolicyIsNever(event.rawJSON) {
+            return false
+        }
         if codexAutoReviewEnabled(fromRuntimePayload: event.rawJSON) {
             return true
         }
-        if codexAutoReviewEnabledFromTranscript(event: event, fm: fm) {
+        if allowTranscriptScan,
+           codexAutoReviewEnabledFromTranscript(event: event, fm: fm) {
             return true
         }
         return ConfigInstaller.codexAutoReviewEnabled(fm: fm)
+    }
+
+    private static func codexRuntimeApprovalPolicyIsNever(_ raw: [String: Any]) -> Bool {
+        let containers = [
+            raw,
+            raw["config"] as? [String: Any],
+            raw["runtime"] as? [String: Any],
+            raw["approval"] as? [String: Any],
+            raw["approval_context"] as? [String: Any],
+            raw["approvalContext"] as? [String: Any],
+        ].compactMap { $0 }
+
+        return containers.contains { container in
+            firstString(
+                in: container,
+                keys: ["approval_policy", "approvalPolicy", "_approval_policy"]
+            ) == "never"
+        }
     }
 
     private static func codexAutoReviewEnabled(fromRuntimePayload raw: [String: Any]) -> Bool {
@@ -380,32 +454,7 @@ class HookServer {
     }
 
     private static func readFileProbe(path: String, maxBytes: UInt64) -> String? {
-        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
-        defer { try? handle.close() }
-
-        do {
-            let size = try handle.seekToEnd()
-            if size <= maxBytes {
-                try handle.seek(toOffset: 0)
-                return String(data: handle.readDataToEndOfFile(), encoding: .utf8)
-            }
-
-            let half = maxBytes / 2
-            try handle.seek(toOffset: 0)
-            let head = handle.readData(ofLength: Int(half))
-
-            try handle.seek(toOffset: size - half)
-            let tail = handle.readDataToEndOfFile()
-
-            guard let headText = String(data: head, encoding: .utf8),
-                  var tailText = String(data: tail, encoding: .utf8) else { return nil }
-            if let firstNewline = tailText.firstIndex(of: "\n") {
-                tailText = String(tailText[tailText.index(after: firstNewline)...])
-            }
-            return headText + "\n" + tailText
-        } catch {
-            return nil
-        }
+        UTF8FileChunkReader.headAndTailText(path: path, maxBytes: maxBytes)
     }
 
     private static func firstString(in raw: [String: Any], keys: [String]) -> String? {
@@ -626,10 +675,12 @@ class HookServer {
             }
         }
 
-        // Safety net: if the connection context is still around after 5 minutes
+        // Safety net: keep this aligned with installed blocking hook timeouts
+        // (24h) so a valid long-running approval/question is not cancelled
+        // before the client gives up.
         // (e.g. stuck continuation, NWConnection never transitions), clean it up.
         Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 300_000_000_000)  // 5 minutes
+            try? await Task.sleep(nanoseconds: 86_400_000_000_000)
             guard let self = self else { return }
             if self.connectionContexts.removeValue(forKey: connId) != nil {
                 log.warning("Connection context for session \(sessionId) timed out — cleaning up")

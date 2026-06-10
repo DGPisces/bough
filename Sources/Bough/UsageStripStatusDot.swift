@@ -62,7 +62,12 @@ enum AlarmReducer {
             // Left depleted → clear any lingering alarm window early.
             next.alarmStartedAt = nil
         }
-        // depleted → depleted preserves the existing alarmStartedAt.
+        // depleted → depleted preserves the existing alarmStartedAt until
+        // the alarm window expires, then clears it so the view can stop ticking.
+        if let started = next.alarmStartedAt,
+           now.timeIntervalSince(started) >= alarmDuration {
+            next.alarmStartedAt = nil
+        }
 
         let active: Bool = {
             guard let started = next.alarmStartedAt else { return false }

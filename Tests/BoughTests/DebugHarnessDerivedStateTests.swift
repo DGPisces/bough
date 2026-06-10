@@ -27,4 +27,17 @@ final class DebugHarnessDerivedStateTests: XCTestCase {
         XCTAssertEqual(state.activeSessionCount, 1)
         XCTAssertEqual(state.totalSessionCount, 1)
     }
+
+    func testLeavingIdlePreviewInvalidatesIdleTimer() {
+        let state = AppState()
+
+        DebugHarness.apply(.idle, to: state)
+        let timer = DebugHarness.activeIdlePreviewTimerForTesting
+        XCTAssertEqual(timer?.isValid, true)
+
+        DebugHarness.apply(.working, to: state)
+
+        XCTAssertEqual(timer?.isValid, false)
+        XCTAssertNil(DebugHarness.activeIdlePreviewTimerForTesting)
+    }
 }

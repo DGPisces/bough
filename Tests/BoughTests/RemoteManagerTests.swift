@@ -20,4 +20,17 @@ final class RemoteManagerTests: XCTestCase {
         XCTAssertEqual(RemoteManager.reconnectDelay(attempt: 0), 5)
         XCTAssertEqual(RemoteManager.reconnectDelay(attempt: -1), 5)
     }
+
+    func testInstallFailurePathCleansTunnelAndSchedulesReconnect() throws {
+        let source = try String(
+            contentsOf: TestHelpers.repoRoot(from: #filePath)
+                .appendingPathComponent("Sources/Bough/RemoteManager.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("handleInstallFailure(result.message, for: host)"))
+        XCTAssertTrue(source.contains("forwarders[host.id] = nil"))
+        XCTAssertTrue(source.contains("forwarder?.disconnect()"))
+        XCTAssertTrue(source.contains("scheduleReconnect(for: host)"))
+    }
 }

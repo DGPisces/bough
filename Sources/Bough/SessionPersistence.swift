@@ -67,10 +67,6 @@ enum SessionPersistence {
     }
 
     static func clear() {
-        let fileURL = FileManager.default
-            .homeDirectoryForCurrentUser
-            .appendingPathComponent(".bough", isDirectory: true)
-            .appendingPathComponent(Self.relativePath)
-        try? FileManager.default.removeItem(at: fileURL)
+        try? AtomicJSONStore.delete(Self.relativePath)
     }
 }

@@ -9,7 +9,100 @@ private enum HookId {
     static let legacyNames: [String] = []  // Bough has no legacy names yet; intentionally empty.
     static func isOurs(_ s: String) -> Bool {
         let lower = s.lowercased()
-        return lower.contains(current) || legacyNames.contains(where: lower.contains)
+        if legacyNames.contains(where: lower.contains) { return true }
+        if lower.contains("bough-hook-v1-start") || lower.contains("bough-hook-v1-end") {
+            return true
+        }
+        if lower.contains("bough_hook_v1") { return true }
+        if lower.contains("~/.bough/bough-hook.sh") || lower.contains("/.bough/bough-hook.sh") {
+            return true
+        }
+        if lower.contains("~/.claude/hooks/bough-hook.sh")
+            || lower.contains("/.claude/hooks/bough-hook.sh") {
+            return true
+        }
+        if containsBoughBridgeCommand(lower) {
+            return true
+        }
+        if lower.range(of: #"(^|[^a-z0-9_-])bough-bridge($|[^a-z0-9_-])"#, options: .regularExpression) != nil {
+            return true
+        }
+        if lower.range(of: #"(^|/)bough-opencode\.js($|[?#])"#, options: .regularExpression) != nil {
+            return true
+        }
+        if lower.range(of: #"^/tmp/bough-[0-9]+\.sock$"#, options: .regularExpression) != nil {
+            return true
+        }
+        return false
+    }
+
+    static func containsBoughBridgeCommand(_ command: String) -> Bool {
+        let lower = command.lowercased()
+        return lower == "bough-bridge"
+            || lower.range(of: #"(^|[\/~])\.bough/(bin/)?bough-bridge($|[\s'";&|)])"#, options: .regularExpression) != nil
+            || lower.range(of: #"(^|[\/~])\.claude/hooks/bough-bridge($|[\s'";&|)])"#, options: .regularExpression) != nil
+            || lower.range(of: #"(^|[^a-z0-9_-])bough-bridge($|[\s'";&|)])"#, options: .regularExpression) != nil
+    }
+
+    static func containsSourceArgument(_ command: String, source: String) -> Bool {
+        let expected = source.lowercased()
+        let tokens = shellishTokens(command.lowercased())
+        for (index, token) in tokens.enumerated() {
+            if token == "--source" {
+                return index + 1 < tokens.count && tokens[index + 1] == expected
+            }
+            if token.hasPrefix("--source=") {
+                return String(token.dropFirst("--source=".count)) == expected
+            }
+        }
+        return false
+    }
+
+    private static func shellishTokens(_ command: String) -> [String] {
+        var tokens: [String] = []
+        var current = ""
+        var quote: Character?
+        var escaped = false
+
+        func flush() {
+            guard !current.isEmpty else { return }
+            tokens.append(current)
+            current.removeAll(keepingCapacity: true)
+        }
+
+        for char in command {
+            if escaped {
+                current.append(char)
+                escaped = false
+                continue
+            }
+            if char == "\\" {
+                escaped = true
+                continue
+            }
+            if let activeQuote = quote {
+                if char == activeQuote {
+                    quote = nil
+                } else {
+                    current.append(char)
+                }
+                continue
+            }
+            if char == "'" || char == "\"" {
+                quote = char
+                continue
+            }
+            if char.isWhitespace || char == ";" || char == "&" || char == "|" || char == "(" || char == ")" {
+                flush()
+            } else {
+                current.append(char)
+            }
+        }
+        if escaped {
+            current.append("\\")
+        }
+        flush()
+        return tokens
     }
 }
 
@@ -19,6 +112,14 @@ extension ConfigInstaller {
     /// internal: required by HookOwnershipTests via @testable
     static func testHookIdIsOurs(_ s: String) -> Bool {
         HookId.isOurs(s)
+    }
+
+    static func containsBoughBridgeCommand(_ command: String) -> Bool {
+        HookId.containsBoughBridgeCommand(command)
+    }
+
+    static func containsSourceArgument(_ command: String, source: String) -> Bool {
+        HookId.containsSourceArgument(command, source: source)
     }
 
     /// internal: required by HookOwnershipTests via @testable
@@ -40,7 +141,11 @@ extension ConfigInstaller {
             _ = installClaudeHooks(cli: cli, fm: FileManager.default)
         case .traecli:
             let original = (try? String(contentsOfFile: cli.fullPath, encoding: .utf8)) ?? ""
-            let merged = mergeTraecliHooks(into: original, source: cli.source)
+            guard let merged = mergeTraecliHooksIfValid(into: original, source: cli.source) else {
+                throw NSError(domain: "Bough.ConfigInstaller", code: 1, userInfo: [
+                    NSLocalizedDescriptionKey: "TraeCli YAML is invalid; refusing to rewrite"
+                ])
+            }
             try merged.write(toFile: cli.fullPath, atomically: true, encoding: .utf8)
         case .kimi:
             _ = installKimiHooks(cli: cli, fm: FileManager.default)
@@ -117,6 +222,11 @@ extension ConfigInstaller {
         isCodexGUIAppBinary(path)
     }
 
+    /// internal: required by ConfigInstallerTests via @testable.
+    static func testInstallCodexHooksIfEnabled() -> Bool {
+        installCodexHooksIfEnabled(fm: FileManager.default, bridgeInstalled: true)
+    }
+
     /// internal: required by ConfigInstallerCodexConfigTomlHygieneTests via @testable.
     static func testCleanupBoughHooksFromCodexConfigToml() -> CodexCleanupOutcome {
         cleanupBoughHooksFromCodexConfigToml(fm: FileManager.default)
@@ -134,6 +244,7 @@ struct ConfigInstaller {
     private static let claudeSettingsPath = NSHomeDirectory() + "/.claude/settings.json"
     private static let statusLineBridgeResourceName = "bough-statusline-bridge"
     private static let statusLineBridgeResourceExtension = "sh"
+    private static let claudeCodeStatusLineStableBridgePath = boughDir + "/bough-statusline-bridge.sh"
     /// Chain-safe wrapper destination (D-03 — Bough's namespace).
     private static let claudeCodeStatusLineWrapperPath = boughDir + "/bough-statusline-wrapper.sh"
     /// Wrapper template resource (Sources/Bough/Resources/bough-statusline-wrapper.sh.template).
@@ -235,47 +346,105 @@ struct ConfigInstaller {
     // opencode.json. See issue #132.
     private static let opencodeConfigPathJsonc = NSHomeDirectory() + "/.config/opencode/opencode.jsonc"
 
+    static func opencodeEffectiveConfigPath(fm: FileManager = .default) -> String {
+        opencodeEffectiveConfigPath(
+            configDir: (opencodeConfigPath as NSString).deletingLastPathComponent,
+            fm: fm
+        )
+    }
+
+    static func opencodeEffectiveConfigPath(configDir: String, fm: FileManager = .default) -> String {
+        let jsonc = "\(configDir)/opencode.jsonc"
+        if fm.fileExists(atPath: jsonc) { return jsonc }
+        let json = "\(configDir)/opencode.json"
+        if fm.fileExists(atPath: json) { return json }
+        let legacy = "\(configDir)/config.json"
+        if fm.fileExists(atPath: legacy) { return legacy }
+        return json
+    }
+
+    static func opencodeEffectiveDisplayConfigPath(fm: FileManager = .default) -> String {
+        let path = opencodeEffectiveConfigPath(fm: fm)
+        return displayPathForHomePath(path)
+    }
+
+    static func opencodePluginInstallPath() -> String {
+        opencodePluginPath
+    }
+
+    static func opencodePluginDisplayPath() -> String {
+        displayPathForHomePath(opencodePluginPath)
+    }
+
+    private static func displayPathForHomePath(_ path: String) -> String {
+        let home = NSHomeDirectory()
+        if path == home { return "~" }
+        if path.hasPrefix(home + "/") {
+            return "~" + path.dropFirst(home.count)
+        }
+        return path
+    }
+
     // MARK: - Install / Uninstall
 
     static func install() -> Bool {
         let fm = FileManager.default
 
         // Ensure ~/.bough directory
-        try? fm.createDirectory(atPath: boughDir, withIntermediateDirectories: true)
+        try? BoughPrivateStorage.ensurePrivateDirectory(
+            at: URL(fileURLWithPath: boughDir),
+            fileManager: fm
+        )
 
         // Clean up legacy paths at ~/.claude/hooks/ (#32)
         try? fm.removeItem(atPath: legacyBridgePath)
         try? fm.removeItem(atPath: legacyHookScriptPath)
 
         // Install hook script + bridge binary (shared by all CLIs)
-        installHookScript(fm: fm)
-        installBridgeBinary(fm: fm)
+        let hookScriptInstalled = installHookScript(fm: fm)
+        let bridgeInstalled = installBridgeBinary(fm: fm)
 
         // Install hooks for each enabled CLI
         var ok = true
         for cli in allCLIs {
             guard isEnabled(source: cli.source) else { continue }
+            if cli.source == "codex" { continue }
             if cli.source == "claude" {
+                guard hookScriptInstalled else { ok = false; continue }
                 if !installClaudeHooks(cli: cli, fm: fm) { ok = false }
             } else if cli.source == "traecli" {
+                guard bridgeInstalled else { ok = false; continue }
                 if !installTraecliHooks(fm: fm) { ok = false }
             } else {
+                guard bridgeInstalled else { ok = false; continue }
                 if !installExternalHooks(cli: cli, fm: fm) { ok = false }
             }
         }
 
         // Codex requires the current hooks feature flag in config.toml.
-        if isEnabled(source: "codex"),
-           fm.fileExists(atPath: codexHome()) {
-            enableCodexHooksConfig(fm: fm)
-        }
+        if !installCodexHooksIfEnabled(fm: fm, bridgeInstalled: bridgeInstalled) { ok = false }
 
         // Install OpenCode plugin
         if isEnabled(source: "opencode") {
+            guard bridgeInstalled else { return false }
             if !installOpencodePlugin(fm: fm) { ok = false }
         }
 
         return ok
+    }
+
+    private static func installCodexHooksIfEnabled(fm: FileManager, bridgeInstalled: Bool) -> Bool {
+        guard isEnabled(source: "codex") else { return true }
+        return installCodexHooks(fm: fm, bridgeInstalled: bridgeInstalled)
+    }
+
+    private static func installCodexHooks(fm: FileManager, bridgeInstalled: Bool) -> Bool {
+        guard bridgeInstalled else { return false }
+        guard enableCodexHooksConfig(fm: fm),
+              let codexCLI = allCLIs.first(where: { $0.source == "codex" }) else {
+            return false
+        }
+        return installExternalHooks(cli: codexCLI, fm: fm) && isHooksInstalled(for: codexCLI, fm: fm)
     }
 
     static func uninstall() {
@@ -302,9 +471,9 @@ struct ConfigInstaller {
     /// is not sensitive to the ordering of builtInCLIs (WR-01).
     static func isInstalled() -> Bool {
         let fm = FileManager.default
-        guard fm.fileExists(atPath: hookScriptPath) else { return false }
         guard let claudeCLI = allCLIs.first(where: { $0.source == "claude" }) else { return false }
-        return isHooksInstalled(for: claudeCLI, fm: fm)
+        return runtimeExecutableInstalled(for: claudeCLI, fm: fm)
+            && isHooksInstalled(for: claudeCLI, fm: fm)
     }
 
     /// DIAG-01: Launch-time health check. Returns true iff both (a) the bough-bridge
@@ -324,10 +493,18 @@ struct ConfigInstaller {
 
     /// Check if a specific CLI's hooks are installed
     static func isInstalled(source: String) -> Bool {
-        if source == "opencode" { return isOpencodePluginInstalled(fm: FileManager.default) }
-        if source == "traecli" { return isTraecliHooksInstalled(fm: FileManager.default) }
+        let fm = FileManager.default
+        if source == "opencode" {
+            return isExecutableFile(at: bridgePath, fm: fm)
+                && isOpencodePluginInstalled(fm: fm)
+        }
+        if source == "traecli" {
+            return isExecutableFile(at: bridgePath, fm: fm)
+                && isTraecliHooksInstalled(fm: fm)
+        }
         guard let cli = allCLIs.first(where: { $0.source == source }) else { return false }
-        return isHooksInstalled(for: cli, fm: FileManager.default)
+        return runtimeExecutableInstalled(for: cli, fm: fm)
+            && isHooksInstalled(for: cli, fm: fm)
     }
 
     /// Check if CLI directory exists (tool is installed on this machine)
@@ -351,25 +528,38 @@ struct ConfigInstaller {
     /// Toggle a single CLI on/off: installs or uninstalls its hooks.
     @discardableResult
     static func setEnabled(source: String, enabled: Bool) -> Bool {
-        UserDefaults.standard.set(enabled, forKey: "cli_enabled_\(source)")
+        let key = "cli_enabled_\(source)"
         let fm = FileManager.default
         if enabled {
-            installHookScript(fm: fm)
-            installBridgeBinary(fm: fm)
+            let hookScriptInstalled = installHookScript(fm: fm)
+            let bridgeInstalled = installBridgeBinary(fm: fm)
+            let ok: Bool
             if source == "opencode" {
-                return installOpencodePlugin(fm: fm)
-            }
-            guard let cli = allCLIs.first(where: { $0.source == source }) else { return false }
-            if cli.source == "claude" {
-                return installClaudeHooks(cli: cli, fm: fm)
-            } else if cli.source == "traecli" {
-                return installTraecliHooks(fm: fm)
+                ok = bridgeInstalled && installOpencodePlugin(fm: fm)
+            } else if let cli = allCLIs.first(where: { $0.source == source }) {
+                if cli.source == "claude" {
+                    ok = hookScriptInstalled
+                        && installClaudeHooks(cli: cli, fm: fm)
+                        && isHooksInstalled(for: cli, fm: fm)
+                } else if cli.source == "traecli" {
+                    ok = bridgeInstalled
+                        && installTraecliHooks(fm: fm)
+                        && isTraecliHooksInstalled(fm: fm)
+                } else if cli.source == "codex" {
+                    UserDefaults.standard.set(false, forKey: key)
+                    ok = installCodexHooks(fm: fm, bridgeInstalled: bridgeInstalled)
+                } else {
+                    ok = bridgeInstalled
+                        && installExternalHooks(cli: cli, fm: fm)
+                        && isHooksInstalled(for: cli, fm: fm)
+                }
             } else {
-                installExternalHooks(cli: cli, fm: fm)
-                if cli.source == "codex" { enableCodexHooksConfig(fm: fm) }
-                return isHooksInstalled(for: cli, fm: fm)
+                ok = false
             }
+            UserDefaults.standard.set(ok, forKey: key)
+            return ok
         } else {
+            UserDefaults.standard.set(false, forKey: key)
             if source == "opencode" {
                 uninstallOpencodePlugin(fm: fm)
             } else if let cli = allCLIs.first(where: { $0.source == source }) {
@@ -391,8 +581,16 @@ struct ConfigInstaller {
         currentClaudeCodeStatusLineCommand(fm: FileManager.default, settingsPath: claudeSettingsPath)
     }
 
+    static func currentClaudeCodeStatusLineCommand(settingsPath: String, fm: FileManager = .default) -> String? {
+        currentClaudeCodeStatusLineCommand(fm: fm, settingsPath: settingsPath)
+    }
+
     static func proposedClaudeCodeStatusLineCommand() -> String? {
         bundledClaudeCodeStatusLineBridgePath()
+    }
+
+    static func claudeCodeStatusLineStableBridgeInstallPath() -> String {
+        claudeCodeStatusLineStableBridgePath
     }
 
     /// Phase 21 / D-07: public accessor for the chain wrapper's sentinel-encoded prev_cmd.
@@ -409,11 +607,27 @@ struct ConfigInstaller {
         claudeCodeStatusLineWrapperPath
     }
 
+    static func isBoughClaudeCodeStatusLineCommand(_ command: String?) -> Bool {
+        guard let command else { return false }
+        if command == claudeCodeStatusLineWrapperPath { return true }
+        if command == claudeCodeStatusLineStableBridgePath { return true }
+        if let proposed = proposedClaudeCodeStatusLineCommand(), command == proposed { return true }
+        return isBoughStatusLineBridgePath(command)
+    }
+
+    static func boughClaudeCodeStatusLineIsInstalled(settingsPath: String, fm: FileManager = .default) -> Bool {
+        isBoughClaudeCodeStatusLineCommand(currentClaudeCodeStatusLineCommand(settingsPath: settingsPath, fm: fm))
+    }
+
     @discardableResult
     static func installClaudeCodeStatusLine(replaceExisting: Bool = false) -> ClaudeCodeStatusLineInstallResult {
-        guard let proposed = bundledClaudeCodeStatusLineBridgePath() else {
+        guard let bundledBridgePath = bundledClaudeCodeStatusLineBridgePath() else {
             return .failed("Bundled Claude Code statusLine bridge not found")
         }
+        guard installStableClaudeCodeStatusLineBridge(from: bundledBridgePath, to: claudeCodeStatusLineStableBridgePath, fm: .default) else {
+            return .failed("Could not install Bough statusLine bridge")
+        }
+        let proposed = claudeCodeStatusLineStableBridgePath
         // Phase 21 / D-02: the default install path is chain-aware so Bough
         // coexists with starship / gsd / ccusage / etc. without surfacing a
         // conflict sheet. `replaceExisting: true` preserves the original
@@ -437,11 +651,14 @@ struct ConfigInstaller {
 
     @discardableResult
     static func verifyClaudeCodeStatusLinePathDrift() -> Bool {
-        guard let proposed = bundledClaudeCodeStatusLineBridgePath() else { return false }
+        guard let bundledBridgePath = bundledClaudeCodeStatusLineBridgePath() else { return false }
+        guard installStableClaudeCodeStatusLineBridge(from: bundledBridgePath, to: claudeCodeStatusLineStableBridgePath, fm: .default) else {
+            return false
+        }
         return verifyClaudeCodeStatusLinePathDrift(
             fm: FileManager.default,
             settingsPath: claudeSettingsPath,
-            proposedBridgePath: proposed
+            proposedBridgePath: claudeCodeStatusLineStableBridgePath
         )
     }
 
@@ -481,7 +698,7 @@ struct ConfigInstaller {
         )
     }
 
-    /// Internal seam (also reached by the DEBUG `testEvaluateChainAutoInstallGate_ProductionEntry`
+    /// Internal seam (also reached by the `testEvaluateChainAutoInstallGate_ProductionEntry`
     /// path) so tests can simulate the bundle-resolve failure deterministically without
     /// touching Bundle.appModule. Injecting the resolver keeps the production behaviour
     /// identical when called with the default closure.
@@ -509,7 +726,7 @@ struct ConfigInstaller {
         )
     }
 
-    /// Internal seam — pure evaluator that the AppDelegate gate and DEBUG test seam both call.
+    /// Internal seam — pure evaluator that the AppDelegate gate and test seam both call.
     /// Order of checks matters (and is asserted by the test cases):
     ///   1. hasAttemptedFlag  → `.skipFlagSet`         (one-shot guarantee, T-21-12)
     ///   2. !settingsExists   → `.skipNoSettings`      (only fire for real Claude Code users)
@@ -526,12 +743,15 @@ struct ConfigInstaller {
         if hasAttemptedFlag { return .skipFlagSet }
         guard fm.fileExists(atPath: settingsPath) else { return .skipNoSettings }
         let current = currentClaudeCodeStatusLineCommand(fm: fm, settingsPath: settingsPath)
-        if current == proposedBridgePath { return .skipBoughBridge }
+        if current == proposedBridgePath
+            || current == claudeCodeStatusLineStableBridgePath
+            || current.map(isBoughStatusLineBridgePath) == true {
+            return .skipBoughBridge
+        }
         if let current, current == wrapperPath { return .skipBoughWrapper }
         return .proceed
     }
 
-    #if DEBUG
     static func testCurrentClaudeCodeStatusLineCommand(settingsPath: String) -> String? {
         currentClaudeCodeStatusLineCommand(fm: FileManager.default, settingsPath: settingsPath)
     }
@@ -547,6 +767,28 @@ struct ConfigInstaller {
             fm: FileManager.default,
             settingsPath: settingsPath,
             proposedBridgePath: proposedBridgePath
+        )
+    }
+
+    @discardableResult
+    static func testInstallClaudeCodeStatusLineUsingStableBridge(
+        settingsPath: String,
+        bundledBridgePath: String,
+        stableBridgePath: String,
+        replaceExisting: Bool = false
+    ) -> ClaudeCodeStatusLineInstallResult {
+        guard installStableClaudeCodeStatusLineBridge(
+            from: bundledBridgePath,
+            to: stableBridgePath,
+            fm: FileManager.default
+        ) else {
+            return .failed("Could not install Bough statusLine bridge")
+        }
+        return installClaudeCodeStatusLine(
+            replaceExisting: replaceExisting,
+            fm: FileManager.default,
+            settingsPath: settingsPath,
+            proposedBridgePath: stableBridgePath
         )
     }
 
@@ -635,7 +877,7 @@ struct ConfigInstaller {
     }
 
     /// Calls installClaudeHooks against a settings file at the given path.
-    /// Used by tests to exercise the D-03 mutual-exclusion invariant without touching ~/.claude.
+    /// Used by tests to exercise Claude Code hook install without touching ~/.claude.
     @discardableResult
     static func testInstallClaudeCodeHooks(settingsPath: String) -> Bool {
         guard var cli = allCLIs.first(where: { $0.source == "claude" }) else { return false }
@@ -646,20 +888,12 @@ struct ConfigInstaller {
         return installClaudeHooks(cli: cli, fm: FileManager.default)
     }
 
-    #endif
-
-    static func claudeCodeStatusLineMergeSnippet(existingCommand: String, proposedCommand: String) -> String {
-        let escapedExisting = shellSingleQuote(existingCommand)
-        let target = shellSingleQuote(NSHomeDirectory() + "/.bough/claude-usage.json")
-        return "bash -c 'tee >(\(escapedExisting)) | jq -c '\\''{version, rate_limits, output_style, model}'\\'' > \(target).tmp && mv \(target).tmp \(target) && echo \" \"'"
-    }
-
     /// Check all installed CLIs and repair missing hooks. Returns names of repaired CLIs.
     static func verifyAndRepair() -> [String] {
         let fm = FileManager.default
         // Ensure bridge binary and hook script are current
-        installBridgeBinary(fm: fm)
-        installHookScript(fm: fm)
+        let bridgeInstalled = installBridgeBinary(fm: fm)
+        let hookScriptInstalled = installHookScript(fm: fm)
 
         var repaired: [String] = []
         for cli in allCLIs {
@@ -669,32 +903,51 @@ struct ConfigInstaller {
                 : fm.fileExists(atPath: cli.dirPath)
             guard dirExists else { continue }
             if cli.source == "traecli" {
+                guard bridgeInstalled else { continue }
                 if isTraecliHooksInstalled(fm: fm) { continue }
                 if installTraecliHooks(fm: fm) {
                     repaired.append(cli.name)
                 }
                 continue
             }
+            if cli.source == "codex" {
+                guard bridgeInstalled else { continue }
+                let hooksPresent = isHooksInstalled(for: cli, fm: fm)
+                let configPath = codexHome() + "/config.toml"
+                let configBefore = fm.contents(atPath: configPath).flatMap { String(data: $0, encoding: .utf8) }
+                let configInstalled = enableCodexHooksConfig(fm: fm)
+                let configAfter = fm.contents(atPath: configPath).flatMap { String(data: $0, encoding: .utf8) }
+                let configChanged = configBefore != configAfter
+                if hooksPresent {
+                    if configInstalled && configChanged {
+                        repaired.append(cli.name)
+                    }
+                    continue
+                }
+                if installExternalHooks(cli: cli, fm: fm),
+                   configInstalled,
+                   isHooksInstalled(for: cli, fm: fm) {
+                    repaired.append(cli.name)
+                }
+                continue
+            }
             if isHooksInstalled(for: cli, fm: fm) { continue }
             if cli.source == "claude" {
+                guard hookScriptInstalled else { continue }
                 if installClaudeHooks(cli: cli, fm: fm) {
                     repaired.append(cli.name)
                 }
             } else {
-                installExternalHooks(cli: cli, fm: fm)
-                if cli.source == "codex" { enableCodexHooksConfig(fm: fm) }
+                guard bridgeInstalled else { continue }
+                _ = installExternalHooks(cli: cli, fm: fm)
                 if isHooksInstalled(for: cli, fm: fm) {
                     repaired.append(cli.name)
                 }
             }
         }
-        // Codex config.toml: ensure the current hooks feature flag exists.
-        if isEnabled(source: "codex"),
-           fm.fileExists(atPath: codexHome()) {
-            enableCodexHooksConfig(fm: fm)
-        }
         // OpenCode plugin
         if isEnabled(source: "opencode"),
+           bridgeInstalled,
            fm.fileExists(atPath: (opencodeConfigPath as NSString).deletingLastPathComponent),
            !isOpencodePluginInstalled(fm: fm) {
             if installOpencodePlugin(fm: fm) { repaired.append("OpenCode") }
@@ -756,15 +1009,23 @@ struct ConfigInstaller {
         return result
     }
 
-    /// Parse a JSON file, stripping JSONC comments first
-    private static func parseJSONFile(at path: String, fm: FileManager) -> [String: Any]? {
+    static func parseJSONCFile(at path: String, fm: FileManager = .default) -> [String: Any]? {
         guard fm.fileExists(atPath: path),
               let data = fm.contents(atPath: path),
               let str = String(data: data, encoding: .utf8) else { return nil }
+        return parseJSONCString(str)
+    }
+
+    private static func parseJSONCString(_ str: String) -> [String: Any]? {
         let stripped = stripJSONComments(str)
         guard let strippedData = stripped.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: strippedData) as? [String: Any] else { return nil }
         return json
+    }
+
+    /// Parse a JSON file, stripping JSONC comments first
+    private static func parseJSONFile(at path: String, fm: FileManager) -> [String: Any]? {
+        parseJSONCFile(at: path, fm: fm)
     }
 
     // MARK: - CLI Version Detection
@@ -784,6 +1045,7 @@ struct ConfigInstaller {
         // Find claude binary — GUI apps don't inherit user's shell PATH
         let candidates = [
             NSHomeDirectory() + "/.local/bin/claude",
+            "/opt/homebrew/bin/claude",
             "/usr/local/bin/claude",
         ]
         guard let claudePath = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
@@ -981,16 +1243,10 @@ struct ConfigInstaller {
 
     // MARK: - Claude Code (special: uses hook script)
 
-    private static func installClaudeHooks(cli: CLIConfig, fm: FileManager) -> Bool {
-        // D-03: atomically uninstall statusLine before installing hooks so both paths
-        // never co-exist. Use cli.fullPath so tests can inject an alternate settings path
-        // via CLIConfig.rootOverride. In production, cli.fullPath == claudeSettingsPath.
-        // Idempotent: returns false harmlessly if statusLine was never installed.
-        _ = uninstallClaudeCodeStatusLine(
-            fm: fm,
-            settingsPath: cli.fullPath,
-            proposedBridgePath: bundledClaudeCodeStatusLineBridgePath()
-        )
+    private static func installClaudeHooks(
+        cli: CLIConfig,
+        fm: FileManager
+    ) -> Bool {
         let dir = cli.dirPath
         if !fm.fileExists(atPath: dir) {
             try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -1016,7 +1272,7 @@ struct ConfigInstaller {
         }
         if alreadyInstalled && !hasStaleAsyncKey(hooks) { return true }
 
-        // Remove all managed hooks first, including legacy Vibe Island entries.
+        // Remove all managed hooks first, including legacy managed entries.
         hooks = removeManagedHookEntries(from: hooks)
 
         // Re-install only compatible events
@@ -1029,13 +1285,14 @@ struct ConfigInstaller {
             hooks[event] = eventHooks
         }
 
-        return writeJSONWithKey(
+        guard let merged = mergedJSONWithKey(
             cli: cli,
             originalText: originalText,
             key: cli.configKey,
-            value: hooks,
-            fm: fm
-        )
+            value: hooks
+        ) else { return false }
+
+        return fm.createFile(atPath: cli.fullPath, contents: Data(merged.utf8))
     }
 
     /// Minimal-diff write of a single top-level key, preserving user comments / key order / escaping.
@@ -1047,14 +1304,23 @@ struct ConfigInstaller {
         value: Any,
         fm: FileManager
     ) -> Bool {
+        guard let merged = mergedJSONWithKey(cli: cli, originalText: originalText, key: key, value: value) else {
+            return false
+        }
+        return fm.createFile(atPath: cli.fullPath, contents: Data(merged.utf8))
+    }
+
+    private static func mergedJSONWithKey(
+        cli: CLIConfig,
+        originalText: String?,
+        key: String,
+        value: Any
+    ) -> String? {
         let source: String = {
             if let t = originalText, !t.isEmpty { return t }
             return "{}\n"
         }()
-        guard let merged = JSONMinimalEditor.setTopLevelValue(in: source, key: key, value: value) else {
-            return false
-        }
-        return fm.createFile(atPath: cli.fullPath, contents: Data(merged.utf8))
+        return JSONMinimalEditor.setTopLevelValue(in: source, key: key, value: value)
     }
 
     // MARK: - External CLIs (use bridge binary directly)
@@ -1104,9 +1370,7 @@ struct ConfigInstaller {
 
         let root = parseJSONFile(at: cli.fullPath, fm: fm) ?? [:]
         var hooks = root[cli.configKey] as? [String: Any] ?? [:]
-        // Quote the path in case home directory contains spaces or special characters
-        let quotedBridge = bridgeCommand.contains(" ") ? "\"\(bridgeCommand)\"" : bridgeCommand
-        let baseCommand = "\(quotedBridge) --source \(cli.source)"
+        let baseCommand = bridgeHookCommand(source: cli.source)
 
         for (event, timeout, _) in cli.events {
             var eventEntries = hooks[event] as? [[String: Any]] ?? []
@@ -1175,8 +1439,7 @@ struct ConfigInstaller {
     }
 
     private static func managedTraecliHookObject(source: String = "traecli") -> [String: Any] {
-        let quotedBridge = bridgeCommand.contains(" ") ? "\"\(bridgeCommand)\"" : bridgeCommand
-        let command = "\(quotedBridge) --source \(source)"
+        let command = bridgeHookCommand(source: source)
 
         let events = defaultEvents(for: .traecli)
         let timeout = events.map { $0.1 }.max() ?? 5
@@ -1196,8 +1459,7 @@ struct ConfigInstaller {
     /// Render the managed hook block as YAML text (2-space indent, list-item form).
     /// Used by the surgical merge path that preserves user comments/key order.
     private static func renderManagedTraecliHooksText(source: String = "traecli") -> String {
-        let quotedBridge = bridgeCommand.contains(" ") ? "\"\(bridgeCommand)\"" : bridgeCommand
-        let escapedCommand = "\(quotedBridge) --source \(source)".replacingOccurrences(of: "'", with: "''")
+        let escapedCommand = bridgeHookCommand(source: source).replacingOccurrences(of: "'", with: "''")
 
         let events = defaultEvents(for: .traecli)
         let timeout = events.map { $0.1 }.max() ?? 5
@@ -1401,12 +1663,11 @@ struct ConfigInstaller {
     }
 
     private static func expectedTraecliCommandCandidates(source: String) -> [String] {
-        let base = bridgeCommand.contains(" ") ? "\"\(bridgeCommand)\"" : bridgeCommand
         let abs = "\(bridgeCommand) --source \(source)"
         let absQuoted = "\"\(bridgeCommand)\" --source \(source)"
         let tilde = "~/.bough/bough-bridge --source \(source)"
         let tildeQuoted = "\"~/.bough/bough-bridge\" --source \(source)"
-        let actualRendered = "\(base) --source \(source)"
+        let actualRendered = bridgeHookCommand(source: source)
         return [actualRendered, abs, absQuoted, tilde, tildeQuoted]
     }
 
@@ -1513,6 +1774,16 @@ struct ConfigInstaller {
         }
 
         let normalized = contents.replacingOccurrences(of: "\r\n", with: "\n")
+        let surgical = removeManagedTraecliHooksLegacy(from: normalized, source: source)
+        if surgical != normalized {
+            do {
+                _ = try Yams.load(yaml: surgical)
+                return surgical
+            } catch {
+                // Fall through to the parsed round-trip remover below.
+            }
+        }
+
         let parseInputs = [normalized, normalizeTraecliHooksListIndentation(normalized)]
         for input in parseInputs {
             do {
@@ -1551,6 +1822,10 @@ struct ConfigInstaller {
     }
 
     static func mergeTraecliHooks(into contents: String, source: String = "traecli") -> String {
+        mergeTraecliHooksIfValid(into: contents, source: source) ?? contents
+    }
+
+    private static func mergeTraecliHooksIfValid(into contents: String, source: String = "traecli") -> String? {
         // Path A — surgical string-level write. Preserves user comments + key
         // ordering. Validated by re-parsing through Yams; if the result is
         // invalid (e.g. user file has mixed indentation), fall through to B.
@@ -1593,7 +1868,7 @@ struct ConfigInstaller {
         }
 
         // Still unparseable: last resort, do not clobber user data.
-        return contents.hasSuffix("\n") ? contents : (contents + "\n")
+        return nil
     }
 
     /// Surgical merge: drop existing managed block via string scan (preserves
@@ -1660,7 +1935,7 @@ struct ConfigInstaller {
             original = decoded
         }
 
-        let merged = mergeTraecliHooks(into: original)
+        guard let merged = mergeTraecliHooksIfValid(into: original) else { return false }
         guard let data = merged.data(using: .utf8) else { return false }
         do {
             try data.write(to: URL(fileURLWithPath: traecliConfigPath), options: .atomic)
@@ -1717,6 +1992,38 @@ struct ConfigInstaller {
         return url.path
     }
 
+    private static func installStableClaudeCodeStatusLineBridge(
+        from sourcePath: String,
+        to destinationPath: String,
+        fm: FileManager
+    ) -> Bool {
+        if sourcePath == destinationPath {
+            guard fm.fileExists(atPath: destinationPath) else { return false }
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destinationPath)
+            return true
+        }
+
+        guard fm.fileExists(atPath: sourcePath) else { return false }
+        do {
+            let destinationURL = URL(fileURLWithPath: destinationPath)
+            try BoughPrivateStorage.ensurePrivateDirectoryForFile(at: destinationURL, fileManager: fm)
+            let tmpURL = destinationURL.deletingLastPathComponent()
+                .appendingPathComponent(".\(destinationURL.lastPathComponent).tmp.\(ProcessInfo.processInfo.processIdentifier)")
+            try? fm.removeItem(at: tmpURL)
+            try fm.copyItem(at: URL(fileURLWithPath: sourcePath), to: tmpURL)
+            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tmpURL.path)
+            if fm.fileExists(atPath: destinationPath) {
+                _ = try fm.replaceItemAt(destinationURL, withItemAt: tmpURL)
+            } else {
+                try fm.moveItem(at: tmpURL, to: destinationURL)
+            }
+            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destinationPath)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     /// Resolves the chain wrapper template bundled under
     /// `Sources/Bough/Resources/bough-statusline-wrapper.sh.template` and
     /// performs literal-string substitution of the `__BOUGH_PREV_CMD_B64__`
@@ -1755,18 +2062,17 @@ struct ConfigInstaller {
               let prevData = prevCmd.data(using: .utf8)
         else { return nil }
 
-        // CR-01 belt-and-suspenders: the template wraps __BOUGH_BRIDGE_PATH__ in
-        // double quotes so spaces in install paths (e.g. `/Users/Some User/...`)
-        // do not tokenize at the bash pipeline. Double quotes protect spaces but
-        // would be broken by a `"` inside the substituted path. Bundle.appModule
-        // resource paths under a `.app` cannot contain `"` under any normal
-        // macOS layout — refuse rather than emit a broken wrapper if it does.
-        guard !bridgePath.contains("\"") else { return nil }
+        guard let quotedBridgePath = shellSingleQuotedLiteral(bridgePath) else { return nil }
 
         let prevB64 = prevData.base64EncodedString()
         return template
             .replacingOccurrences(of: "__BOUGH_PREV_CMD_B64__", with: prevB64)
-            .replacingOccurrences(of: "__BOUGH_BRIDGE_PATH__", with: bridgePath)
+            .replacingOccurrences(of: "__BOUGH_BRIDGE_PATH__", with: quotedBridgePath)
+    }
+
+    private static func shellSingleQuotedLiteral(_ value: String) -> String? {
+        guard !value.contains("\n"), !value.contains("\u{0}") else { return nil }
+        return "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     /// Phase 21 / D-02 chain-aware install entry point.
@@ -1814,6 +2120,15 @@ struct ConfigInstaller {
         // Case 2: settings.json already points at the bridge directly → no-op.
         if existing == proposedBridgePath {
             return .installed
+        }
+
+        if isBoughStatusLineBridgePath(existing) {
+            return installClaudeCodeStatusLine(
+                replaceExisting: true,
+                fm: fm,
+                settingsPath: settingsPath,
+                proposedBridgePath: proposedBridgePath
+            )
         }
 
         // Resolve the TRUE prev command.
@@ -1906,6 +2221,11 @@ struct ConfigInstaller {
         }
 
         let original = (try? String(contentsOfFile: settingsPath, encoding: .utf8)) ?? "{}"
+        if fm.fileExists(atPath: settingsPath),
+           !original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           parseJSONFile(at: settingsPath, fm: fm) == nil {
+            return .failed("Malformed Claude Code settings.json")
+        }
         // Claude Code requires `"type": "command"` in the
         // statusLine block; a block without it is silently ignored, which
         // means the wrapper (and the chained user statusLine inside it) is
@@ -1919,10 +2239,12 @@ struct ConfigInstaller {
         }
 
         do {
-            try fm.createDirectory(
-                atPath: (settingsPath as NSString).deletingLastPathComponent,
-                withIntermediateDirectories: true
-            )
+            let settingsDir = (settingsPath as NSString).deletingLastPathComponent
+            try fm.createDirectory(atPath: settingsDir, withIntermediateDirectories: true)
+            let preflightURL = URL(fileURLWithPath: settingsDir)
+                .appendingPathComponent(".settings.json.bough-preflight-\(UUID().uuidString)")
+            try Data(merged.utf8).write(to: preflightURL, options: .atomic)
+            try? fm.removeItem(at: preflightURL)
             if fm.fileExists(atPath: settingsPath), merged != original {
                 backupClaudeSettings(original: original, settingsPath: settingsPath, fm: fm)
             }
@@ -1935,8 +2257,7 @@ struct ConfigInstaller {
 
     private static func currentClaudeCodeStatusLineCommand(fm: FileManager, settingsPath: String) -> String? {
         guard fm.fileExists(atPath: settingsPath),
-              let data = fm.contents(atPath: settingsPath),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let root = parseJSONFile(at: settingsPath, fm: fm),
               let statusLine = root["statusLine"] as? [String: Any]
         else { return nil }
         return statusLine["command"] as? String
@@ -2014,12 +2335,19 @@ struct ConfigInstaller {
 
         if let backupPath = firstClaudeSettingsBackup(settingsPath: settingsPath, fm: fm),
            let backup = try? String(contentsOfFile: backupPath, encoding: .utf8) {
-            do {
-                try Data(backup.utf8).write(to: URL(fileURLWithPath: settingsPath), options: .atomic)
-                return true
-            } catch {
+            guard let merged = restoreStatusLine(fromBackup: backup, into: original) else {
                 return false
             }
+            if merged != original {
+                do {
+                    backupClaudeSettings(original: original, settingsPath: settingsPath, fm: fm)
+                    try Data(merged.utf8).write(to: URL(fileURLWithPath: settingsPath), options: .atomic)
+                    return true
+                } catch {
+                    return false
+                }
+            }
+            return true
         }
 
         guard
@@ -2035,7 +2363,16 @@ struct ConfigInstaller {
     }
 
     private static func isOldBoughStatusLineBridgePath(_ command: String) -> Bool {
-        command.hasSuffix("/Bough.app/Contents/Resources/bough-statusline-bridge.sh")
+        isBoughStatusLineBridgePath(command)
+    }
+
+    private static func isBoughStatusLineBridgePath(_ command: String) -> Bool {
+        if command == claudeCodeStatusLineStableBridgePath { return true }
+        let marker = "/Bough.app/Contents/Resources/"
+        guard let markerRange = command.range(of: marker) else { return false }
+        let suffix = command[markerRange.upperBound...]
+        return suffix == "bough-statusline-bridge.sh"
+            || suffix.hasSuffix("/bough-statusline-bridge.sh")
     }
 
     private static func backupClaudeSettings(original: String, settingsPath: String, fm: FileManager) {
@@ -2056,43 +2393,85 @@ struct ConfigInstaller {
             .map { (dir as NSString).appendingPathComponent($0) }
     }
 
+    private static func restoreStatusLine(fromBackup backup: String, into current: String) -> String? {
+        guard let backupRoot = parseJSONCString(backup) else {
+            return nil
+        }
+        guard let oldStatusLine = backupRoot["statusLine"] else {
+            return JSONMinimalEditor.deleteTopLevelKey(in: current, key: "statusLine")
+        }
+        return JSONMinimalEditor.setTopLevelValue(in: current, key: "statusLine", value: oldStatusLine)
+    }
+
     private static func shellSingleQuote(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
+    private static func bridgeHookCommand(
+        source: String,
+        bridgeCommand: String = ConfigInstaller.bridgeCommand
+    ) -> String {
+        "\(shellQuoteCommandTokenIfNeeded(bridgeCommand)) --source \(shellQuoteCommandTokenIfNeeded(source))"
+    }
+
+    private static func shellQuoteCommandTokenIfNeeded(_ value: String) -> String {
+        let safeScalars = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_@%+=:,./-")
+        guard !value.isEmpty,
+              value.unicodeScalars.allSatisfy({ safeScalars.contains($0) }) else {
+            let escaped = value
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+                .replacingOccurrences(of: "$", with: "\\$")
+                .replacingOccurrences(of: "`", with: "\\`")
+                .replacingOccurrences(of: "\n", with: "\\n")
+            return "\"\(escaped)\""
+        }
+        return value
+    }
+
+    private static func tomlBasicString(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\t", with: "\\t")
+        return "\"\(escaped)\""
+    }
+
     // MARK: - Kimi Code CLI (TOML hooks)
 
-    internal static func installKimiHooks(cli: CLIConfig, fm: FileManager) -> Bool {
+    internal static func installKimiHooks(
+        cli: CLIConfig,
+        fm: FileManager,
+        bridgeCommand: String = ConfigInstaller.bridgeCommand
+    ) -> Bool {
         let path = cli.fullPath
         var contents = ""
         if fm.fileExists(atPath: path) {
-            contents = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+            guard let existing = try? String(contentsOfFile: path, encoding: .utf8) else {
+                return false
+            }
+            contents = existing
         }
 
         contents = removeKimiHooks(from: contents)
         // Comment out legacy scalar `hooks = ...` assignments that conflict with TOML array-of-tables
         // so they can be restored on uninstall instead of being permanently lost.
-        contents = contents
-            .components(separatedBy: "\n")
-            .map { line in
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed.hasPrefix("hooks =") {
-                    return "# [Bough] commented out legacy scalar hooks to avoid TOML conflict\n# \(line)"
-                }
-                return line
-            }
-            .joined(separator: "\n")
+        contents = commentOutTopLevelKimiHooksScalar(in: contents)
 
-        let quotedBridge = bridgeCommand.rangeOfCharacter(from: .whitespacesAndNewlines) != nil
-            ? "\"\(bridgeCommand)\""
-            : bridgeCommand
-        let baseCommand = "\(quotedBridge) --source \(cli.source)"
+        let baseCommand = bridgeHookCommand(source: cli.source, bridgeCommand: bridgeCommand)
 
         var hookBlocks: [String] = ["# bough-hook-v1-start"]
         for (event, timeout, _) in cli.events {
-            var block = "[[hooks]]\nevent = \"\(event)\"\ncommand = \"\(baseCommand)\"\ntimeout = \(timeout)"
+            var block = [
+                "[[hooks]]",
+                "event = \(tomlBasicString(event))",
+                "command = \(tomlBasicString(baseCommand))",
+                "timeout = \(timeout)"
+            ].joined(separator: "\n")
             if event == "PreToolUse" || event == "PostToolUse" || event == "PostToolUseFailure" {
-                block += "\nmatcher = \".*\""
+                block += "\nmatcher = \(tomlBasicString(".*"))"
             }
             hookBlocks.append(block)
         }
@@ -2137,7 +2516,7 @@ struct ConfigInstaller {
                     j += 1
                 }
                 let blockText = blockLines.joined(separator: "\n")
-                if !blockText.contains("bough-bridge") {
+                if !containsBoughBridgeCommand(blockText) {
                     result.append(contentsOf: blockLines)
                 }
                 i = j
@@ -2151,6 +2530,51 @@ struct ConfigInstaller {
             result.removeLast()
         }
         return result.joined(separator: "\n")
+    }
+
+    static func commentOutTopLevelKimiHooksScalar(in contents: String) -> String {
+        var inTopLevelScope = true
+        return contents
+            .components(separatedBy: "\n")
+            .map { line in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("[") {
+                    inTopLevelScope = false
+                }
+                if inTopLevelScope,
+                   trimmed.range(of: #"^hooks\s*="#, options: .regularExpression) != nil {
+                    return "# [Bough] commented out legacy scalar hooks to avoid TOML conflict\n# \(line)"
+                }
+                return line
+            }
+            .joined(separator: "\n")
+    }
+
+    static func restoreKimiCommentedLegacyScalars(in contents: String) -> String {
+        let lines = contents.components(separatedBy: "\n")
+        var restored: [String] = []
+        var i = 0
+        while i < lines.count {
+            let line = lines[i]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed == "# [Bough] commented out legacy scalar hooks to avoid TOML conflict",
+               i + 1 < lines.count {
+                let next = lines[i + 1]
+                let nextTrimmed = next.trimmingCharacters(in: .whitespaces)
+                if nextTrimmed.range(of: #"^#\s*hooks\s*="#, options: .regularExpression) != nil {
+                    restored.append(next.replacingOccurrences(
+                        of: #"^#\s*"#,
+                        with: "",
+                        options: .regularExpression
+                    ))
+                    i += 2
+                    continue
+                }
+            }
+            restored.append(line)
+            i += 1
+        }
+        return restored.joined(separator: "\n")
     }
 
     private static func isKimiHooksInstalled(cli: CLIConfig, fm: FileManager) -> Bool {
@@ -2186,7 +2610,7 @@ struct ConfigInstaller {
                         .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
                     currentEvent = val
                 }
-                if currentEvent == event && trimmed.contains("bough-bridge") {
+                if currentEvent == event && containsBoughBridgeCommand(trimmed) {
                     return true
                 }
             }
@@ -2204,19 +2628,8 @@ struct ConfigInstaller {
             contents = removeKimiHooks(from: contents)
 
             // Restore commented-out legacy scalar hooks
-            let lines = contents.components(separatedBy: "\n")
-            var restored: [String] = []
-            for line in lines {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed == "# [Bough] commented out legacy scalar hooks to avoid TOML conflict" {
-                    continue
-                }
-                if trimmed.range(of: #"^#\s*hooks\s*="#, options: .regularExpression) != nil {
-                    restored.append(line.replacingOccurrences(of: #"^#\s*"#, with: "", options: .regularExpression))
-                } else {
-                    restored.append(line)
-                }
-            }
+            var restored = restoreKimiCommentedLegacyScalars(in: contents)
+                .components(separatedBy: "\n")
             while let last = restored.last, last.trimmingCharacters(in: .whitespaces).isEmpty {
                 restored.removeLast()
             }
@@ -2237,6 +2650,7 @@ struct ConfigInstaller {
         }
         guard containsManagedHook else { return }
 
+        let wholeFileOwnership = generatedWholeFileConfigOwnership(cli: cli, root: root)
         if shouldRemoveBoughOwnedWholeFileConfig(cli: cli, root: root, hooks: hooks) {
             do {
                 try fm.removeItem(atPath: cli.fullPath)
@@ -2247,7 +2661,12 @@ struct ConfigInstaller {
             }
         }
 
-        hooks = removeManagedHookEntries(from: hooks)
+        if let wholeFileOwnership,
+           containsAnyStrictBoughBridgeHook(in: hooks, source: wholeFileOwnership.strictSource) == false {
+            return
+        }
+
+        hooks = removeManagedHookEntries(from: hooks, strictSource: wholeFileOwnership?.strictSource)
 
         let merged: String?
         if hooks.isEmpty {
@@ -2262,11 +2681,16 @@ struct ConfigInstaller {
 
     // MARK: - Detection helpers
 
-    static func removeManagedHookEntries(from hooks: [String: Any]) -> [String: Any] {
+    static func removeManagedHookEntries(from hooks: [String: Any], strictSource: String? = nil) -> [String: Any] {
         var cleaned = hooks
         for (event, value) in cleaned {
             guard var entries = value as? [[String: Any]] else { continue }
-            entries.removeAll { containsOurHook($0) }
+            entries.removeAll { entry in
+                if let strictSource {
+                    return containsStrictBoughBridgeHook(entry, source: strictSource)
+                }
+                return containsOurHook(entry)
+            }
             if entries.isEmpty {
                 cleaned.removeValue(forKey: event)
             } else {
@@ -2281,36 +2705,46 @@ struct ConfigInstaller {
         root: [String: Any],
         hooks: [String: Any]
     ) -> Bool {
-        let allowedKeys: Set<String>
-        let strictSource: String
-
-        switch (cli.source, cli.format, cli.configPath) {
-        case ("copilot", .copilot, ".copilot/hooks/bough.json"):
-            allowedKeys = ["version", cli.configKey]
-            strictSource = "copilot"
-        case ("kiro", .kiroAgent, ".kiro/agents/bough.json"):
-            guard root["name"] as? String == "bough",
-                  (root["description"] as? String)?.contains("Auto-generated by Bough") == true
-            else { return false }
-            allowedKeys = ["name", "description", cli.configKey]
-            strictSource = "kiro"
-        default:
+        guard let ownership = generatedWholeFileConfigOwnership(cli: cli, root: root) else {
             return false
         }
 
-        guard Set(root.keys).isSubset(of: allowedKeys),
-              removeManagedHookEntries(from: hooks).isEmpty
-        else { return false }
+        guard Set(root.keys).isSubset(of: ownership.allowedKeys) else { return false }
 
         return hooks.values.allSatisfy { value in
             guard let entries = value as? [[String: Any]], !entries.isEmpty else { return false }
-            return entries.allSatisfy { containsStrictBoughBridgeHook($0, source: strictSource) }
+            return entries.allSatisfy { containsStrictBoughBridgeHook($0, source: ownership.strictSource) }
+        }
+    }
+
+    private static func generatedWholeFileConfigOwnership(
+        cli: CLIConfig,
+        root: [String: Any]
+    ) -> (allowedKeys: Set<String>, strictSource: String)? {
+        switch (cli.source, cli.format, cli.configPath) {
+        case ("copilot", .copilot, ".copilot/hooks/bough.json"):
+            return (["version", cli.configKey], "copilot")
+        case ("kiro", .kiroAgent, ".kiro/agents/bough.json"):
+            guard root["name"] as? String == "bough",
+                  (root["description"] as? String)?.contains("Auto-generated by Bough") == true
+            else { return nil }
+            return (["name", "description", cli.configKey], "kiro")
+        default:
+            return nil
+        }
+    }
+
+    private static func containsAnyStrictBoughBridgeHook(in hooks: [String: Any], source: String) -> Bool {
+        hooks.values.contains { value in
+            guard let entries = value as? [[String: Any]] else { return false }
+            return entries.contains { containsStrictBoughBridgeHook($0, source: source) }
         }
     }
 
     private static func containsStrictBoughBridgeHook(_ entry: [String: Any], source: String) -> Bool {
         commandStrings(in: entry).contains { command in
-            command.contains("/.bough/bough-bridge") && command.contains("--source \(source)")
+            HookId.containsBoughBridgeCommand(command)
+                && HookId.containsSourceArgument(command, source: source)
         }
     }
 
@@ -2335,8 +2769,9 @@ struct ConfigInstaller {
 
         guard let root = parseJSONFile(at: cli.fullPath, fm: fm),
               let hooks = root[cli.configKey] as? [String: Any] else { return false }
-        // Check that ALL required events have our hook installed, not just any one
-        let allPresent = cli.events.allSatisfy { (event, _, _) in
+        let requiredEvents = cli.format == .claude ? compatibleEvents(for: cli) : cli.events
+        // Check that ALL currently compatible required events have our hook installed, not just any one.
+        let allPresent = requiredEvents.allSatisfy { (event, _, _) in
             guard let entries = hooks[event] as? [[String: Any]] else { return false }
             return entries.contains { containsOurHook($0) }
         }
@@ -2377,7 +2812,12 @@ struct ConfigInstaller {
 
     // MARK: - Bridge & Hook Script
 
-    private static func installHookScript(fm: FileManager) {
+    private static func installHookScript(fm: FileManager) -> Bool {
+        do {
+            try BoughPrivateStorage.ensurePrivateDirectory(at: URL(fileURLWithPath: boughDir), fileManager: fm)
+        } catch {
+            return false
+        }
         let needsUpdate: Bool
         if fm.fileExists(atPath: hookScriptPath) {
             if let existing = fm.contents(atPath: hookScriptPath),
@@ -2392,18 +2832,32 @@ struct ConfigInstaller {
             needsUpdate = true
         }
         if needsUpdate {
-            fm.createFile(atPath: hookScriptPath, contents: Data(hookScript.utf8))
+            guard fm.createFile(atPath: hookScriptPath, contents: Data(hookScript.utf8)) else {
+                return false
+            }
+            chmod(hookScriptPath, 0o755)
+        } else if !fm.isExecutableFile(atPath: hookScriptPath) {
             chmod(hookScriptPath, 0o755)
         }
+        return fm.isExecutableFile(atPath: hookScriptPath)
     }
 
-    private static func installBridgeBinary(fm: FileManager) {
-        guard let execPath = Bundle.main.executablePath else { return }
+    private static func installBridgeBinary(fm: FileManager) -> Bool {
+        do {
+            try BoughPrivateStorage.ensurePrivateDirectory(at: URL(fileURLWithPath: boughDir), fileManager: fm)
+        } catch {
+            return false
+        }
+        guard let execPath = Bundle.main.executablePath else {
+            return isExecutableFile(at: bridgePath, fm: fm)
+        }
         let execDir = (execPath as NSString).deletingLastPathComponent
         let contentsDir = (execDir as NSString).deletingLastPathComponent
         var srcPath = contentsDir + "/Helpers/bough-bridge"
         if !fm.fileExists(atPath: srcPath) { srcPath = execDir + "/bough-bridge" }
-        guard fm.fileExists(atPath: srcPath) else { return }
+        guard fm.fileExists(atPath: srcPath) else {
+            return isExecutableFile(at: bridgePath, fm: fm)
+        }
 
         // Atomic replace: copy to temp file first, then rename (overwrites atomically)
         let tmpPath = bridgePath + ".tmp.\(ProcessInfo.processInfo.processIdentifier)"
@@ -2413,14 +2867,30 @@ struct ConfigInstaller {
             chmod(tmpPath, 0o755)
             // Strip quarantine xattr so Gatekeeper won't block the binary
             stripQuarantine(tmpPath)
-            _ = try fm.replaceItemAt(URL(fileURLWithPath: bridgePath), withItemAt: URL(fileURLWithPath: tmpPath))
+            if fm.fileExists(atPath: bridgePath) {
+                _ = try fm.replaceItemAt(URL(fileURLWithPath: bridgePath), withItemAt: URL(fileURLWithPath: tmpPath))
+            } else {
+                try fm.moveItem(atPath: tmpPath, toPath: bridgePath)
+            }
         } catch {
-            // replaceItemAt fails if destination doesn't exist yet — fall back to rename
-            try? fm.moveItem(atPath: tmpPath, toPath: bridgePath)
-            chmod(bridgePath, 0o755)
+            try? fm.removeItem(atPath: tmpPath)
+            return false
         }
         // Ensure final binary is free of quarantine (covers both paths above)
         stripQuarantine(bridgePath)
+        chmod(bridgePath, 0o755)
+        return isExecutableFile(at: bridgePath, fm: fm)
+    }
+
+    private static func runtimeExecutableInstalled(for cli: CLIConfig, fm: FileManager) -> Bool {
+        if cli.format == .claude {
+            return isExecutableFile(at: hookScriptPath, fm: fm)
+        }
+        return isExecutableFile(at: bridgePath, fm: fm)
+    }
+
+    private static func isExecutableFile(at path: String, fm: FileManager) -> Bool {
+        fm.isExecutableFile(atPath: path)
     }
 
     /// Remove com.apple.quarantine xattr so Gatekeeper won't block the binary.
@@ -2475,7 +2945,7 @@ struct ConfigInstaller {
         }
 
         var plugins = parsed["plugin"] as? [String] ?? []
-        plugins.removeAll { $0.contains(identifier) }
+        plugins.removeAll { isManagedOpencodePluginRef($0, identifier: identifier) }
         plugins.append(pluginRef)
 
         // Replace the plugin array in-place, preserving surrounding text exactly.
@@ -2507,14 +2977,21 @@ struct ConfigInstaller {
             return nil
         }
         guard var plugins = parsed["plugin"] as? [String],
-              plugins.contains(where: { $0.contains(identifier) }) else {
+              plugins.contains(where: { isManagedOpencodePluginRef($0, identifier: identifier) }) else {
             return nil
         }
-        plugins.removeAll { $0.contains(identifier) }
+        plugins.removeAll { isManagedOpencodePluginRef($0, identifier: identifier) }
         if plugins.isEmpty {
             return JSONMinimalEditor.deleteTopLevelKey(in: contents, key: "plugin")
         }
         return JSONMinimalEditor.setTopLevelValue(in: contents, key: "plugin", value: plugins)
+    }
+
+    private static func isManagedOpencodePluginRef(_ pluginRef: String, identifier: String) -> Bool {
+        if identifier == HookId.current {
+            return HookId.isOurs(pluginRef)
+        }
+        return pluginRef.contains(identifier)
     }
 
     @discardableResult
@@ -2528,37 +3005,16 @@ struct ConfigInstaller {
         try? fm.createDirectory(atPath: opencodePluginDir, withIntermediateDirectories: true)
         guard fm.createFile(atPath: opencodePluginPath, contents: Data(source.utf8)) else { return false }
 
-        // Pick the registration target. Order: .jsonc (OpenCode-recommended)
-        // when present, else .json. We never create .json when the user
-        // already has .jsonc — see issue #132.
-        let pluginRef = "file://\(opencodePluginPath)"
-        let targetPath: String = fm.fileExists(atPath: opencodeConfigPathJsonc)
-            ? opencodeConfigPathJsonc
-            : opencodeConfigPathNew
-        let originalContents: String? = fm.contents(atPath: targetPath)
-            .flatMap { String(data: $0, encoding: .utf8) }
-
-        guard let merged = mergeOpencodePluginRef(
-            originalContents: originalContents,
-            pluginRef: pluginRef,
-            identifier: HookId.current
-        ) else {
-            // Existing config is unparseable — refuse to overwrite user data.
-            // Plugin JS is staged; the config file stays untouched until the user fixes it.
-            return false
-        }
-
-        if let original = originalContents, !original.isEmpty {
-            backupOpencodeConfig(at: targetPath, original: original, fm: fm)
-        }
-        fm.createFile(atPath: targetPath, contents: Data(merged.utf8))
-
-        // Clean up legacy config.json registration to prevent double-load.
-        if let legacyContents = fm.contents(atPath: opencodeConfigPath)
-            .flatMap({ String(data: $0, encoding: .utf8) }),
-           let cleaned = removeOpencodePluginRef(originalContents: legacyContents, identifier: HookId.current) {
-            backupOpencodeConfig(at: opencodeConfigPath, original: legacyContents, fm: fm)
-            fm.createFile(atPath: opencodeConfigPath, contents: Data(cleaned.utf8))
+        // OpenCode auto-loads local plugins from ~/.config/opencode/plugins/.
+        // The config "plugin" array is for npm packages; remove older Bough
+        // file:// registrations so the local plugin is not loaded twice.
+        for configPath in [opencodeConfigPathJsonc, opencodeConfigPathNew, opencodeConfigPath] {
+            guard let contents = fm.contents(atPath: configPath)
+                .flatMap({ String(data: $0, encoding: .utf8) }),
+                  let cleaned = removeOpencodePluginRef(originalContents: contents, identifier: HookId.current)
+            else { continue }
+            backupOpencodeConfig(at: configPath, original: contents, fm: fm)
+            fm.createFile(atPath: configPath, contents: Data(cleaned.utf8))
         }
         return true
     }
@@ -2596,11 +3052,29 @@ struct ConfigInstaller {
     /// Current OpenCode plugin version — bump when bough-opencode.js changes
     private static let opencodePluginVersion = "v4"
 
+    static func testIsOpencodePluginInstalled(pluginPath: String, configPaths: [String], fm: FileManager = .default) -> Bool {
+        isOpencodePluginInstalled(fm: fm, pluginPath: pluginPath, configPaths: configPaths)
+    }
+
     private static func isOpencodePluginInstalled(fm: FileManager) -> Bool {
-        guard fm.fileExists(atPath: opencodePluginPath) else { return false }
-        // If any config file exists but is unparseable, treat plugin as installed
-        // to avoid a repair loop that would clobber the user's JSON (#89).
-        for configPath in [opencodeConfigPathJsonc, opencodeConfigPathNew, opencodeConfigPath] {
+        isOpencodePluginInstalled(
+            fm: fm,
+            pluginPath: opencodePluginPath,
+            configPaths: [opencodeConfigPathJsonc, opencodeConfigPathNew, opencodeConfigPath]
+        )
+    }
+
+    private static func isOpencodePluginInstalled(fm: FileManager, pluginPath: String, configPaths: [String]) -> Bool {
+        guard fm.fileExists(atPath: pluginPath),
+              let existing = fm.contents(atPath: pluginPath),
+              let pluginSource = String(data: existing, encoding: .utf8),
+              pluginSource.contains("// version: \(opencodePluginVersion)") else {
+            return false
+        }
+
+        // OpenCode auto-loads ~/.config/opencode/plugins/*.js; config refs are
+        // legacy compatibility only and must not be required for installed-state.
+        for configPath in configPaths {
             guard fm.fileExists(atPath: configPath) else { continue }
             guard let data = fm.contents(atPath: configPath),
                   let stripped = String(data: data, encoding: .utf8).map(stripJSONComments),
@@ -2608,15 +3082,10 @@ struct ConfigInstaller {
                 return true
             }
             if let plugins = parsed["plugin"] as? [String],
-               plugins.contains(where: { $0.contains(HookId.current) }) {
-                // Check version; outdated plugin triggers re-install.
-                if let existing = fm.contents(atPath: opencodePluginPath),
-                   let str = String(data: existing, encoding: .utf8) {
-                    return str.contains("// version: \(opencodePluginVersion)")
-                }
-                return false
+               plugins.contains(where: { isManagedOpencodePluginRef($0, identifier: HookId.current) }) {
+                return true
             }
         }
-        return false
+        return true
     }
 }

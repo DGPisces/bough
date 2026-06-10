@@ -5,11 +5,19 @@ import XCTest
 @MainActor
 final class MusicNowPlayingStoreTests: XCTestCase {
     private var defaults: UserDefaults!
+    private var suiteName: String!
 
     override func setUp() {
-        let suiteName = "MusicNowPlayingStoreTests-\(name)"
+        suiteName = "MusicNowPlayingStoreTests-\(name)"
         defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    override func tearDown() {
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults = nil
+        suiteName = nil
+        super.tearDown()
     }
 
     func testPollingStartsOnlyWhenEnabledAndNeeded() {

@@ -174,7 +174,11 @@ build_mac() {
 
         echo "Creating DMG..."
         DMG_PATH="$BUILD_DIR/$APP_NAME.dmg"
+        DMG_STAGING="$BUILD_DIR/dmg-staging"
         rm -f "$DMG_PATH"
+        rm -rf "$DMG_STAGING"
+        mkdir -p "$DMG_STAGING"
+        ditto "$APP_BUNDLE" "$DMG_STAGING/$APP_NAME.app"
         create-dmg \
             --volname "$APP_NAME" \
             --window-pos 200 120 \
@@ -183,7 +187,7 @@ build_mac() {
             --icon "$APP_NAME.app" 150 185 \
             --app-drop-link 450 185 \
             --no-internet-enable \
-            "$DMG_PATH" "$APP_BUNDLE"
+            "$DMG_PATH" "$DMG_STAGING"
 
         codesign --force --sign "$SIGN_ID" "$DMG_PATH"
         echo "Notarizing DMG..."

@@ -5,9 +5,16 @@ import XCTest
 final class StatusItemControllerTests: XCTestCase {
     private var suiteName: String!
     private var defaults: UserDefaults!
+    private var savedLanguage: String!
+    private var savedLanguageDefaultValue: Any?
+    private var lockedProcessState = false
 
     override func setUp() {
         super.setUp()
+        TestHelpers.processStateLock.lock()
+        lockedProcessState = true
+        savedLanguage = L10n.shared.language
+        savedLanguageDefaultValue = UserDefaults.standard.object(forKey: SettingsKey.appLanguage)
         suiteName = "StatusItemControllerTests-\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)
         defaults.removePersistentDomain(forName: suiteName)
@@ -17,7 +24,15 @@ final class StatusItemControllerTests: XCTestCase {
         defaults.removePersistentDomain(forName: suiteName)
         defaults = nil
         suiteName = nil
-        L10n.shared.language = "system"
+        if lockedProcessState {
+            TestHelpers.restoreSharedLanguage(savedLanguage, savedDefaultValue: savedLanguageDefaultValue)
+        }
+        savedLanguage = nil
+        savedLanguageDefaultValue = nil
+        if lockedProcessState {
+            TestHelpers.processStateLock.unlock()
+            lockedProcessState = false
+        }
         super.tearDown()
     }
 

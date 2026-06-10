@@ -315,6 +315,8 @@ extension ConfigInstaller {
                 ("UserPromptSubmit", 5, true),
                 ("PreToolUse", 5, false),
                 ("PostToolUse", 5, true),
+                ("PostToolUseFailure", 5, true),
+                ("PermissionRequest", 86400, false),
                 ("SessionStart", 5, false),
                 ("SessionEnd", 5, true),
                 ("Stop", 5, true),
@@ -444,6 +446,17 @@ extension ConfigInstaller {
         }
         guard !normalizedConfigPath.isEmpty else { return (false, "Config path cannot be empty") }
         guard !normalizedConfigKey.isEmpty else { return (false, "Config key cannot be empty") }
+        let pathProbe = CLIConfig(
+            name: normalizedName,
+            source: normalizedSource,
+            configPath: normalizedConfigPath,
+            configKey: normalizedConfigKey,
+            format: format,
+            events: []
+        )
+        guard FileManager.default.fileExists(atPath: pathProbe.dirPath) else {
+            return (false, "Config directory does not exist")
+        }
 
         let builtInSources = Set(builtInCLIs.map(\.source))
         guard !builtInSources.contains(normalizedSource) else {

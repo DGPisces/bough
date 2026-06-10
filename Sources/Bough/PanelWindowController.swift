@@ -160,12 +160,13 @@ class PanelWindowController: NSObject, NSWindowDelegate {
         panelSize(for: chosenScreen())
     }
 
-    private var visibilityTimer: Timer?
     private var autoScreenPoller: Timer?
     private var fullscreenPoller: Timer?
     private var sessionObservationTask: Task<Void, Never>?
     private var fullscreenLatch = false
     private var settingsObservers: [NSObjectProtocol] = []
+    private var panelObservers: [NSObjectProtocol] = []
+    private var workspaceObservers: [NSObjectProtocol] = []
     private var musicActivityObserver: NSObjectProtocol?
     private var globalClickMonitor: Any?
     private var lastChosenScreenSignature = ""
@@ -217,7 +218,7 @@ class PanelWindowController: NSObject, NSWindowDelegate {
         panel.orderFrontRegardless()
 
         // Screen change observer
-        NotificationCenter.default.addObserver(
+        let screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil,
             queue: .main
@@ -231,9 +232,10 @@ class PanelWindowController: NSObject, NSWindowDelegate {
                 self.refreshCurrentScreen(forceRebuild: true)
             }
         }
+        panelObservers.append(screenObserver)
 
         // Active space change — check fullscreen
-        NSWorkspace.shared.notificationCenter.addObserver(
+        let activeSpaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification,
             object: nil,
             queue: .main
@@ -257,9 +259,10 @@ class PanelWindowController: NSObject, NSWindowDelegate {
                 }
             }
         }
+        workspaceObservers.append(activeSpaceObserver)
 
         // Frontmost app change
-        NSWorkspace.shared.notificationCenter.addObserver(
+        let appActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
@@ -270,6 +273,7 @@ class PanelWindowController: NSObject, NSWindowDelegate {
                 if !self.fullscreenLatch { self.updateVisibility() }
             }
         }
+        workspaceObservers.append(appActivationObserver)
 
         // Observe session changes via @Observable tracking
         sessionObservationTask = Task { @MainActor [weak self] in
@@ -600,6 +604,7 @@ class PanelWindowController: NSObject, NSWindowDelegate {
         // Handle specific screen index: "screen_0", "screen_1", etc.
         if choice.hasPrefix("screen_"),
            let index = Int(choice.dropFirst(7)),
+           index >= 0,
            index < NSScreen.screens.count {
             return NSScreen.screens[index]
         }
@@ -692,8 +697,15 @@ class PanelWindowController: NSObject, NSWindowDelegate {
     }
 
     deinit {
+        sessionObservationTask?.cancel()
         autoScreenPoller?.invalidate()
         fullscreenPoller?.invalidate()
+        for observer in panelObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        for observer in workspaceObservers {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
         for observer in settingsObservers {
             NotificationCenter.default.removeObserver(observer)
         }

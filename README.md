@@ -57,7 +57,7 @@ brew install --cask bough
 ### GitHub Releases DMG
 
 1. Open [GitHub Releases](https://github.com/DGPisces/bough/releases).
-2. Download the latest `Bough.dmg`.
+2. Download the latest versioned Bough DMG asset, for example `Bough-vX.Y.Z.dmg`.
 3. Open the DMG and drag `Bough.app` into `/Applications`.
 4. On first launch, follow the macOS prompts to confirm and grant the required permissions.
 

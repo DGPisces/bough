@@ -74,7 +74,7 @@ protocol UsageMonitorAppServiceClient {
 }
 
 protocol UsageMonitorProcessTerminating {
-    func terminateProcesses(named executableName: String)
+    func terminateProcesses(named executableName: String, matchingExecutablePath executablePath: String)
 }
 
 struct SMUsageMonitorAppServiceClient: UsageMonitorAppServiceClient {
@@ -98,8 +98,8 @@ struct SMUsageMonitorAppServiceClient: UsageMonitorAppServiceClient {
 }
 
 struct SystemUsageMonitorProcessTerminator: UsageMonitorProcessTerminating {
-    func terminateProcesses(named executableName: String) {
-        let pids = Self.runningPIDs(named: executableName)
+    func terminateProcesses(named executableName: String, matchingExecutablePath executablePath: String) {
+        let pids = Self.runningPIDs(named: executableName, matchingExecutablePath: executablePath)
         guard !pids.isEmpty else { return }
 
         for pid in pids {
@@ -117,7 +117,7 @@ struct SystemUsageMonitorProcessTerminator: UsageMonitorProcessTerminating {
         }
     }
 
-    private static func runningPIDs(named executableName: String) -> [pid_t] {
+    private static func runningPIDs(named executableName: String, matchingExecutablePath executablePath: String) -> [pid_t] {
         guard let data = ProcessRunner.run(path: "/usr/bin/pgrep", args: ["-x", executableName], timeout: 2),
               let output = String(data: data, encoding: .utf8) else {
             return []
@@ -126,6 +126,21 @@ struct SystemUsageMonitorProcessTerminator: UsageMonitorProcessTerminating {
             .split(whereSeparator: \.isNewline)
             .compactMap { pid_t($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
             .filter { $0 > 0 }
+            .filter { pid in
+                guard let actualPath = Self.executablePath(pid: pid) else { return false }
+                return pathsMatch(actualPath, executablePath)
+            }
+    }
+
+    private static func executablePath(pid: pid_t) -> String? {
+        var buffer = [CChar](repeating: 0, count: 4096)
+        let count = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard count > 0 else { return nil }
+        return String(cString: buffer)
+    }
+
+    private static func pathsMatch(_ lhs: String, _ rhs: String) -> Bool {
+        URL(fileURLWithPath: lhs).standardizedFileURL.path == URL(fileURLWithPath: rhs).standardizedFileURL.path
     }
 
     private static func isRunning(pid: pid_t) -> Bool {
@@ -294,6 +309,7 @@ struct UsageMonitorService {
     @discardableResult
     func repair() throws -> UsageMonitorLifecycleStatus {
         try? client.unregister()
+        terminateHelperProcesses()
         try client.register()
         return refreshStatus()
     }
@@ -354,7 +370,10 @@ struct UsageMonitorService {
     }
 
     private func terminateHelperProcesses() {
-        processTerminator.terminateProcesses(named: Self.helperExecutableName)
+        processTerminator.terminateProcesses(
+            named: Self.helperExecutableName,
+            matchingExecutablePath: helperExecutableURL.path
+        )
     }
 
     private func recordWriterOwner(_ owner: UsageContinuityWriterOwner, updateWriterOwner: Bool) {

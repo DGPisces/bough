@@ -109,6 +109,7 @@ public final class UsageContinuityStore {
     public let path: String
     private var db: OpaquePointer?
     private let now: () -> Date
+    private let sqliteLock = NSRecursiveLock()
 
     public convenience init(now: @escaping () -> Date = Date.init) throws {
         try self.init(path: Self.defaultPath(), now: now)
@@ -122,9 +123,9 @@ public final class UsageContinuityStore {
     }
 
     deinit {
-        if let db {
-            sqlite3_close_v2(db)
-        }
+        sqliteLock.lock()
+        defer { sqliteLock.unlock() }
+        close()
     }
 
     public static func liveOrNil() -> UsageContinuityStore? {
@@ -142,298 +143,338 @@ public final class UsageContinuityStore {
     }
 
     public func journalMode() throws -> String {
-        try queryString("PRAGMA journal_mode") ?? ""
+        try withSQLiteLock {
+            try queryString("PRAGMA journal_mode") ?? ""
+        }
     }
 
     @discardableResult
     public func importLegacyBaselines(_ baselines: [UsageTool: DailyBaseline], migratedAt: Date) throws -> Bool {
-        guard try migrationDate(id: "usage-daily-json-v1") == nil else { return false }
+        try withSQLiteLock {
+            guard try migrationDate(id: "usage-daily-json-v1") == nil else { return false }
 
-        for (_, baseline) in baselines {
-            let state = UsageContinuityDailyState(
-                tool: baseline.tool,
-                localDate: baseline.localDate,
-                weeklyUsedAtDayStart: baseline.weeklyUsedAtDayStart,
-                weeklyUsedNow: baseline.weeklyUsedAtDayStart,
-                todayAllowanceOfWeek: baseline.todayAllowanceOfWeek,
-                daysRemainingUntilWeeklyReset: 1,
-                weeklyResetAlreadyFiredToday: false,
-                resetProvenance: .ordinaryProgress,
-                peakWeeklyUsedPercent: baseline.weeklyUsedAtDayStart,
-                carryForwardPreResetUsedPercent: nil,
-                carryForwardPostResetUsedPercent: nil,
-                capturedAt: baseline.capturedAt
+            for (_, baseline) in baselines {
+                let state = UsageContinuityDailyState(
+                    tool: baseline.tool,
+                    localDate: baseline.localDate,
+                    weeklyUsedAtDayStart: baseline.weeklyUsedAtDayStart,
+                    weeklyUsedNow: baseline.weeklyUsedAtDayStart,
+                    todayAllowanceOfWeek: baseline.todayAllowanceOfWeek,
+                    daysRemainingUntilWeeklyReset: 1,
+                    weeklyResetAlreadyFiredToday: false,
+                    resetProvenance: .ordinaryProgress,
+                    peakWeeklyUsedPercent: baseline.weeklyUsedAtDayStart,
+                    carryForwardPreResetUsedPercent: nil,
+                    carryForwardPostResetUsedPercent: nil,
+                    capturedAt: baseline.capturedAt
+                )
+                try upsertDailyState(state)
+            }
+
+            try execute(
+                "INSERT INTO migrations(id, migrated_at, detail) VALUES (?, ?, ?)",
+                bindings: [
+                    .text("usage-daily-json-v1"),
+                    .double(migratedAt.timeIntervalSince1970),
+                    .text("Imported legacy usage-daily.json baselines")
+                ]
             )
-            try upsertDailyState(state)
+            return true
         }
-
-        try execute(
-            "INSERT INTO migrations(id, migrated_at, detail) VALUES (?, ?, ?)",
-            bindings: [
-                .text("usage-daily-json-v1"),
-                .double(migratedAt.timeIntervalSince1970),
-                .text("Imported legacy usage-daily.json baselines")
-            ]
-        )
-        return true
     }
 
     public func migrationDate(id: String) throws -> Date? {
-        try queryDouble("SELECT migrated_at FROM migrations WHERE id = ?", bindings: [.text(id)])
-            .map(Date.init(timeIntervalSince1970:))
+        try withSQLiteLock {
+            try queryDouble("SELECT migrated_at FROM migrations WHERE id = ?", bindings: [.text(id)])
+                .map(Date.init(timeIntervalSince1970:))
+        }
     }
 
     @discardableResult
     public func recordAcceptedSnapshot(_ snapshot: UsageSnapshot, acceptedAt: Date) throws -> Int64? {
-        let providerUpdatedAt = Self.providerUpdatedAt(for: snapshot) ?? acceptedAt
-        if let latest = try latestProviderUpdatedAt(tool: snapshot.tool),
-           providerUpdatedAt <= latest {
-            return nil
-        }
-
-        let fiveHour = snapshot.fiveHour.availableSnapshot
-        let weekly = snapshot.weekly.availableSnapshot
-        let today = snapshot.today
-        let carry = Self.carryForwardSegments(today)
-        let staleReason = snapshot.availability.reason
-
-        try execute(
-            """
-            INSERT INTO accepted_samples(
-              tool, plan_name, accepted_at, provider_updated_at,
-              five_hour_used, five_hour_resets_at, five_hour_updated_at, five_hour_duration, five_hour_source,
-              weekly_used, weekly_resets_at, weekly_updated_at, weekly_duration, weekly_source,
-              availability, stale_reason,
-              today_pct, today_allowance, today_severity, today_local_date,
-              today_weekly_start, today_weekly_now, today_days_remaining, today_reset_fired,
-              reset_provenance, carry_pre, carry_post
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            bindings: [
-                .text(snapshot.tool.rawValue),
-                .optionalText(snapshot.planName),
-                .double(acceptedAt.timeIntervalSince1970),
-                .double(providerUpdatedAt.timeIntervalSince1970),
-                .optionalDouble(fiveHour?.usedPercent),
-                .optionalDate(fiveHour?.resetsAt),
-                .optionalDate(fiveHour?.updatedAt),
-                .optionalInt(fiveHour?.windowDurationMins),
-                .optionalText(fiveHour?.sourceLabel),
-                .optionalDouble(weekly?.usedPercent),
-                .optionalDate(weekly?.resetsAt),
-                .optionalDate(weekly?.updatedAt),
-                .optionalInt(weekly?.windowDurationMins),
-                .optionalText(weekly?.sourceLabel),
-                .text(snapshot.availability.storageValue),
-                .optionalText(staleReason),
-                .optionalDouble(today?.pct),
-                .optionalDouble(today?.todayAllowanceOfWeek),
-                .optionalText(today?.severity.rawValue),
-                .optionalText(today?.basis.localDate),
-                .optionalDouble(today?.basis.weeklyUsedAtDayStart),
-                .optionalDouble(today?.basis.weeklyUsedNow),
-                .optionalDouble(today?.basis.daysRemainingUntilWeeklyReset),
-                .optionalBool(today?.basis.weeklyResetAlreadyFiredToday),
-                .optionalText(today?.basis.resetProvenance.rawValue),
-                .optionalDouble(carry.pre),
-                .optionalDouble(carry.post)
-            ]
-        )
-
-        let seq = sqlite3_last_insert_rowid(requiredDB())
-        if let today {
-            let peak = max(
-                try latestDailyState(tool: snapshot.tool, localDate: today.basis.localDate)?.peakWeeklyUsedPercent ?? 0,
-                today.basis.weeklyUsedAtDayStart,
-                today.basis.weeklyUsedNow
-            )
-            let state = UsageContinuityDailyState(
-                tool: snapshot.tool,
-                localDate: today.basis.localDate,
-                weeklyUsedAtDayStart: today.basis.weeklyUsedAtDayStart,
-                weeklyUsedNow: today.basis.weeklyUsedNow,
-                todayAllowanceOfWeek: today.todayAllowanceOfWeek,
-                daysRemainingUntilWeeklyReset: today.basis.daysRemainingUntilWeeklyReset,
-                weeklyResetAlreadyFiredToday: today.basis.weeklyResetAlreadyFiredToday,
-                resetProvenance: today.basis.resetProvenance,
-                peakWeeklyUsedPercent: peak,
-                carryForwardPreResetUsedPercent: carry.pre,
-                carryForwardPostResetUsedPercent: carry.post,
-                capturedAt: acceptedAt
-            )
-            try upsertDailyState(state)
-
-            if let metadata = today.basis.resetMetadata,
-               today.basis.resetProvenance == .explicitReset || today.basis.resetProvenance == .implicitReset {
-                try execute(
-                    """
-                    INSERT INTO reset_breadcrumbs(
-                      tool, local_date, provenance, prior_used, current_used,
-                      prior_resets_at, current_resets_at, drop_percent,
-                      accepted_sample_seq, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    bindings: [
-                        .text(snapshot.tool.rawValue),
-                        .text(today.basis.localDate),
-                        .text(today.basis.resetProvenance.rawValue),
-                        .double(metadata.priorUsedPercent),
-                        .double(metadata.currentUsedPercent),
-                        .double(metadata.priorResetsAt.timeIntervalSince1970),
-                        .double(metadata.currentResetsAt.timeIntervalSince1970),
-                        .double(metadata.dropPercent),
-                        .int64(seq),
-                        .double(acceptedAt.timeIntervalSince1970)
-                    ]
-                )
+        try withSQLiteLock {
+            let providerUpdatedAt = Self.providerUpdatedAt(for: snapshot) ?? acceptedAt
+            if let latest = try latestProviderUpdatedAt(tool: snapshot.tool),
+               providerUpdatedAt <= latest {
+                return nil
             }
-        }
 
-        return seq
+            let fiveHour = snapshot.fiveHour.availableSnapshot
+            let weekly = snapshot.weekly.availableSnapshot
+            let today = snapshot.today
+            let carry = Self.carryForwardSegments(today)
+            let staleReason = snapshot.availability.reason
+
+            try execute(
+                """
+                INSERT INTO accepted_samples(
+                  tool, plan_name, accepted_at, provider_updated_at,
+                  five_hour_used, five_hour_resets_at, five_hour_updated_at, five_hour_duration, five_hour_source,
+                  weekly_used, weekly_resets_at, weekly_updated_at, weekly_duration, weekly_source,
+                  availability, stale_reason,
+                  today_pct, today_allowance, today_severity, today_local_date,
+                  today_weekly_start, today_weekly_now, today_days_remaining, today_reset_fired,
+                  reset_provenance, carry_pre, carry_post
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                bindings: [
+                    .text(snapshot.tool.rawValue),
+                    .optionalText(snapshot.planName),
+                    .double(acceptedAt.timeIntervalSince1970),
+                    .double(providerUpdatedAt.timeIntervalSince1970),
+                    .optionalDouble(fiveHour?.usedPercent),
+                    .optionalDate(fiveHour?.resetsAt),
+                    .optionalDate(fiveHour?.updatedAt),
+                    .optionalInt(fiveHour?.windowDurationMins),
+                    .optionalText(fiveHour?.sourceLabel),
+                    .optionalDouble(weekly?.usedPercent),
+                    .optionalDate(weekly?.resetsAt),
+                    .optionalDate(weekly?.updatedAt),
+                    .optionalInt(weekly?.windowDurationMins),
+                    .optionalText(weekly?.sourceLabel),
+                    .text(snapshot.availability.storageValue),
+                    .optionalText(staleReason),
+                    .optionalDouble(today?.pct),
+                    .optionalDouble(today?.todayAllowanceOfWeek),
+                    .optionalText(today?.severity.rawValue),
+                    .optionalText(today?.basis.localDate),
+                    .optionalDouble(today?.basis.weeklyUsedAtDayStart),
+                    .optionalDouble(today?.basis.weeklyUsedNow),
+                    .optionalDouble(today?.basis.daysRemainingUntilWeeklyReset),
+                    .optionalBool(today?.basis.weeklyResetAlreadyFiredToday),
+                    .optionalText(today?.basis.resetProvenance.rawValue),
+                    .optionalDouble(carry.pre),
+                    .optionalDouble(carry.post)
+                ]
+            )
+
+            let seq = sqlite3_last_insert_rowid(requiredDB())
+            if let today {
+                let peak = max(
+                    try latestDailyState(tool: snapshot.tool, localDate: today.basis.localDate)?.peakWeeklyUsedPercent ?? 0,
+                    today.basis.weeklyUsedAtDayStart,
+                    today.basis.weeklyUsedNow
+                )
+                let state = UsageContinuityDailyState(
+                    tool: snapshot.tool,
+                    localDate: today.basis.localDate,
+                    weeklyUsedAtDayStart: today.basis.weeklyUsedAtDayStart,
+                    weeklyUsedNow: today.basis.weeklyUsedNow,
+                    todayAllowanceOfWeek: today.todayAllowanceOfWeek,
+                    daysRemainingUntilWeeklyReset: today.basis.daysRemainingUntilWeeklyReset,
+                    weeklyResetAlreadyFiredToday: today.basis.weeklyResetAlreadyFiredToday,
+                    resetProvenance: today.basis.resetProvenance,
+                    peakWeeklyUsedPercent: peak,
+                    carryForwardPreResetUsedPercent: carry.pre,
+                    carryForwardPostResetUsedPercent: carry.post,
+                    capturedAt: acceptedAt
+                )
+                try upsertDailyState(state)
+
+                if let metadata = today.basis.resetMetadata,
+                   today.basis.resetProvenance == .explicitReset || today.basis.resetProvenance == .implicitReset {
+                    try execute(
+                        """
+                        INSERT INTO reset_breadcrumbs(
+                          tool, local_date, provenance, prior_used, current_used,
+                          prior_resets_at, current_resets_at, drop_percent,
+                          accepted_sample_seq, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        bindings: [
+                            .text(snapshot.tool.rawValue),
+                            .text(today.basis.localDate),
+                            .text(today.basis.resetProvenance.rawValue),
+                            .double(metadata.priorUsedPercent),
+                            .double(metadata.currentUsedPercent),
+                            .double(metadata.priorResetsAt.timeIntervalSince1970),
+                            .double(metadata.currentResetsAt.timeIntervalSince1970),
+                            .double(metadata.dropPercent),
+                            .int64(seq),
+                            .double(acceptedAt.timeIntervalSince1970)
+                        ]
+                    )
+                }
+            }
+
+            return seq
+        }
     }
 
     public func latestSnapshot(tool: UsageTool) throws -> UsageSnapshot? {
-        var stmt: OpaquePointer?
-        let sql = """
-        SELECT plan_name, accepted_at,
-          five_hour_used, five_hour_resets_at, five_hour_updated_at, five_hour_duration, five_hour_source,
-          weekly_used, weekly_resets_at, weekly_updated_at, weekly_duration, weekly_source,
-          today_pct, today_allowance, today_severity, today_local_date,
-          today_weekly_start, today_weekly_now, today_days_remaining, today_reset_fired,
-          reset_provenance, carry_pre, carry_post
-        FROM accepted_samples WHERE tool = ? ORDER BY seq DESC LIMIT 1
-        """
-        guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
-            throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
+        try latestSnapshot(tool: tool, restoredForDisplay: true)
+    }
+
+    public func latestRecordedSnapshot(tool: UsageTool) throws -> UsageSnapshot? {
+        try latestSnapshot(tool: tool, restoredForDisplay: false)
+    }
+
+    private func latestSnapshot(tool: UsageTool, restoredForDisplay: Bool) throws -> UsageSnapshot? {
+        try withSQLiteLock {
+            var stmt: OpaquePointer?
+            let sql = """
+            SELECT plan_name, accepted_at,
+              five_hour_used, five_hour_resets_at, five_hour_updated_at, five_hour_duration, five_hour_source,
+              weekly_used, weekly_resets_at, weekly_updated_at, weekly_duration, weekly_source,
+              today_pct, today_allowance, today_severity, today_local_date,
+              today_weekly_start, today_weekly_now, today_days_remaining, today_reset_fired,
+              reset_provenance, carry_pre, carry_post,
+              availability, stale_reason
+            FROM accepted_samples WHERE tool = ? ORDER BY seq DESC LIMIT 1
+            """
+            guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
+                throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
+            }
+            defer { sqlite3_finalize(query) }
+            try bind(.text(tool.rawValue), to: query, index: 1)
+
+            guard sqlite3_step(query) == SQLITE_ROW else { return nil }
+            let planName = columnText(query, 0)
+            let acceptedAt = Date(timeIntervalSince1970: sqlite3_column_double(query, 1))
+            let fiveHour = Self.windowSlot(
+                kind: .fiveHour,
+                used: columnOptionalDouble(query, 2),
+                resetsAt: columnOptionalDate(query, 3),
+                updatedAt: columnOptionalDate(query, 4),
+                duration: columnOptionalInt(query, 5),
+                source: columnText(query, 6)
+            )
+            let weekly = Self.windowSlot(
+                kind: .weekly,
+                used: columnOptionalDouble(query, 7),
+                resetsAt: columnOptionalDate(query, 8),
+                updatedAt: columnOptionalDate(query, 9),
+                duration: columnOptionalInt(query, 10),
+                source: columnText(query, 11)
+            )
+            let today = Self.todayValue(from: query, startIndex: 12)
+            let storedAvailability = Self.availability(
+                storageValue: columnText(query, 23),
+                reason: columnText(query, 24)
+            )
+
+            return UsageSnapshot(
+                tool: tool,
+                planName: planName,
+                fiveHour: restoredForDisplay ? fiveHour : fiveHour.recordedSlot(for: storedAvailability),
+                weekly: restoredForDisplay ? weekly : weekly.recordedSlot(for: storedAvailability),
+                today: today,
+                availability: restoredForDisplay ? .stale(reason: Self.restoredReason) : storedAvailability,
+                lastRefresh: acceptedAt
+            )
         }
-        defer { sqlite3_finalize(query) }
-        try bind(.text(tool.rawValue), to: query, index: 1)
-
-        guard sqlite3_step(query) == SQLITE_ROW else { return nil }
-        let planName = columnText(query, 0)
-        let acceptedAt = Date(timeIntervalSince1970: sqlite3_column_double(query, 1))
-        let fiveHour = Self.windowSlot(
-            kind: .fiveHour,
-            used: columnOptionalDouble(query, 2),
-            resetsAt: columnOptionalDate(query, 3),
-            updatedAt: columnOptionalDate(query, 4),
-            duration: columnOptionalInt(query, 5),
-            source: columnText(query, 6)
-        )
-        let weekly = Self.windowSlot(
-            kind: .weekly,
-            used: columnOptionalDouble(query, 7),
-            resetsAt: columnOptionalDate(query, 8),
-            updatedAt: columnOptionalDate(query, 9),
-            duration: columnOptionalInt(query, 10),
-            source: columnText(query, 11)
-        )
-        let today = Self.todayValue(from: query, startIndex: 12)
-
-        return UsageSnapshot(
-            tool: tool,
-            planName: planName,
-            fiveHour: fiveHour,
-            weekly: weekly,
-            today: today,
-            availability: .stale(reason: Self.restoredReason),
-            lastRefresh: acceptedAt
-        )
     }
 
     public func latestDailyState(tool: UsageTool, localDate: String) throws -> UsageContinuityDailyState? {
-        var stmt: OpaquePointer?
-        let sql = """
-        SELECT weekly_start, weekly_now, today_allowance, days_remaining,
-          reset_fired, reset_provenance, peak_weekly_used, carry_pre, carry_post, captured_at
-        FROM daily_state WHERE tool = ? AND local_date = ? LIMIT 1
-        """
-        guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
-            throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
+        try withSQLiteLock {
+            var stmt: OpaquePointer?
+            let sql = """
+            SELECT weekly_start, weekly_now, today_allowance, days_remaining,
+              reset_fired, reset_provenance, peak_weekly_used, carry_pre, carry_post, captured_at
+            FROM daily_state WHERE tool = ? AND local_date = ? LIMIT 1
+            """
+            guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
+                throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
+            }
+            defer { sqlite3_finalize(query) }
+            try bind(.text(tool.rawValue), to: query, index: 1)
+            try bind(.text(localDate), to: query, index: 2)
+            guard sqlite3_step(query) == SQLITE_ROW else { return nil }
+            return UsageContinuityDailyState(
+                tool: tool,
+                localDate: localDate,
+                weeklyUsedAtDayStart: sqlite3_column_double(query, 0),
+                weeklyUsedNow: sqlite3_column_double(query, 1),
+                todayAllowanceOfWeek: sqlite3_column_double(query, 2),
+                daysRemainingUntilWeeklyReset: sqlite3_column_double(query, 3),
+                weeklyResetAlreadyFiredToday: sqlite3_column_int(query, 4) != 0,
+                resetProvenance: UsageResetProvenance(rawValue: columnText(query, 5) ?? "") ?? .ordinaryProgress,
+                peakWeeklyUsedPercent: sqlite3_column_double(query, 6),
+                carryForwardPreResetUsedPercent: columnOptionalDouble(query, 7),
+                carryForwardPostResetUsedPercent: columnOptionalDouble(query, 8),
+                capturedAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 9))
+            )
         }
-        defer { sqlite3_finalize(query) }
-        try bind(.text(tool.rawValue), to: query, index: 1)
-        try bind(.text(localDate), to: query, index: 2)
-        guard sqlite3_step(query) == SQLITE_ROW else { return nil }
-        return UsageContinuityDailyState(
-            tool: tool,
-            localDate: localDate,
-            weeklyUsedAtDayStart: sqlite3_column_double(query, 0),
-            weeklyUsedNow: sqlite3_column_double(query, 1),
-            todayAllowanceOfWeek: sqlite3_column_double(query, 2),
-            daysRemainingUntilWeeklyReset: sqlite3_column_double(query, 3),
-            weeklyResetAlreadyFiredToday: sqlite3_column_int(query, 4) != 0,
-            resetProvenance: UsageResetProvenance(rawValue: columnText(query, 5) ?? "") ?? .ordinaryProgress,
-            peakWeeklyUsedPercent: sqlite3_column_double(query, 6),
-            carryForwardPreResetUsedPercent: columnOptionalDouble(query, 7),
-            carryForwardPostResetUsedPercent: columnOptionalDouble(query, 8),
-            capturedAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 9))
-        )
     }
 
     public func acceptedSampleCount(tool: UsageTool? = nil) throws -> Int {
-        if let tool {
-            return try Int(queryDouble("SELECT COUNT(*) FROM accepted_samples WHERE tool = ?", bindings: [.text(tool.rawValue)]) ?? 0)
+        try withSQLiteLock {
+            if let tool {
+                return try Int(queryDouble("SELECT COUNT(*) FROM accepted_samples WHERE tool = ?", bindings: [.text(tool.rawValue)]) ?? 0)
+            }
+            return try Int(queryDouble("SELECT COUNT(*) FROM accepted_samples") ?? 0)
         }
-        return try Int(queryDouble("SELECT COUNT(*) FROM accepted_samples") ?? 0)
     }
 
     public func resetBreadcrumbCount(tool: UsageTool? = nil) throws -> Int {
-        if let tool {
-            return try Int(queryDouble("SELECT COUNT(*) FROM reset_breadcrumbs WHERE tool = ?", bindings: [.text(tool.rawValue)]) ?? 0)
+        try withSQLiteLock {
+            if let tool {
+                return try Int(queryDouble("SELECT COUNT(*) FROM reset_breadcrumbs WHERE tool = ?", bindings: [.text(tool.rawValue)]) ?? 0)
+            }
+            return try Int(queryDouble("SELECT COUNT(*) FROM reset_breadcrumbs") ?? 0)
         }
-        return try Int(queryDouble("SELECT COUNT(*) FROM reset_breadcrumbs") ?? 0)
     }
 
     public func latestAcceptedSampleSequence(tool: UsageTool) throws -> Int64? {
-        try queryDouble(
-            "SELECT seq FROM accepted_samples WHERE tool = ? ORDER BY seq DESC LIMIT 1",
-            bindings: [.text(tool.rawValue)]
-        ).map(Int64.init)
+        try withSQLiteLock {
+            try queryDouble(
+                "SELECT seq FROM accepted_samples WHERE tool = ? ORDER BY seq DESC LIMIT 1",
+                bindings: [.text(tool.rawValue)]
+            ).map(Int64.init)
+        }
     }
 
     public func repairRecords() throws -> [UsageContinuityRepairRecord] {
-        var stmt: OpaquePointer?
-        let sql = "SELECT original_path, preserved_path, reason, created_at FROM repairs ORDER BY id ASC"
-        guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
-            throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
+        try withSQLiteLock {
+            var stmt: OpaquePointer?
+            let sql = "SELECT original_path, preserved_path, reason, created_at FROM repairs ORDER BY id ASC"
+            guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
+                throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
+            }
+            defer { sqlite3_finalize(query) }
+            var records: [UsageContinuityRepairRecord] = []
+            var stepStatus = sqlite3_step(query)
+            while stepStatus == SQLITE_ROW {
+                records.append(UsageContinuityRepairRecord(
+                    originalPath: columnText(query, 0) ?? "",
+                    preservedPath: columnText(query, 1) ?? "",
+                    reason: columnText(query, 2) ?? "",
+                    createdAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 3))
+                ))
+                stepStatus = sqlite3_step(query)
+            }
+            guard stepStatus == SQLITE_DONE else {
+                throw UsageContinuityStoreError.stepFailed(lastErrorMessage())
+            }
+            return records
         }
-        defer { sqlite3_finalize(query) }
-        var records: [UsageContinuityRepairRecord] = []
-        while sqlite3_step(query) == SQLITE_ROW {
-            records.append(UsageContinuityRepairRecord(
-                originalPath: columnText(query, 0) ?? "",
-                preservedPath: columnText(query, 1) ?? "",
-                reason: columnText(query, 2) ?? "",
-                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 3))
-            ))
-        }
-        return records
     }
 
     public func recoveryReminderPreference(tool: UsageTool, windowKind: UsageWindowKind) throws -> UsageRecoveryReminderPreference {
-        var stmt: OpaquePointer?
-        let sql = "SELECT enabled, updated_at FROM recovery_reminder_preferences WHERE tool = ? AND window_kind = ? LIMIT 1"
-        guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
-            throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
-        }
-        defer { sqlite3_finalize(query) }
-        try bind(.text(tool.rawValue), to: query, index: 1)
-        try bind(.text(windowKind.rawValue), to: query, index: 2)
-        guard sqlite3_step(query) == SQLITE_ROW else {
+        try withSQLiteLock {
+            var stmt: OpaquePointer?
+            let sql = "SELECT enabled, updated_at FROM recovery_reminder_preferences WHERE tool = ? AND window_kind = ? LIMIT 1"
+            guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
+                throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
+            }
+            defer { sqlite3_finalize(query) }
+            try bind(.text(tool.rawValue), to: query, index: 1)
+            try bind(.text(windowKind.rawValue), to: query, index: 2)
+            guard sqlite3_step(query) == SQLITE_ROW else {
+                return UsageRecoveryReminderPreference(
+                    tool: tool,
+                    windowKind: windowKind,
+                    isEnabled: false,
+                    updatedAt: Date(timeIntervalSince1970: 0)
+                )
+            }
             return UsageRecoveryReminderPreference(
                 tool: tool,
                 windowKind: windowKind,
-                isEnabled: false,
-                updatedAt: Date(timeIntervalSince1970: 0)
+                isEnabled: sqlite3_column_int(query, 0) != 0,
+                updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 1))
             )
         }
-        return UsageRecoveryReminderPreference(
-            tool: tool,
-            windowKind: windowKind,
-            isEnabled: sqlite3_column_int(query, 0) != 0,
-            updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 1))
-        )
     }
 
     public func setRecoveryReminderPreference(
@@ -489,30 +530,32 @@ public final class UsageContinuityStore {
         windowKind: UsageWindowKind,
         resetIntervalID: String
     ) throws -> UsageRecoveryCandidate? {
-        var stmt: OpaquePointer?
-        let sql = """
-        SELECT accepted_sample_seq, prior_used, current_used, detected_at
-        FROM recovery_candidates
-        WHERE tool = ? AND window_kind = ? AND reset_interval_id = ?
-        LIMIT 1
-        """
-        guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
-            throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
+        try withSQLiteLock {
+            var stmt: OpaquePointer?
+            let sql = """
+            SELECT accepted_sample_seq, prior_used, current_used, detected_at
+            FROM recovery_candidates
+            WHERE tool = ? AND window_kind = ? AND reset_interval_id = ?
+            LIMIT 1
+            """
+            guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
+                throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
+            }
+            defer { sqlite3_finalize(query) }
+            try bind(.text(tool.rawValue), to: query, index: 1)
+            try bind(.text(windowKind.rawValue), to: query, index: 2)
+            try bind(.text(resetIntervalID), to: query, index: 3)
+            guard sqlite3_step(query) == SQLITE_ROW else { return nil }
+            return UsageRecoveryCandidate(
+                tool: tool,
+                windowKind: windowKind,
+                resetIntervalID: resetIntervalID,
+                acceptedSequence: sqlite3_column_int64(query, 0),
+                priorUsedPercent: sqlite3_column_double(query, 1),
+                currentUsedPercent: sqlite3_column_double(query, 2),
+                detectedAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 3))
+            )
         }
-        defer { sqlite3_finalize(query) }
-        try bind(.text(tool.rawValue), to: query, index: 1)
-        try bind(.text(windowKind.rawValue), to: query, index: 2)
-        try bind(.text(resetIntervalID), to: query, index: 3)
-        guard sqlite3_step(query) == SQLITE_ROW else { return nil }
-        return UsageRecoveryCandidate(
-            tool: tool,
-            windowKind: windowKind,
-            resetIntervalID: resetIntervalID,
-            acceptedSequence: sqlite3_column_int64(query, 0),
-            priorUsedPercent: sqlite3_column_double(query, 1),
-            currentUsedPercent: sqlite3_column_double(query, 2),
-            detectedAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 3))
-        )
     }
 
     public func recordRecoveryCandidate(_ candidate: UsageRecoveryCandidate) throws {
@@ -592,87 +635,97 @@ public final class UsageContinuityStore {
     }
 
     public func recoveryEdgeRecords(tool: UsageTool? = nil) throws -> [UsageRecoveryEdgeRecord] {
-        let sql: String
-        let bindings: [SQLiteBinding]
-        if let tool {
-            sql = """
-            SELECT tool, window_kind, reset_interval_id, detected_at, fired_at, reminder_identifier, error_message
-            FROM recovery_edges WHERE tool = ? ORDER BY detected_at ASC
-            """
-            bindings = [.text(tool.rawValue)]
-        } else {
-            sql = """
-            SELECT tool, window_kind, reset_interval_id, detected_at, fired_at, reminder_identifier, error_message
-            FROM recovery_edges ORDER BY detected_at ASC
-            """
-            bindings = []
-        }
-
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
-            throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
-        }
-        defer { sqlite3_finalize(query) }
-        for (offset, binding) in bindings.enumerated() {
-            try bind(binding, to: query, index: Int32(offset + 1))
-        }
-
-        var records: [UsageRecoveryEdgeRecord] = []
-        while sqlite3_step(query) == SQLITE_ROW {
-            guard let toolRaw = columnText(query, 0),
-                  let tool = UsageTool(rawValue: toolRaw),
-                  let windowRaw = columnText(query, 1),
-                  let windowKind = UsageWindowKind(rawValue: windowRaw),
-                  let resetIntervalID = columnText(query, 2) else {
-                continue
+        try withSQLiteLock {
+            let sql: String
+            let bindings: [SQLiteBinding]
+            if let tool {
+                sql = """
+                SELECT tool, window_kind, reset_interval_id, detected_at, fired_at, reminder_identifier, error_message
+                FROM recovery_edges WHERE tool = ? ORDER BY detected_at ASC
+                """
+                bindings = [.text(tool.rawValue)]
+            } else {
+                sql = """
+                SELECT tool, window_kind, reset_interval_id, detected_at, fired_at, reminder_identifier, error_message
+                FROM recovery_edges ORDER BY detected_at ASC
+                """
+                bindings = []
             }
-            records.append(UsageRecoveryEdgeRecord(
-                tool: tool,
-                windowKind: windowKind,
-                resetIntervalID: resetIntervalID,
-                detectedAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 3)),
-                firedAt: columnOptionalDate(query, 4),
-                reminderIdentifier: columnText(query, 5),
-                errorMessage: columnText(query, 6)
-            ))
+
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
+                throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
+            }
+            defer { sqlite3_finalize(query) }
+            for (offset, binding) in bindings.enumerated() {
+                try bind(binding, to: query, index: Int32(offset + 1))
+            }
+
+            var records: [UsageRecoveryEdgeRecord] = []
+            var stepStatus = sqlite3_step(query)
+            while stepStatus == SQLITE_ROW {
+                if let toolRaw = columnText(query, 0),
+                   let tool = UsageTool(rawValue: toolRaw),
+                   let windowRaw = columnText(query, 1),
+                   let windowKind = UsageWindowKind(rawValue: windowRaw),
+                   let resetIntervalID = columnText(query, 2) {
+                    records.append(UsageRecoveryEdgeRecord(
+                        tool: tool,
+                        windowKind: windowKind,
+                        resetIntervalID: resetIntervalID,
+                        detectedAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 3)),
+                        firedAt: columnOptionalDate(query, 4),
+                        reminderIdentifier: columnText(query, 5),
+                        errorMessage: columnText(query, 6)
+                    ))
+                }
+                stepStatus = sqlite3_step(query)
+            }
+            guard stepStatus == SQLITE_DONE else {
+                throw UsageContinuityStoreError.stepFailed(lastErrorMessage())
+            }
+            return records
         }
-        return records
     }
 
     public func thresholdNotificationPreference(tool: UsageTool) throws -> UsageThresholdNotificationPreference {
-        var stmt: OpaquePointer?
-        let sql = "SELECT enabled, updated_at FROM threshold_notification_preferences WHERE tool = ? LIMIT 1"
-        guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
-            throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
-        }
-        defer { sqlite3_finalize(query) }
-        try bind(.text(tool.rawValue), to: query, index: 1)
-        guard sqlite3_step(query) == SQLITE_ROW else {
+        try withSQLiteLock {
+            var stmt: OpaquePointer?
+            let sql = "SELECT enabled, updated_at FROM threshold_notification_preferences WHERE tool = ? LIMIT 1"
+            guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
+                throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
+            }
+            defer { sqlite3_finalize(query) }
+            try bind(.text(tool.rawValue), to: query, index: 1)
+            guard sqlite3_step(query) == SQLITE_ROW else {
+                return UsageThresholdNotificationPreference(
+                    tool: tool,
+                    isEnabled: false,
+                    updatedAt: Date(timeIntervalSince1970: 0)
+                )
+            }
             return UsageThresholdNotificationPreference(
                 tool: tool,
-                isEnabled: false,
-                updatedAt: Date(timeIntervalSince1970: 0)
+                isEnabled: sqlite3_column_int(query, 0) != 0,
+                updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 1))
             )
         }
-        return UsageThresholdNotificationPreference(
-            tool: tool,
-            isEnabled: sqlite3_column_int(query, 0) != 0,
-            updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 1))
-        )
     }
 
     public func thresholdNotificationsMasterEnabled() throws -> Bool {
-        var stmt: OpaquePointer?
-        let sql = "SELECT enabled FROM threshold_notification_preferences WHERE tool = ? LIMIT 1"
-        guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
-            throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
+        try withSQLiteLock {
+            var stmt: OpaquePointer?
+            let sql = "SELECT enabled FROM threshold_notification_preferences WHERE tool = ? LIMIT 1"
+            guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
+                throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
+            }
+            defer { sqlite3_finalize(query) }
+            try bind(.text("__master__"), to: query, index: 1)
+            guard sqlite3_step(query) == SQLITE_ROW else {
+                return false
+            }
+            return sqlite3_column_int(query, 0) != 0
         }
-        defer { sqlite3_finalize(query) }
-        try bind(.text("__master__"), to: query, index: 1)
-        guard sqlite3_step(query) == SQLITE_ROW else {
-            return false
-        }
-        return sqlite3_column_int(query, 0) != 0
     }
 
     public func setThresholdNotificationsMasterEnabled(isEnabled: Bool, updatedAt: Date) throws {
@@ -738,40 +791,46 @@ public final class UsageContinuityStore {
     }
 
     public func pendingThresholdNotificationRecords() throws -> [UsageThresholdNotificationRecord] {
-        var stmt: OpaquePointer?
-        let sql = """
-        SELECT tool, window_kind, threshold_pct, reset_interval_id, detected_at,
-          fired_at, reminder_identifier, last_error
-        FROM threshold_notification_records
-        WHERE fired_at IS NULL
-          AND (last_error IS NULL OR last_error NOT IN ('stale_interval', 'permission_denied', 'notifications_not_allowed'))
-        ORDER BY detected_at ASC
-        """
-        guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
-            throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
-        }
-        defer { sqlite3_finalize(query) }
-        var records: [UsageThresholdNotificationRecord] = []
-        while sqlite3_step(query) == SQLITE_ROW {
-            guard let toolRaw = columnText(query, 0),
-                  let tool = UsageTool(rawValue: toolRaw),
-                  let windowRaw = columnText(query, 1),
-                  let windowKind = UsageWindowKind(rawValue: windowRaw),
-                  let resetIntervalID = columnText(query, 3) else {
-                continue
+        try withSQLiteLock {
+            var stmt: OpaquePointer?
+            let sql = """
+            SELECT tool, window_kind, threshold_pct, reset_interval_id, detected_at,
+              fired_at, reminder_identifier, last_error
+            FROM threshold_notification_records
+            WHERE fired_at IS NULL
+              AND (last_error IS NULL OR last_error NOT IN ('stale_interval', 'permission_denied', 'notifications_not_allowed'))
+            ORDER BY detected_at ASC
+            """
+            guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
+                throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
             }
-            records.append(UsageThresholdNotificationRecord(
-                tool: tool,
-                windowKind: windowKind,
-                thresholdPct: sqlite3_column_double(query, 2),
-                resetIntervalID: resetIntervalID,
-                detectedAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 4)),
-                firedAt: columnOptionalDate(query, 5),
-                reminderIdentifier: columnText(query, 6),
-                lastError: columnText(query, 7)
-            ))
+            defer { sqlite3_finalize(query) }
+            var records: [UsageThresholdNotificationRecord] = []
+            var stepStatus = sqlite3_step(query)
+            while stepStatus == SQLITE_ROW {
+                if let toolRaw = columnText(query, 0),
+                   let tool = UsageTool(rawValue: toolRaw),
+                   let windowRaw = columnText(query, 1),
+                   let windowKind = UsageWindowKind(rawValue: windowRaw),
+                   let resetIntervalID = columnText(query, 3) {
+                    records.append(UsageThresholdNotificationRecord(
+                        tool: tool,
+                        windowKind: windowKind,
+                        thresholdPct: sqlite3_column_double(query, 2),
+                        resetIntervalID: resetIntervalID,
+                        detectedAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 4)),
+                        firedAt: columnOptionalDate(query, 5),
+                        reminderIdentifier: columnText(query, 6),
+                        lastError: columnText(query, 7)
+                    ))
+                }
+                stepStatus = sqlite3_step(query)
+            }
+            guard stepStatus == SQLITE_DONE else {
+                throw UsageContinuityStoreError.stepFailed(lastErrorMessage())
+            }
+            return records
         }
-        return records
     }
 
     public func markThresholdNotificationCreated(
@@ -826,34 +885,140 @@ public final class UsageContinuityStore {
 
     private static func createParentDirectory(for path: String) throws {
         let directory = URL(fileURLWithPath: path).deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        if directory.lastPathComponent == ".bough" {
+            try BoughPrivateStorage.ensurePrivateDirectory(at: directory)
+        } else {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
     }
 
     private func openOrRepair() throws {
+        let originalFiles = snapshotExistingSQLiteFiles()
         do {
             try open()
+            protectSQLiteFiles()
             try createSchema()
+            protectSQLiteFiles()
             try verifyIntegrity()
+            protectSQLiteFiles()
+            originalFiles?.remove()
         } catch {
             close()
-            guard FileManager.default.fileExists(atPath: path) else { throw error }
-            let preservedPath = "\(path).corrupt-\(Int(now().timeIntervalSince1970))"
-            try? FileManager.default.removeItem(atPath: preservedPath)
-            try FileManager.default.moveItem(atPath: path, toPath: preservedPath)
+            guard shouldRepairSQLiteStore(after: error) else {
+                originalFiles?.remove()
+                throw error
+            }
+            guard FileManager.default.fileExists(atPath: path) || originalFiles != nil else { throw error }
+            let preservedPath = "\(path).corrupt-\(Int(now().timeIntervalSince1970))-\(UUID().uuidString)"
+            try preserveCorruptSQLiteFiles(preservedPath: preservedPath, originalFiles: originalFiles)
             try open()
+            protectSQLiteFiles()
             try createSchema()
+            protectSQLiteFiles()
             try recordRepair(originalPath: path, preservedPath: preservedPath, reason: "\(error)")
+            protectSQLiteFiles()
+        }
+    }
+
+    private func shouldRepairSQLiteStore(after error: Error) -> Bool {
+        if error is SQLiteIntegrityCheckError { return true }
+        guard let sqliteError = error as? SQLiteOperationError else { return false }
+        return sqliteError.isCorruption
+    }
+
+    private func protectSQLiteFiles() {
+        BoughPrivateStorage.protectPrivateFileIfPresent(atPath: path)
+        BoughPrivateStorage.protectPrivateFileIfPresent(atPath: path + "-wal")
+        BoughPrivateStorage.protectPrivateFileIfPresent(atPath: path + "-shm")
+    }
+
+    private struct SQLiteFileSnapshot {
+        let mainPath: String
+        let walPath: String?
+        let shmPath: String?
+
+        func remove() {
+            let fm = FileManager.default
+            try? fm.removeItem(atPath: mainPath)
+            if let walPath { try? fm.removeItem(atPath: walPath) }
+            if let shmPath { try? fm.removeItem(atPath: shmPath) }
+        }
+    }
+
+    private func snapshotExistingSQLiteFiles() -> SQLiteFileSnapshot? {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: path) else { return nil }
+
+        let backupBase = "\(path).repair-backup-\(Int(now().timeIntervalSince1970))-\(UUID().uuidString)"
+        do {
+            try fm.copyItem(atPath: path, toPath: backupBase)
+            var walBackup: String?
+            var shmBackup: String?
+            for suffix in ["-wal", "-shm"] {
+                let sidecarPath = path + suffix
+                guard fm.fileExists(atPath: sidecarPath) else { continue }
+                let backupPath = backupBase + suffix
+                try fm.copyItem(atPath: sidecarPath, toPath: backupPath)
+                if suffix == "-wal" {
+                    walBackup = backupPath
+                } else {
+                    shmBackup = backupPath
+                }
+            }
+            return SQLiteFileSnapshot(mainPath: backupBase, walPath: walBackup, shmPath: shmBackup)
+        } catch {
+            try? fm.removeItem(atPath: backupBase)
+            try? fm.removeItem(atPath: backupBase + "-wal")
+            try? fm.removeItem(atPath: backupBase + "-shm")
+            return nil
+        }
+    }
+
+    private func preserveCorruptSQLiteFiles(preservedPath: String, originalFiles: SQLiteFileSnapshot?) throws {
+        let fm = FileManager.default
+
+        if let originalFiles {
+            try? fm.removeItem(atPath: path)
+            try? fm.removeItem(atPath: path + "-wal")
+            try? fm.removeItem(atPath: path + "-shm")
+            try fm.moveItem(atPath: originalFiles.mainPath, toPath: preservedPath)
+            if let walPath = originalFiles.walPath {
+                try? fm.moveItem(atPath: walPath, toPath: preservedPath + "-wal")
+            }
+            if let shmPath = originalFiles.shmPath {
+                try? fm.moveItem(atPath: shmPath, toPath: preservedPath + "-shm")
+            }
+            originalFiles.remove()
+            return
+        }
+
+        try fm.moveItem(atPath: path, toPath: preservedPath)
+        moveSQLiteSidecarIfPresent(suffix: "-wal", preservedPath: preservedPath)
+        moveSQLiteSidecarIfPresent(suffix: "-shm", preservedPath: preservedPath)
+    }
+
+    private func moveSQLiteSidecarIfPresent(suffix: String, preservedPath: String) {
+        let fm = FileManager.default
+        let sidecarPath = path + suffix
+        guard fm.fileExists(atPath: sidecarPath) else { return }
+        do {
+            try fm.moveItem(atPath: sidecarPath, toPath: preservedPath + suffix)
+        } catch {
+            try? fm.removeItem(atPath: sidecarPath)
         }
     }
 
     private func open() throws {
         var handle: OpaquePointer?
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX
-        guard sqlite3_open_v2(path, &handle, flags, nil) == SQLITE_OK, let handle else {
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+        let status = sqlite3_open_v2(path, &handle, flags, nil)
+        guard status == SQLITE_OK, let handle else {
             let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "sqlite3_open_v2 failed"
+            let code = handle.map { sqlite3_errcode($0) } ?? status
             if let handle { sqlite3_close_v2(handle) }
-            throw UsageContinuityStoreError.openFailed(message)
+            throw SQLiteOperationError(operation: "open", code: code, message: message)
         }
+        sqlite3_extended_result_codes(handle, 1)
         sqlite3_busy_timeout(handle, 1000)
         db = handle
     }
@@ -1012,13 +1177,90 @@ public final class UsageContinuityStore {
           PRIMARY KEY(tool, window_kind, reset_interval_id)
         )
         """)
-        try execute("INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '1')")
+        try migrateSchema()
+        try execute("INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '2')")
+    }
+
+    private struct ColumnMigration {
+        let name: String
+        let definition: String
+    }
+
+    private func migrateSchema() throws {
+        try ensureColumns(
+            table: "accepted_samples",
+            columns: [
+                ColumnMigration(name: "plan_name", definition: "TEXT"),
+                ColumnMigration(name: "provider_updated_at", definition: "REAL NOT NULL DEFAULT 0"),
+                ColumnMigration(name: "five_hour_used", definition: "REAL"),
+                ColumnMigration(name: "five_hour_resets_at", definition: "REAL"),
+                ColumnMigration(name: "five_hour_updated_at", definition: "REAL"),
+                ColumnMigration(name: "five_hour_duration", definition: "INTEGER"),
+                ColumnMigration(name: "five_hour_source", definition: "TEXT"),
+                ColumnMigration(name: "weekly_used", definition: "REAL"),
+                ColumnMigration(name: "weekly_resets_at", definition: "REAL"),
+                ColumnMigration(name: "weekly_updated_at", definition: "REAL"),
+                ColumnMigration(name: "weekly_duration", definition: "INTEGER"),
+                ColumnMigration(name: "weekly_source", definition: "TEXT"),
+                ColumnMigration(name: "availability", definition: "TEXT NOT NULL DEFAULT 'available'"),
+                ColumnMigration(name: "stale_reason", definition: "TEXT"),
+                ColumnMigration(name: "today_pct", definition: "REAL"),
+                ColumnMigration(name: "today_allowance", definition: "REAL"),
+                ColumnMigration(name: "today_severity", definition: "TEXT"),
+                ColumnMigration(name: "today_local_date", definition: "TEXT"),
+                ColumnMigration(name: "today_weekly_start", definition: "REAL"),
+                ColumnMigration(name: "today_weekly_now", definition: "REAL"),
+                ColumnMigration(name: "today_days_remaining", definition: "REAL"),
+                ColumnMigration(name: "today_reset_fired", definition: "INTEGER"),
+                ColumnMigration(name: "reset_provenance", definition: "TEXT"),
+                ColumnMigration(name: "carry_pre", definition: "REAL"),
+                ColumnMigration(name: "carry_post", definition: "REAL")
+            ]
+        )
+        try ensureColumns(
+            table: "daily_state",
+            columns: [
+                ColumnMigration(name: "reset_provenance", definition: "TEXT NOT NULL DEFAULT 'ordinary_progress'"),
+                ColumnMigration(name: "peak_weekly_used", definition: "REAL NOT NULL DEFAULT 0"),
+                ColumnMigration(name: "carry_pre", definition: "REAL"),
+                ColumnMigration(name: "carry_post", definition: "REAL")
+            ]
+        )
+    }
+
+    private func ensureColumns(table: String, columns: [ColumnMigration]) throws {
+        let existing = try columnNames(in: table)
+        for column in columns where !existing.contains(column.name) {
+            try execute("ALTER TABLE \(table) ADD COLUMN \(column.name) \(column.definition)")
+        }
+    }
+
+    private func columnNames(in table: String) throws -> Set<String> {
+        var stmt: OpaquePointer?
+        let prepareStatus = sqlite3_prepare_v2(requiredDB(), "PRAGMA table_info(\(table))", -1, &stmt, nil)
+        guard prepareStatus == SQLITE_OK, let query = stmt else {
+            throw sqliteOperationError("prepare", status: prepareStatus)
+        }
+        defer { sqlite3_finalize(query) }
+
+        var names = Set<String>()
+        var status = sqlite3_step(query)
+        while status == SQLITE_ROW {
+            if let name = columnText(query, 1) {
+                names.insert(name)
+            }
+            status = sqlite3_step(query)
+        }
+        guard status == SQLITE_DONE else {
+            throw sqliteOperationError("step", status: status)
+        }
+        return names
     }
 
     private func verifyIntegrity() throws {
         let result = try queryString("PRAGMA integrity_check")
         guard result == "ok" else {
-            throw UsageContinuityStoreError.executeFailed("integrity_check: \(result ?? "nil")")
+            throw SQLiteIntegrityCheckError(result: result)
         }
     }
 
@@ -1073,6 +1315,12 @@ public final class UsageContinuityStore {
 
     // MARK: - SQLite helpers
 
+    private func withSQLiteLock<T>(_ body: () throws -> T) rethrows -> T {
+        sqliteLock.lock()
+        defer { sqliteLock.unlock() }
+        return try body()
+    }
+
     private enum SQLiteBinding {
         case null
         case text(String)
@@ -1102,45 +1350,96 @@ public final class UsageContinuityStore {
         }
     }
 
+    private struct SQLiteOperationError: Error, CustomStringConvertible {
+        let operation: String
+        let code: Int32
+        let message: String
+
+        private var primaryCode: Int32 { code & 0xFF }
+
+        var isCorruption: Bool {
+            primaryCode == SQLITE_CORRUPT || primaryCode == SQLITE_NOTADB
+        }
+
+        var description: String {
+            "\(operation) failed (\(Self.codeName(primaryCode))): \(message)"
+        }
+
+        private static func codeName(_ code: Int32) -> String {
+            switch code {
+            case SQLITE_BUSY: return "SQLITE_BUSY"
+            case SQLITE_LOCKED: return "SQLITE_LOCKED"
+            case SQLITE_CORRUPT: return "SQLITE_CORRUPT"
+            case SQLITE_NOTADB: return "SQLITE_NOTADB"
+            default: return "SQLITE_\(code)"
+            }
+        }
+    }
+
+    private struct SQLiteIntegrityCheckError: Error, CustomStringConvertible {
+        let result: String?
+
+        var description: String {
+            "integrity_check failed: \(result ?? "nil")"
+        }
+    }
+
     private func execute(_ sql: String, bindings: [SQLiteBinding] = []) throws {
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
-            throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
-        }
-        defer { sqlite3_finalize(query) }
-        for (offset, binding) in bindings.enumerated() {
-            try bind(binding, to: query, index: Int32(offset + 1))
-        }
-        let status = sqlite3_step(query)
-        guard status == SQLITE_DONE || status == SQLITE_ROW else {
-            throw UsageContinuityStoreError.stepFailed(lastErrorMessage())
+        try withSQLiteLock {
+            var stmt: OpaquePointer?
+            let prepareStatus = sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil)
+            guard prepareStatus == SQLITE_OK, let query = stmt else {
+                throw sqliteOperationError("prepare", status: prepareStatus)
+            }
+            defer { sqlite3_finalize(query) }
+            for (offset, binding) in bindings.enumerated() {
+                try bind(binding, to: query, index: Int32(offset + 1))
+            }
+            let status = sqlite3_step(query)
+            guard status == SQLITE_DONE || status == SQLITE_ROW else {
+                throw sqliteOperationError("step", status: status)
+            }
         }
     }
 
     private func queryString(_ sql: String, bindings: [SQLiteBinding] = []) throws -> String? {
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
-            throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
+        try withSQLiteLock {
+            var stmt: OpaquePointer?
+            let prepareStatus = sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil)
+            guard prepareStatus == SQLITE_OK, let query = stmt else {
+                throw sqliteOperationError("prepare", status: prepareStatus)
+            }
+            defer { sqlite3_finalize(query) }
+            for (offset, binding) in bindings.enumerated() {
+                try bind(binding, to: query, index: Int32(offset + 1))
+            }
+            let status = sqlite3_step(query)
+            guard status == SQLITE_ROW else {
+                if status == SQLITE_DONE { return nil }
+                throw sqliteOperationError("step", status: status)
+            }
+            return columnText(query, 0)
         }
-        defer { sqlite3_finalize(query) }
-        for (offset, binding) in bindings.enumerated() {
-            try bind(binding, to: query, index: Int32(offset + 1))
-        }
-        guard sqlite3_step(query) == SQLITE_ROW else { return nil }
-        return columnText(query, 0)
     }
 
     private func queryDouble(_ sql: String, bindings: [SQLiteBinding] = []) throws -> Double? {
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil) == SQLITE_OK, let query = stmt else {
-            throw UsageContinuityStoreError.prepareFailed(lastErrorMessage())
+        try withSQLiteLock {
+            var stmt: OpaquePointer?
+            let prepareStatus = sqlite3_prepare_v2(requiredDB(), sql, -1, &stmt, nil)
+            guard prepareStatus == SQLITE_OK, let query = stmt else {
+                throw sqliteOperationError("prepare", status: prepareStatus)
+            }
+            defer { sqlite3_finalize(query) }
+            for (offset, binding) in bindings.enumerated() {
+                try bind(binding, to: query, index: Int32(offset + 1))
+            }
+            let status = sqlite3_step(query)
+            guard status == SQLITE_ROW else {
+                if status == SQLITE_DONE { return nil }
+                throw sqliteOperationError("step", status: status)
+            }
+            return sqlite3_column_double(query, 0)
         }
-        defer { sqlite3_finalize(query) }
-        for (offset, binding) in bindings.enumerated() {
-            try bind(binding, to: query, index: Int32(offset + 1))
-        }
-        guard sqlite3_step(query) == SQLITE_ROW else { return nil }
-        return sqlite3_column_double(query, 0)
     }
 
     private func latestProviderUpdatedAt(tool: UsageTool) throws -> Date? {
@@ -1169,7 +1468,7 @@ public final class UsageContinuityStore {
             status = sqlite3_bind_int(stmt, index, value ? 1 : 0)
         }
         guard status == SQLITE_OK else {
-            throw UsageContinuityStoreError.bindFailed(lastErrorMessage())
+            throw sqliteOperationError("bind", status: status)
         }
     }
 
@@ -1195,6 +1494,12 @@ public final class UsageContinuityStore {
 
     private func lastErrorMessage() -> String {
         db.map { String(cString: sqlite3_errmsg($0)) } ?? "sqlite handle unavailable"
+    }
+
+    private func sqliteOperationError(_ operation: String, status: Int32) -> SQLiteOperationError {
+        let code = db.map { sqlite3_errcode($0) } ?? status
+        let message = db.map { String(cString: sqlite3_errmsg($0)) } ?? "sqlite handle unavailable"
+        return SQLiteOperationError(operation: operation, code: code == SQLITE_OK ? status : code, message: message)
     }
 
     private static let sqliteTransient = unsafeBitCast(
@@ -1262,6 +1567,24 @@ public final class UsageContinuityStore {
         )
         return TodayValue(pct: pct, todayAllowanceOfWeek: allowance, severity: severity, basis: basis)
     }
+
+    private static func availability(storageValue: String?, reason: String?) -> UsageAvailability {
+        let fallbackReason = reason ?? restoredReason
+        switch storageValue {
+        case "loading":
+            return .loading
+        case "available":
+            return .available
+        case "partial":
+            return .partial(reason: fallbackReason)
+        case "stale":
+            return .stale(reason: fallbackReason)
+        case "unavailable":
+            return .unavailable(reason: fallbackReason)
+        default:
+            return .stale(reason: restoredReason)
+        }
+    }
 }
 
 private extension UsageWindowSlot {
@@ -1271,6 +1594,19 @@ private extension UsageWindowSlot {
             return snapshot
         case .loading, .unavailable:
             return nil
+        }
+    }
+
+    func recordedSlot(for availability: UsageAvailability) -> UsageWindowSlot {
+        switch (self, availability) {
+        case (.stale(let snapshot, _), .available):
+            return .available(snapshot)
+        case (.stale(let snapshot, _), .partial):
+            return .available(snapshot)
+        case (.stale(let snapshot, _), .stale(let reason)):
+            return .stale(snapshot, reason: reason)
+        default:
+            return self
         }
     }
 }

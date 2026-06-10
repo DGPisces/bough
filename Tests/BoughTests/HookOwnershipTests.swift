@@ -20,6 +20,11 @@ final class HookOwnershipTests: XCTestCase {
             previousVibeDash,
             "\(previousVibeTitle)_v2",
             "\(previousProductLower)-managed-start",
+            "/Users/test/.bough/bin/bough-bridge-old --source copilot",
+            "/usr/local/bin/my-bough-hook",
+            "/usr/local/bin/my-bough-bridge",
+            "file:///user/my-bough-plugin.js",
+            "echo bough",
         ] {
             XCTAssertFalse(
                 ConfigInstaller.testHookIdIsOurs(s),
@@ -31,6 +36,9 @@ final class HookOwnershipTests: XCTestCase {
     func testIsOurs_matchesBoughStrings() {
         for s in [
             "bough-bridge",
+            "bough-bridge --source codex",
+            "/Users/test/.bough/bin/bough-bridge --source codex",
+            "~/.bough/bin/bough-bridge --source codex",
             "/tmp/bough-501.sock",
             "~/.bough/bough-hook.sh",
             "bough-hook-v1-start",
@@ -78,14 +86,16 @@ final class HookOwnershipTests: XCTestCase {
         XCTAssertTrue(after.contains("# bough-hook-v1-end"))
     }
 
-    func testSharedHookScriptCarriesBoughHookV1MarkerBlock() {
+    func testSharedHookScriptCarriesBoughHookV1MarkerBlock() throws {
         let script = ConfigInstaller.testSharedHookScriptTemplate
 
         XCTAssertEqual(script.components(separatedBy: "# bough-hook-v1-start").count - 1, 1)
         XCTAssertEqual(script.components(separatedBy: "# bough-hook-v1-end").count - 1, 1)
+        let start = try XCTUnwrap(script.range(of: "# bough-hook-v1-start"))
+        let end = try XCTUnwrap(script.range(of: "# bough-hook-v1-end"))
         XCTAssertLessThan(
-            script.range(of: "# bough-hook-v1-start")!.lowerBound,
-            script.range(of: "# bough-hook-v1-end")!.lowerBound
+            start.lowerBound,
+            end.lowerBound
         )
     }
 

@@ -140,8 +140,7 @@ final class PerformanceBenchmarks: XCTestCase {
                 "content": [["type": "text", "text": text]]
             ]
         ]
-        let data = try! JSONSerialization.data(withJSONObject: payload)
-        return String(data: data, encoding: .utf8)!
+        return jsonLine(payload)
     }
 
     private static func makeUserLine(textLength: Int) -> String {
@@ -150,8 +149,7 @@ final class PerformanceBenchmarks: XCTestCase {
             "type": "user",
             "message": ["content": text]
         ]
-        let data = try! JSONSerialization.data(withJSONObject: payload)
-        return String(data: data, encoding: .utf8)!
+        return jsonLine(payload)
     }
 
     private static func makeToolUseLine() -> String {
@@ -166,8 +164,7 @@ final class PerformanceBenchmarks: XCTestCase {
                 ]]
             ]
         ]
-        let data = try! JSONSerialization.data(withJSONObject: payload)
-        return String(data: data, encoding: .utf8)!
+        return jsonLine(payload)
     }
 
     private static func makeToolResultLine() -> String {
@@ -181,8 +178,19 @@ final class PerformanceBenchmarks: XCTestCase {
                 ]]
             ]
         ]
-        let data = try! JSONSerialization.data(withJSONObject: payload)
-        return String(data: data, encoding: .utf8)!
+        return jsonLine(payload)
+    }
+
+    private static func jsonLine(_ payload: [String: Any]) -> String {
+        do {
+            let data = try JSONSerialization.data(withJSONObject: payload)
+            guard let string = String(data: data, encoding: .utf8) else {
+                preconditionFailure("Performance fixture encoded non-UTF8 data")
+            }
+            return string
+        } catch {
+            preconditionFailure("Performance fixture is not serializable: \(error)")
+        }
     }
 
     private static func seedWarpDatabase(at path: String, paneCount: Int) throws {

@@ -23,6 +23,7 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
     private var originalHome: String?
     private var defaults: UserDefaults!
     private var suiteName: String!
+    private var lockedEnvironment = false
     private let tz = TimeZone.current
     private let cal = Calendar.current
 
@@ -31,6 +32,8 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
         tempHome = FileManager.default.temporaryDirectory
             .appendingPathComponent("UsagePersistenceBundleSwapTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tempHome, withIntermediateDirectories: true)
+        TestHelpers.processEnvironmentLock.lock()
+        lockedEnvironment = true
         originalHome = ProcessInfo.processInfo.environment["HOME"]
         setenv("HOME", tempHome.path, 1)
 
@@ -40,9 +43,21 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
-        if let original = originalHome { setenv("HOME", original, 1) } else { unsetenv("HOME") }
-        try? FileManager.default.removeItem(at: tempHome)
-        defaults.removePersistentDomain(forName: suiteName)
+        if lockedEnvironment {
+            if let original = originalHome { setenv("HOME", original, 1) } else { unsetenv("HOME") }
+        }
+        if let tempHome {
+            try? FileManager.default.removeItem(at: tempHome)
+        }
+        if let defaults, let suiteName {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        defaults = nil
+        suiteName = nil
+        if lockedEnvironment {
+            TestHelpers.processEnvironmentLock.unlock()
+            lockedEnvironment = false
+        }
         try super.tearDownWithError()
     }
 
@@ -53,9 +68,9 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
     /// snapshot and the first fresh sample should compute the correct Today %.
     func test_today_percent_survives_cold_start_R1_manual_quit_app_owned() throws {
         let now = Date()
-        try seedJSON(localDate: today(now: now), weeklyUsedAtDayStart: 20, tz: tz)
+        try seedJSON(localDate: try today(now: now), weeklyUsedAtDayStart: 20, tz: tz)
         let path = continuityPath()
-        try seedSQLite(path: path, localDate: today(now: now), weeklyUsed: 35, todayPct: 70)
+        try seedSQLite(path: path, localDate: try today(now: now), weeklyUsed: 35, todayPct: 70)
 
         let continuity = try UsageContinuityStore(path: path)
         let store = UsageStore(
@@ -69,7 +84,14 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
 
         XCTAssertTrue(store.applyCodexRateLimitResult(Self.codexResult(weeklyUsedPercent: 38)))
         let snap = store.snapshot(for: .codex)
-        try assertNot100(snap, now: now, row: "R1")
+        try assertToday(
+            snap,
+            now: now,
+            row: "R1",
+            weeklyUsedAtDayStart: 20,
+            weeklyUsedNow: 38,
+            todayAllowanceOfWeek: 80.0 / 7.0
+        )
     }
 
     /// R2: Manual `Bough.app` quit → relaunch, helper-owned writer mode. App
@@ -77,9 +99,9 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
     /// `UsageMonitorRunner.acceptCodexRateLimitResult`.
     func test_today_percent_survives_cold_start_R2_manual_quit_helper_owned() throws {
         let now = Date()
-        try seedJSON(localDate: today(now: now), weeklyUsedAtDayStart: 20, tz: tz)
+        try seedJSON(localDate: try today(now: now), weeklyUsedAtDayStart: 20, tz: tz)
         let path = continuityPath()
-        try seedSQLite(path: path, localDate: today(now: now), weeklyUsed: 35, todayPct: 70)
+        try seedSQLite(path: path, localDate: try today(now: now), weeklyUsed: 35, todayPct: 70)
 
         // Helper processes the fresh sample first.
         let helperContinuity = try UsageContinuityStore(path: path)
@@ -110,16 +132,55 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
             continuityWriteMode: .helperOwned
         )
         let snap = store.snapshot(for: .codex)
-        try assertNot100(snap, now: now, row: "R2")
+        try assertToday(
+            snap,
+            now: now,
+            row: "R2",
+            weeklyUsedAtDayStart: 20,
+            weeklyUsedNow: 38,
+            todayAllowanceOfWeek: 80.0 / 7.0
+        )
+    }
+
+    func test_usage_monitor_status_file_is_private_when_helper_creates_bough_dir() throws {
+        let now = Date()
+        let statusURL = tempHome.appendingPathComponent(".bough/usage-monitor-status.json")
+        let continuity = try UsageContinuityStore(path: tempHome.appendingPathComponent("monitor-continuity.sqlite").path)
+        let runner = UsageMonitorRunner(
+            continuityStore: continuity,
+            statusPath: statusURL.path,
+            now: { now },
+            calendar: cal,
+            timeZone: tz
+        )
+
+        let outcome = runner.acceptCodexRateLimitResult(
+            Self.codexResult(weeklyUsedPercent: 38),
+            receivedAt: now
+        )
+
+        guard case .accepted = outcome else {
+            XCTFail("Helper did not accept the fresh sample: \(outcome)")
+            return
+        }
+
+        XCTAssertEqual(
+            try posixPermissions(statusURL.deletingLastPathComponent()),
+            BoughPrivateStorage.directoryPermissions
+        )
+        XCTAssertEqual(
+            try posixPermissions(statusURL),
+            BoughPrivateStorage.filePermissions
+        )
     }
 
     /// R3: Same-session relaunch with stale `.stale("Restored from continuity store")`
     /// snapshot replacing the live snapshot in `UsageStore.snapshots`. App-owned mode.
     func test_today_percent_survives_cold_start_R3_relaunch_app_owned() throws {
         let now = Date()
-        try seedJSON(localDate: today(now: now), weeklyUsedAtDayStart: 30, tz: tz)
+        try seedJSON(localDate: try today(now: now), weeklyUsedAtDayStart: 30, tz: tz)
         let path = continuityPath()
-        try seedSQLite(path: path, localDate: today(now: now), weeklyUsed: 45, todayPct: 60)
+        try seedSQLite(path: path, localDate: try today(now: now), weeklyUsed: 45, todayPct: 60)
 
         let continuity = try UsageContinuityStore(path: path)
         let store = UsageStore(
@@ -133,16 +194,23 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
 
         XCTAssertTrue(store.applyCodexRateLimitResult(Self.codexResult(weeklyUsedPercent: 48)))
         let snap = store.snapshot(for: .codex)
-        try assertNot100(snap, now: now, row: "R3")
+        try assertToday(
+            snap,
+            now: now,
+            row: "R3",
+            weeklyUsedAtDayStart: 30,
+            weeklyUsedNow: 48,
+            todayAllowanceOfWeek: 70.0 / 7.0
+        )
     }
 
     /// R4: Same-session relaunch in helper-owned mode. Helper accepts first;
     /// app then restores and displays.
     func test_today_percent_survives_cold_start_R4_relaunch_helper_owned() throws {
         let now = Date()
-        try seedJSON(localDate: today(now: now), weeklyUsedAtDayStart: 30, tz: tz)
+        try seedJSON(localDate: try today(now: now), weeklyUsedAtDayStart: 30, tz: tz)
         let path = continuityPath()
-        try seedSQLite(path: path, localDate: today(now: now), weeklyUsed: 45, todayPct: 60)
+        try seedSQLite(path: path, localDate: try today(now: now), weeklyUsed: 45, todayPct: 60)
 
         let helperContinuity = try UsageContinuityStore(path: path)
         let runner = UsageMonitorRunner(
@@ -152,7 +220,14 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
             calendar: cal,
             timeZone: tz
         )
-        _ = runner.acceptCodexRateLimitResult(Self.codexResult(weeklyUsedPercent: 48), receivedAt: now)
+        let helperOutcome = runner.acceptCodexRateLimitResult(
+            Self.codexResult(weeklyUsedPercent: 48),
+            receivedAt: now
+        )
+        guard case .accepted = helperOutcome else {
+            XCTFail("Helper did not accept the fresh sample (R4): \(helperOutcome)")
+            return
+        }
 
         let appContinuity = try UsageContinuityStore(path: path)
         let store = UsageStore(
@@ -164,7 +239,14 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
             continuityWriteMode: .helperOwned
         )
         let snap = store.snapshot(for: .codex)
-        try assertNot100(snap, now: now, row: "R4")
+        try assertToday(
+            snap,
+            now: now,
+            row: "R4",
+            weeklyUsedAtDayStart: 30,
+            weeklyUsedNow: 48,
+            todayAllowanceOfWeek: 70.0 / 7.0
+        )
     }
 
     /// R5: Sparkle bundle replacement consequence. SQLite-only seed (legacy
@@ -174,7 +256,7 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
         let now = Date()
         // Intentionally no seedJSON call. usage-daily.json is absent.
         let path = continuityPath()
-        try seedSQLite(path: path, localDate: today(now: now), weeklyUsed: 28, todayPct: 55)
+        try seedSQLite(path: path, localDate: try today(now: now), weeklyUsed: 28, todayPct: 55)
 
         let continuity = try UsageContinuityStore(path: path)
         let store = UsageStore(
@@ -188,7 +270,14 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
 
         XCTAssertTrue(store.applyCodexRateLimitResult(Self.codexResult(weeklyUsedPercent: 30)))
         let snap = store.snapshot(for: .codex)
-        try assertNot100(snap, now: now, row: "R5")
+        try assertToday(
+            snap,
+            now: now,
+            row: "R5",
+            weeklyUsedAtDayStart: 20,
+            weeklyUsedNow: 30,
+            todayAllowanceOfWeek: 14
+        )
     }
 
     /// R6: Dual-store contamination where JSON carries a stale yesterday
@@ -197,8 +286,8 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
     /// bug at the heart of V040-QUAL-01.
     func test_today_percent_survives_cold_start_R6_dual_store_contamination() throws {
         let now = Date()
-        let yesterday = today(now: now.addingTimeInterval(-86400))
-        let today = today(now: now)
+        let yesterday = try today(now: now.addingTimeInterval(-86400))
+        let today = try today(now: now)
         try seedJSON(localDate: yesterday, weeklyUsedAtDayStart: 20, tz: tz)
         let path = continuityPath()
         try seedSQLite(path: path, localDate: today, weeklyUsed: 35, todayPct: 70)
@@ -215,32 +304,71 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
 
         XCTAssertTrue(store.applyCodexRateLimitResult(Self.codexResult(weeklyUsedPercent: 38)))
         let snap = store.snapshot(for: .codex)
-        try assertNot100(snap, now: now, row: "R6")
+        try assertToday(
+            snap,
+            now: now,
+            row: "R6",
+            weeklyUsedAtDayStart: 20,
+            weeklyUsedNow: 38,
+            todayAllowanceOfWeek: 14
+        )
     }
 
     // MARK: - Assertion + helpers
 
-    private func assertNot100(_ snap: UsageSnapshot, now: Date, row: String) throws {
+    private func assertToday(
+        _ snap: UsageSnapshot,
+        now: Date,
+        row: String,
+        weeklyUsedAtDayStart: Double,
+        weeklyUsedNow: Double,
+        todayAllowanceOfWeek: Double
+    ) throws {
         let todayValue = try XCTUnwrap(snap.today, "[\(row)] snapshot.today must be non-nil after a fresh sample")
+        XCTAssertTrue(todayValue.pct.isFinite, "[\(row)] Today pct must be finite")
+        let todayUsed = max(0, weeklyUsedNow - weeklyUsedAtDayStart)
+        let expectedPct = ((todayAllowanceOfWeek - todayUsed) / todayAllowanceOfWeek) * 100.0
+        XCTAssertEqual(
+            todayValue.pct,
+            expectedPct,
+            accuracy: 0.0001,
+            "[\(row)] Today pct must reflect the restored baseline and fresh weekly sample"
+        )
         XCTAssertNotEqual(
             todayValue.pct, 100,
             "[\(row)] Today must not regress to 100% on cold start with seeded prior usage"
         )
+        XCTAssertEqual(todayValue.todayAllowanceOfWeek, todayAllowanceOfWeek, accuracy: 0.0001)
         XCTAssertEqual(
-            todayValue.basis.localDate, today(now: now),
+            todayValue.basis.localDate, try today(now: now),
             "[\(row)] basis.localDate must match the live today's local date"
         )
+        XCTAssertEqual(todayValue.basis.weeklyUsedAtDayStart, weeklyUsedAtDayStart, accuracy: 0.0001)
+        XCTAssertEqual(todayValue.basis.weeklyUsedNow, weeklyUsedNow, accuracy: 0.0001)
+        XCTAssertEqual(todayValue.basis.todayAllowanceOfWeek, todayAllowanceOfWeek, accuracy: 0.0001)
+        XCTAssertFalse(todayValue.basis.weeklyResetAlreadyFiredToday)
     }
 
     private func continuityPath() -> String {
         tempHome.appendingPathComponent(".bough/usage-continuity.sqlite").path
     }
 
-    private func today(now: Date) -> String {
+    private func posixPermissions(_ url: URL) throws -> Int {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let permissions = try XCTUnwrap(attributes[.posixPermissions] as? NSNumber)
+        return permissions.intValue & 0o777
+    }
+
+    private func today(now: Date) throws -> String {
         var localCal = cal
         localCal.timeZone = tz
         let c = localCal.dateComponents([.year, .month, .day], from: now)
-        return String(format: "%04d-%02d-%02d", c.year!, c.month!, c.day!)
+        return String(
+            format: "%04d-%02d-%02d",
+            try XCTUnwrap(c.year),
+            try XCTUnwrap(c.month),
+            try XCTUnwrap(c.day)
+        )
     }
 
     private func seedJSON(localDate: String, weeklyUsedAtDayStart: Double, tz: TimeZone) throws {

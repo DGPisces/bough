@@ -34,8 +34,8 @@ SOFTWARE.
 
 | Component | Version | Notice |
 |---|---:|---|
-| Sparkle | 2.9.1 | MIT-style license with external notices in the upstream package. |
-| Yams | 5.4.0 | MIT License, Copyright (c) 2016 JP Simard. |
+| Sparkle | 2.9.2 | MIT-style license with external notices in the upstream package. |
+| Yams | 6.2.2 | MIT License, Copyright (c) 2016 JP Simard. |
 | TOMLKit | 0.6.0 | MIT License, Copyright (c) 2024 Jeff Lebrun. |
 
 ## Fonts

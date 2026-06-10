@@ -117,7 +117,7 @@ final class AppStateCodexAppServerTests: XCTestCase {
         state.startCodexAppServerClientIfPossibleForTesting()
         await Task.yield()
 
-        let service = try! XCTUnwrap(state.codexAppServerService)
+        let service = try XCTUnwrap(state.codexAppServerService)
         XCTAssertNotNil(service.onRateLimitsUpdated)
         let notificationExpectation = expectation(description: "usage notification callback receives route")
         var observedMessage = false
@@ -153,7 +153,7 @@ final class AppStateCodexAppServerTests: XCTestCase {
         state.stopCodexAppServerClientForTesting()
     }
 
-    func testServiceExitRemovesCodexAppServerSessionsAndStopsUsageLoop() async {
+    func testServiceExitRemovesCodexAppServerSessionsAndStopsUsageLoop() async throws {
         let state = AppState()
         var codexSession = SessionSnapshot(startTime: Date())
         codexSession.source = AppState.codexAppBundleId
@@ -165,7 +165,7 @@ final class AppStateCodexAppServerTests: XCTestCase {
         state.codexAppServerExecutablePath = "/bin/echo"
         state.startCodexAppServerClientIfPossibleForTesting()
         await Task.yield()
-        let service = try! XCTUnwrap(state.codexAppServerService)
+        let service = try XCTUnwrap(state.codexAppServerService)
         let exitExpectation = expectation(description: "service exit callback invoked")
         let priorOnExit = service.onExit
         var callbackCount = 0
@@ -212,7 +212,7 @@ final class AppStateCodexAppServerTests: XCTestCase {
         XCTAssertNil(weakService)
     }
 
-    func testOldServiceExitCannotClearNewService() async {
+    func testOldServiceExitCannotClearNewService() async throws {
         let state = AppState()
         let firstTransport = FakeCodexAppServerTransport(fireExitOnStop: false)
         let secondTransport = FakeCodexAppServerTransport()
@@ -225,14 +225,14 @@ final class AppStateCodexAppServerTests: XCTestCase {
 
         state.startCodexAppServerClientIfPossibleForTesting()
         await Task.yield()
-        _ = try! XCTUnwrap(state.codexAppServerService)
+        _ = try XCTUnwrap(state.codexAppServerService)
 
         // Force a realistic restart after the first service has become stale.
         state.codexAppServerService = nil
         state.startCodexAppServerClientIfPossibleForTesting()
         await Task.yield()
 
-        let secondService = try! XCTUnwrap(state.codexAppServerService)
+        let secondService = try XCTUnwrap(state.codexAppServerService)
         firstTransport.exit(status: 0)
         await Task.yield()
 
@@ -446,7 +446,11 @@ private final class FakeCodexAppServerTransport: CodexAppServerTransport {
             onExit?(0)
         }
     }
-    func initializeHandshake(clientName: String, clientVersion: String) throws -> CodexRequestID { .int(0) }
+    func initializeHandshake(clientName: String, clientVersion: String) throws -> CodexRequestID {
+        let id = CodexRequestID.int(0)
+        deliver(CodexJSONRPCMessage(raw: ["id": .int(0), "result": .object([:])], kind: .response(id: id)))
+        return id
+    }
     func sendRequest(method: String, params: Any?) throws -> CodexRequestID {
         defer { nextId += 1 }
         return .int(nextId)

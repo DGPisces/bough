@@ -10,13 +10,11 @@ struct UsagePage: View {
     private var codexHooksDisabledNoticeDismissed = false
     @State private var thresholdNotificationsEnabled = false
     @State private var codexHooksDisabled = ConfigInstaller.codexHooksFeatureDisabled()
-    /// Regression guard: render-tick that re-runs the data-source
-    /// connectivity probe after the user toggles Claude Code in the Hooks tab.
-    /// The "Claude Code 集成" Section was deleted; the Hooks tab toggle is now
-    /// the single install lever. Bumping this tick on the
-    /// `claudeCodeStatusLineDidChange` notification forces SwiftUI to re-evaluate
-    /// `evaluateClaudeCodeStatusLineConnectivity` on the next render.
-    @State private var statusLineMutationTick: Int = 0
+    @State private var claudeStatusLineConnectivity = ClaudeCodeStatusLineConnectivityModel(
+        fileExists: false,
+        payloadValid: false,
+        isFresh: nil
+    )
     /// Regression guard: explicit flash banner after manual refresh
     /// so the user gets visible feedback that the button did something. nil
     /// suppresses the row; populated after `refreshClaudeCodeUsageFromDisk` returns.
@@ -74,13 +72,9 @@ struct UsagePage: View {
             },
             localized: { l10n[$0] }
         )
-        // Regression guard: data-source row's "Connected" badge
-        // now reflects statusLine data freshness, NOT hook entry presence.
-        // Read statusLineMutationTick so install/uninstall completions trigger
-        // a re-classify on the next render — same render-dependency pattern
-        // used by the install-state classifier below.
-        let _ = statusLineMutationTick
-        let claudeConnectivity = evaluateClaudeCodeStatusLineConnectivity()
+        let claudeConnectivity = selectedDisplayTool == .claudeCode
+            ? claudeStatusLineConnectivity
+            : nil
 
         Form {
             if codexNotice.showsBanner {
@@ -169,7 +163,7 @@ struct UsagePage: View {
                                 .foregroundStyle(.secondary)
                         }
                         // QUOTA-04: three-state hook connectivity indicator for Claude Code.
-                        if selectedDisplayTool == .claudeCode {
+                        if selectedDisplayTool == .claudeCode, let claudeConnectivity {
                             Circle()
                                 .fill(connectivityColor(for: claudeConnectivity.state))
                                 .frame(width: 8, height: 8)
@@ -190,10 +184,11 @@ struct UsagePage: View {
                             // the user reads "button does nothing".
                             switch selectedDisplayTool {
                             case .codex:
+                                refreshFeedback = nil
                                 pageActions.refresh()
                             case .claudeCode:
                                 let ok = appState.usageStore.refreshClaudeCodeUsageFromDisk(markRefreshAttempt: true)
-                                statusLineMutationTick &+= 1
+                                refreshClaudeCodeStatusLineConnectivity()
                                 refreshFeedback = ok
                                     ? l10n["usage_claude_refresh_succeeded"]
                                     : l10n["usage_claude_refresh_failed"]
@@ -298,12 +293,13 @@ struct UsagePage: View {
         .onReceive(NotificationCenter.default.publisher(
             for: SettingsNotification.claudeCodeStatusLineDidChange
         )) { _ in
-            // Regression guard: the Hooks tab toggle posts this
-            // notification after the install/uninstall coordinator finishes
-            // mutating settings.json. Bumping the tick forces SwiftUI to
-            // re-classify connectivity on the next render so the data-source
-            // row reflects the new state immediately.
-            statusLineMutationTick &+= 1
+            refreshClaudeCodeStatusLineConnectivity()
+        }
+        .onChange(of: selectedDisplayTool) { _, newTool in
+            refreshFeedback = nil
+            if newTool == .claudeCode {
+                refreshClaudeCodeStatusLineConnectivity()
+            }
         }
         .onAppear {
             appState.setUsageRefreshActivity(.active)
@@ -311,12 +307,7 @@ struct UsagePage: View {
             refreshNotificationPermissionState()
             thresholdNotificationsEnabled = usageStore.thresholdNotificationsMasterEnabled()
             codexHooksDisabled = ConfigInstaller.codexHooksFeatureDisabled()
-            // Re-tick on appear so the classifier re-reads disk after an external
-            // mutation (e.g. user uninstalls/installs via Bough's UI from another
-            // open instance, or AppDelegate's first-launch auto-install fires while
-            // Settings is closed). Round-5: replaces the previously-dead
-            // statusLineInstalled @State which had no body read site.
-            statusLineMutationTick &+= 1
+            refreshClaudeCodeStatusLineConnectivity()
             // Regression guard: the path-drift notice and the
             // chain-auto-install banner both lived in the deleted Section's
             // `statusLineNotice` slot. The drift repair itself still runs
@@ -429,6 +420,10 @@ struct UsagePage: View {
                 break
             }
         }
+    }
+
+    private func refreshClaudeCodeStatusLineConnectivity() {
+        claudeStatusLineConnectivity = evaluateClaudeCodeStatusLineConnectivity()
     }
 
     private func label(for tool: UsageTool) -> String {

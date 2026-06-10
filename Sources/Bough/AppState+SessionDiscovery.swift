@@ -47,7 +47,7 @@ extension AppState {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidates: [(String, String)] = [
             ("claude", "\(home)/.claude/projects"),
-            ("codex", "\(home)/.codex/sessions"),
+            ("codex", ConfigInstaller.codexHome() + "/sessions"),
             ("gemini", "\(home)/.gemini/tmp"),
             ("qoder", "\(home)/.qoder/projects"),
             ("codebuddy", "\(home)/.codebuddy/projects"),
@@ -58,10 +58,16 @@ extension AppState {
             ("kimi", "\(home)/.kimi/sessions"),
         ]
         let fm = FileManager.default
-        return candidates.compactMap { source, path in
-            guard ConfigInstaller.isEnabled(source: source), fm.fileExists(atPath: path) else { return nil }
-            return path
+        var roots: [String] = []
+        var seen = Set<String>()
+        for (source, path) in candidates {
+            guard ConfigInstaller.isEnabled(source: source),
+                  fm.fileExists(atPath: path),
+                  seen.insert(path).inserted
+            else { continue }
+            roots.append(path)
         }
+        return roots
     }
 
     func requestDiscoveryScan() {
@@ -217,7 +223,7 @@ extension AppState {
                 continue
             }
 
-            // Dedup: if a hook-created session already exists with same source + cwd + pid,
+            // Dedup: if a hook-created session already exists with same runtime source + cwd + pid,
             // skip the discovered one to avoid duplicate entries (e.g. Codex hooks vs
             // file-based discovery produce different session IDs for the same process).
             // Only dedup when PID matches (or discovered has no PID), so concurrent
@@ -225,7 +231,7 @@ extension AppState {
             // Never merge a discovery (CLI) session with an existing native app session —
             // they're fundamentally different even if they share source + cwd.
             let duplicateKey = sessions.first(where: { (_, existing) in
-                guard existing.source == info.source,
+                guard SessionSnapshot.runtimeSourceGroup(existing.source) == SessionSnapshot.runtimeSourceGroup(info.source),
                       existing.cwd != nil, existing.cwd == info.cwd else { return false }
                 // Don't merge CLI discovery into a stale native app session whose app has quit —
                 // the PID was likely reattached incorrectly. If the native app IS running, allow merge.

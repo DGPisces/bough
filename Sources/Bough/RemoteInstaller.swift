@@ -56,14 +56,18 @@ enum RemoteInstaller {
     private static func uploadRemoteHook(source: String, host: RemoteHost) async -> RemoteCommandResult {
         let encoded = Data(source.utf8).base64EncodedString()
         let py = """
-import base64, os, pathlib
+	import base64, os, pathlib
 
-target = pathlib.Path.home() / ".bough" / "bough-remote-hook.py"
-target.parent.mkdir(parents=True, exist_ok=True)
-target.write_bytes(base64.b64decode('''\(encoded)'''))
-os.chmod(target, 0o755)
-print(target)
-"""
+	target = pathlib.Path.home() / ".bough" / "bough-remote-hook.py"
+	target.parent.mkdir(parents=True, exist_ok=True)
+	os.chmod(target.parent, 0o700)
+	tmp = target.with_name(target.name + f".tmp.{os.getpid()}")
+	tmp.write_bytes(base64.b64decode('''\(encoded)'''))
+	os.chmod(tmp, 0o700)
+	os.replace(tmp, target)
+	os.chmod(target, 0o700)
+	print(target)
+	"""
         return await runSSH(host: host, command: "python3 - <<'PY'\n\(py)\nPY", timeout: 25)
     }
 
@@ -73,7 +77,7 @@ print(target)
         // sourced — that's how $CODEX_HOME (and similar) reach a non-interactive ssh session.
         // base64 keeps the script intact regardless of shell quoting.
         let encoded = Data(py.utf8).base64EncodedString()
-        let inner = "echo '\(encoded)' | base64 -d | python3"
+        let inner = "(printf '%s' '\(encoded)' | base64 -D 2>/dev/null || printf '%s' '\(encoded)' | base64 -d 2>/dev/null) | python3"
         let command = "\"${SHELL:-/bin/bash}\" -lc \"\(inner)\""
         return await runSSH(host: host, command: command, timeout: 30)
     }
@@ -110,12 +114,54 @@ def _codex_home():
     expanded = os.path.expanduser(raw)
     return pathlib.Path(expanded)
 
+class ConfigParseError(Exception):
+    pass
+
+def strip_json_comments(text):
+    result = []
+    i = 0
+    in_string = False
+    escaped = False
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            result.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            result.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < len(text):
+            nxt = text[i + 1]
+            if nxt == "/":
+                i += 2
+                while i < len(text) and text[i] != "\\n":
+                    i += 1
+                continue
+            if nxt == "*":
+                i += 2
+                while i + 1 < len(text) and not (text[i] == "*" and text[i + 1] == "/"):
+                    i += 1
+                i = min(i + 2, len(text))
+                continue
+        result.append(ch)
+        i += 1
+    return "".join(result)
+
 def ensure_json(path):
     if path.exists():
         try:
-            return json.loads(path.read_text())
-        except Exception:
-            return {}
+            return json.loads(strip_json_comments(path.read_text(encoding="utf-8")))
+        except Exception as exc:
+            raise ConfigParseError(f"{path} is not valid JSON/JSONC: {exc}") from exc
     return {}
 
 def write_json(path, data):
@@ -128,6 +174,181 @@ def write_text_atomic(path, text):
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)
 
+def _skip_json_ws_comments(text, i):
+    while i < len(text):
+        ch = text[i]
+        if ch in " \\t\\r\\n":
+            i += 1
+            continue
+        if ch == "/" and i + 1 < len(text):
+            nxt = text[i + 1]
+            if nxt == "/":
+                i += 2
+                while i < len(text) and text[i] != "\\n":
+                    i += 1
+                continue
+            if nxt == "*":
+                i += 2
+                while i + 1 < len(text) and not (text[i] == "*" and text[i + 1] == "/"):
+                    i += 1
+                i = min(i + 2, len(text))
+                continue
+        break
+    return i
+
+def _read_json_string_token(text, i):
+    if i >= len(text) or text[i] != '"':
+        return None
+    start = i
+    i += 1
+    escaped = False
+    while i < len(text):
+        ch = text[i]
+        if escaped:
+            escaped = False
+        elif ch == "\\\\":
+            escaped = True
+        elif ch == '"':
+            return text[start:i + 1], i + 1
+        elif ch in "\\r\\n":
+            return None
+        i += 1
+    return None
+
+def _skip_json_value(text, i):
+    i = _skip_json_ws_comments(text, i)
+    if i >= len(text):
+        return None
+    if text[i] == '"':
+        read = _read_json_string_token(text, i)
+        return read[1] if read else None
+    if text[i] in "{[":
+        stack = ["}" if text[i] == "{" else "]"]
+        i += 1
+        while i < len(text) and stack:
+            i = _skip_json_ws_comments(text, i)
+            if i >= len(text):
+                return None
+            ch = text[i]
+            if ch == '"':
+                read = _read_json_string_token(text, i)
+                if not read:
+                    return None
+                i = read[1]
+                continue
+            if ch in "{[":
+                stack.append("}" if ch == "{" else "]")
+                i += 1
+                continue
+            if ch == stack[-1]:
+                stack.pop()
+                i += 1
+                continue
+            i += 1
+        return i if not stack else None
+    while i < len(text) and text[i] not in ",}]":
+        i += 1
+    return i
+
+def _line_prefix_before(text, index):
+    start = text.rfind("\\n", 0, index) + 1
+    prefix = text[start:index]
+    return prefix if all(ch in " \\t" for ch in prefix) else ""
+
+def _find_top_level_json_key(text, key):
+    i = _skip_json_ws_comments(text, 0)
+    if i >= len(text) or text[i] != "{":
+        return None
+    content_start = i + 1
+    i += 1
+    first_key_indent = None
+    entry_count = 0
+    while True:
+        i = _skip_json_ws_comments(text, i)
+        if i >= len(text):
+            return None
+        if text[i] == "}":
+            return {
+                "kind": "insert",
+                "content_start": content_start,
+                "close": i,
+                "entry_count": entry_count,
+                "indent": first_key_indent or (_line_prefix_before(text, i) + "  "),
+                "closing_indent": _line_prefix_before(text, i),
+            }
+        if text[i] != '"':
+            return None
+        key_start = i
+        read = _read_json_string_token(text, i)
+        if not read:
+            return None
+        token, i = read
+        try:
+            parsed_key = json.loads(token)
+        except Exception:
+            return None
+        if first_key_indent is None:
+            first_key_indent = _line_prefix_before(text, key_start)
+        i = _skip_json_ws_comments(text, i)
+        if i >= len(text) or text[i] != ":":
+            return None
+        i += 1
+        value_start = _skip_json_ws_comments(text, i)
+        value_end = _skip_json_value(text, value_start)
+        if value_end is None:
+            return None
+        entry_count += 1
+        if parsed_key == key:
+            return {
+                "kind": "replace",
+                "start": value_start,
+                "end": value_end,
+                "indent": first_key_indent or "  ",
+            }
+        i = _skip_json_ws_comments(text, value_end)
+        if i < len(text) and text[i] == ",":
+            i += 1
+            continue
+        if i < len(text) and text[i] == "}":
+            return {
+                "kind": "insert",
+                "content_start": content_start,
+                "close": i,
+                "entry_count": entry_count,
+                "indent": first_key_indent or "  ",
+                "closing_indent": _line_prefix_before(text, i),
+            }
+        return None
+
+def _reindent_json_value(raw, key_indent):
+    lines = raw.split("\\n")
+    if len(lines) <= 1:
+        return raw
+    return "\\n".join([lines[0]] + [key_indent + line if line else line for line in lines[1:]])
+
+def set_top_level_json_value(text, key, value):
+    match = _find_top_level_json_key(text, key)
+    if not match:
+        return None
+    serialized = _reindent_json_value(json.dumps(value, indent=2, sort_keys=True), match["indent"])
+    if match["kind"] == "replace":
+        return text[:match["start"]] + serialized + text[match["end"]:]
+    entry = f'"{key}": {serialized}'
+    close = match["close"]
+    if match["entry_count"] == 0:
+        return text[:match["content_start"]] + f"\\n{match['indent']}{entry}\\n{match['closing_indent']}" + text[close:]
+    return text[:close] + f",\\n{match['indent']}{entry}\\n{match['closing_indent']}" + text[close:]
+
+def write_json_hooks(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        original = path.read_text(encoding="utf-8")
+        updated = set_top_level_json_value(original, "hooks", data.get("hooks") or {})
+        if updated is not None:
+            write_text_atomic(path, updated)
+            return
+    write_json(path, data)
+
 def command_for(source):
     return " ".join([
         f"BOUGH_SOCKET_PATH={shlex.quote(socket_path)}",
@@ -137,6 +358,14 @@ def command_for(source):
         "python3",
         "~/.bough/bough-remote-hook.py",
     ])
+
+_REMOTE_HOOK_COMMAND_RE = re.compile(r"(^|[\\s;&|()])(?:~|/[^\\s;&|()]*)/\\.bough/bough-remote-hook\\.py($|[\\s;&|()]|[?#])")
+
+def is_our_remote_hook_command(command):
+    if not isinstance(command, str):
+        return False
+    normalized = command.replace('"', " ").replace("'", " ")
+    return _REMOTE_HOOK_COMMAND_RE.search(normalized) is not None
 
 def remove_our_hooks(hooks):
     for event in list(hooks.keys()):
@@ -155,13 +384,17 @@ def remove_our_hooks(hooks):
                 commands.append(entry["command"])
             if isinstance(entry.get("bash"), str):
                 commands.append(entry["bash"])
-            if any("bough-remote-hook.py" in c for c in commands):
+            if any(is_our_remote_hook_command(c) for c in commands):
                 continue
             next_entries.append(entry)
         if next_entries:
             hooks[event] = next_entries
         else:
             hooks.pop(event, None)
+
+def normalized_hooks(data):
+    hooks = data.get("hooks")
+    return hooks if isinstance(hooks, dict) else {}
 
 def merge_event_hooks(hooks, event, entries):
     existing = hooks.get(event)
@@ -398,6 +631,8 @@ def _remove_managed_traecli_hooks(contents):
     return "\\n".join(result)
 
 def _merge_traecli_hooks(contents, cmd):
+    if not _traecli_yaml_safe_to_edit(contents):
+        return None
     normalized = _normalize_traecli_hooks_list_indentation(contents)
     cleaned = _remove_managed_traecli_hooks(normalized)
     lines = cleaned.split("\\n")
@@ -434,14 +669,64 @@ def _merge_traecli_hooks(contents, cmd):
         merged += "\\n"
     return merged
 
+def _traecli_yaml_safe_to_edit(contents):
+    if not contents.strip():
+        return True
+    stack = []
+    in_single = False
+    in_double = False
+    in_comment = False
+    escaped = False
+    for char in contents:
+        if in_comment:
+            if char == "\\n":
+                in_comment = False
+            continue
+        if in_double:
+            if escaped:
+                escaped = False
+            elif char == "\\\\":
+                escaped = True
+            elif char == '"':
+                in_double = False
+            elif char == "\\n":
+                return False
+            continue
+        if in_single:
+            if char == "'":
+                in_single = False
+            elif char == "\\n":
+                return False
+            continue
+        if char == '"':
+            in_double = True
+        elif char == "'":
+            in_single = True
+        elif char == "#":
+            in_comment = True
+        elif char in "[{":
+            stack.append(char)
+        elif char == "]":
+            if not stack or stack[-1] != "[":
+                return False
+            stack.pop()
+        elif char == "}":
+            if not stack or stack[-1] != "{":
+                return False
+            stack.pop()
+    return not in_single and not in_double and not escaped and not stack
+
 def install_claude():
     claude_root = home / ".claude"
     if not claude_root.exists() and shutil.which("claude") is None:
         return "Claude skipped"
 
     settings_path = claude_root / "settings.json"
-    data = ensure_json(settings_path)
-    hooks = data.get("hooks") or {}
+    try:
+        data = ensure_json(settings_path)
+    except ConfigParseError as exc:
+        return f"Claude skipped: {exc}"
+    hooks = normalized_hooks(data)
     remove_our_hooks(hooks)
 
     cmd = command_for("claude")
@@ -453,14 +738,19 @@ def install_claude():
         {"matcher": "manual", "hooks": [{"type": "command", "command": cmd, "timeout": 60}]},
     ]
     merge_event_hooks(hooks, "UserPromptSubmit", without_matcher)
+    merge_event_hooks(hooks, "PreToolUse", without_matcher)
+    merge_event_hooks(hooks, "PostToolUse", with_matcher)
+    merge_event_hooks(hooks, "PostToolUseFailure", with_matcher)
     merge_event_hooks(hooks, "PermissionRequest", with_long_timeout)
     merge_event_hooks(hooks, "Notification", with_matcher)
     merge_event_hooks(hooks, "Stop", without_matcher)
+    merge_event_hooks(hooks, "SubagentStart", with_matcher)
+    merge_event_hooks(hooks, "SubagentStop", with_matcher)
     merge_event_hooks(hooks, "SessionStart", without_matcher)
     merge_event_hooks(hooks, "SessionEnd", without_matcher)
     merge_event_hooks(hooks, "PreCompact", precompact)
     data["hooks"] = hooks
-    write_json(settings_path, data)
+    write_json_hooks(settings_path, data)
     return "Claude ok"
 
 def _toml_bool_assignment_value(stripped, key):
@@ -1355,9 +1645,12 @@ def _codex_toml_is_safe_to_edit(content):
     return True
 
 def ensure_toml_codex_hooks(path):
-    content = path.read_text() if path.exists() else ""
+    try:
+        content = path.read_text() if path.exists() else ""
+    except Exception:
+        return False
     if not _codex_toml_is_safe_to_edit(content):
-        return
+        return False
     lines = content.splitlines()
     features_idx = None
     hooks_present = False
@@ -1404,7 +1697,11 @@ def ensure_toml_codex_hooks(path):
         cleaned.insert(features_idx + 1, f"hooks = {hook_value}")
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_text_atomic(path, "\\n".join(cleaned).rstrip() + "\\n")
+    try:
+        write_text_atomic(path, "\\n".join(cleaned).rstrip() + "\\n")
+    except Exception:
+        return False
+    return True
 
 def install_codex():
     codex_root = _codex_home()
@@ -1412,18 +1709,27 @@ def install_codex():
         return "Codex skipped"
 
     hooks_path = codex_root / "hooks.json"
-    data = ensure_json(hooks_path)
-    hooks = data.get("hooks") or {}
+    try:
+        data = ensure_json(hooks_path)
+    except ConfigParseError as exc:
+        return f"Codex skipped: {exc}"
+    if not ensure_toml_codex_hooks(codex_root / "config.toml"):
+        return "Codex skipped: config.toml not enabled"
+    hooks = normalized_hooks(data)
     remove_our_hooks(hooks)
 
     cmd = command_for("codex")
     entry = [{"hooks": [{"type": "command", "command": cmd, "timeout": 60}]}]
+    long_entry = [{"hooks": [{"type": "command", "command": cmd, "timeout": 86400}]}]
     merge_event_hooks(hooks, "SessionStart", entry)
+    merge_event_hooks(hooks, "SessionEnd", entry)
     merge_event_hooks(hooks, "UserPromptSubmit", entry)
+    merge_event_hooks(hooks, "PreToolUse", entry)
+    merge_event_hooks(hooks, "PostToolUse", entry)
+    merge_event_hooks(hooks, "PermissionRequest", long_entry)
     merge_event_hooks(hooks, "Stop", entry)
     data["hooks"] = hooks
-    write_json(hooks_path, data)
-    ensure_toml_codex_hooks(codex_root / "config.toml")
+    write_json_hooks(hooks_path, data)
     return "Codex ok"
 
 def install_codebuddy():
@@ -1432,8 +1738,11 @@ def install_codebuddy():
         return "CodeBuddy skipped"
 
     settings_path = codebuddy_root / "settings.json"
-    data = ensure_json(settings_path)
-    hooks = data.get("hooks") or {}
+    try:
+        data = ensure_json(settings_path)
+    except ConfigParseError as exc:
+        return f"CodeBuddy skipped: {exc}"
+    hooks = normalized_hooks(data)
     remove_our_hooks(hooks)
 
     cmd = command_for("codebuddy")
@@ -1445,14 +1754,19 @@ def install_codebuddy():
         {"matcher": "manual", "hooks": [{"type": "command", "command": cmd, "timeout": 60}]},
     ]
     merge_event_hooks(hooks, "UserPromptSubmit", without_matcher)
+    merge_event_hooks(hooks, "PreToolUse", without_matcher)
+    merge_event_hooks(hooks, "PostToolUse", with_matcher)
+    merge_event_hooks(hooks, "PostToolUseFailure", with_matcher)
     merge_event_hooks(hooks, "PermissionRequest", with_long_timeout)
     merge_event_hooks(hooks, "Notification", with_matcher)
     merge_event_hooks(hooks, "Stop", without_matcher)
+    merge_event_hooks(hooks, "SubagentStart", with_matcher)
+    merge_event_hooks(hooks, "SubagentStop", with_matcher)
     merge_event_hooks(hooks, "SessionStart", without_matcher)
     merge_event_hooks(hooks, "SessionEnd", without_matcher)
     merge_event_hooks(hooks, "PreCompact", precompact)
     data["hooks"] = hooks
-    write_json(settings_path, data)
+    write_json_hooks(settings_path, data)
     return "CodeBuddy ok"
 
 def install_traecli():
@@ -1467,6 +1781,8 @@ def install_traecli():
         return "Traecli read failed"
     cmd = command_for("traecli")
     merged = _merge_traecli_hooks(original, cmd)
+    if merged is None:
+        return "Traecli skipped: invalid YAML"
     write_text_atomic(config_path, merged)
     return "Traecli ok"
 
@@ -1476,13 +1792,14 @@ print(" · ".join(parts))
     }
 
     private static func runSSH(host: RemoteHost, command: String, timeout: TimeInterval) async -> RemoteCommandResult {
-        guard !host.sshTarget.isEmpty else {
+        guard host.validatedSSHTarget != nil else {
             return RemoteCommandResult(stdout: "", stderr: "invalid host", exitCode: -1)
         }
         return await withCheckedContinuation { continuation in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
             process.arguments = sshArguments(host: host) + [command]
+            process.environment = sshEnvironment(host: host)
 
             let stdout = Pipe()
             let stderr = Pipe()
@@ -1497,22 +1814,30 @@ print(" · ".join(parts))
                 return
             }
 
-            let timeoutTask = Task.detached {
-                let ns = UInt64(timeout * 1_000_000_000)
-                try? await Task.sleep(nanoseconds: ns)
-                if process.isRunning {
-                    process.terminate()
-                }
+            let stdoutHandle = stdout.fileHandleForReading
+            let stderrHandle = stderr.fileHandleForReading
+            let stdoutTask = Task.detached {
+                stdoutHandle.readDataToEndOfFile()
+            }
+            let stderrTask = Task.detached {
+                stderrHandle.readDataToEndOfFile()
             }
 
             Task.detached {
-                process.waitUntilExit()
-                timeoutTask.cancel()
-                let outData = stdout.fileHandleForReading.readDataToEndOfFile()
-                let errData = stderr.fileHandleForReading.readDataToEndOfFile()
+                let exitedBeforeTimeout = ProcessRunner.waitUntilExitOrTerminate(process, timeout: timeout)
+                let outData = await stdoutTask.value
+                let errData = await stderrTask.value
                 let out = String(data: outData, encoding: .utf8) ?? ""
-                let err = String(data: errData, encoding: .utf8) ?? ""
-                continuation.resume(returning: RemoteCommandResult(stdout: out, stderr: err, exitCode: process.terminationStatus))
+                var err = String(data: errData, encoding: .utf8) ?? ""
+                if !exitedBeforeTimeout {
+                    let timeoutMessage = "ssh timed out after \(Int(timeout))s"
+                    err = err.isEmpty ? timeoutMessage : "\(err)\n\(timeoutMessage)"
+                }
+                continuation.resume(returning: RemoteCommandResult(
+                    stdout: out,
+                    stderr: err,
+                    exitCode: exitedBeforeTimeout ? process.terminationStatus : -9
+                ))
             }
         }
     }
@@ -1531,8 +1856,18 @@ print(" · ".join(parts))
         if !trimmedIdentity.isEmpty {
             args += ["-i", trimmedIdentity]
         }
-        args.append(host.sshTarget)
+        guard let target = host.validatedSSHTarget else { return [] }
+        args += ["--", target]
         return args
+    }
+
+    private static func sshEnvironment(host: RemoteHost) -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let trimmed = host.authSocket.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            env["SSH_AUTH_SOCK"] = (trimmed as NSString).expandingTildeInPath
+        }
+        return env
     }
 
     private static func pythonStringLiteral(_ value: String) -> String {

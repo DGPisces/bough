@@ -56,16 +56,15 @@ enum WelcomeGuideBackendIntegrator {
     @MainActor
     private static func applyClaudeSelection(_ enabled: Bool) async {
         if enabled {
-            let result = await ChainInstallCoordinator.shared.install(replaceExisting: false)
+            let result = await ChainInstallCoordinator.shared.installClaudeIntegration(replaceExisting: false)
             switch result {
             case .installed, .chained:
-                _ = ConfigInstaller.setEnabled(source: "claude", enabled: true)
+                break
             case .conflict, .failed:
                 _ = ConfigInstaller.setEnabled(source: "claude", enabled: false)
             }
         } else {
-            _ = ConfigInstaller.uninstallClaudeCodeStatusLine()
-            _ = ConfigInstaller.setEnabled(source: "claude", enabled: false)
+            _ = await ChainInstallCoordinator.shared.uninstallClaudeIntegration()
         }
 
         NotificationCenter.default.post(

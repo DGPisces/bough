@@ -32,8 +32,12 @@ final class SpriteMascotRuntimeTests: XCTestCase {
         XCTAssertEqual(MascotSpriteCatalog.normalizedApprovedSourceID("traecn"), "trae")
         XCTAssertEqual(MascotSpriteCatalog.normalizedApprovedSourceID("traecli"), "trae")
         XCTAssertEqual(MascotSpriteCatalog.normalizedApprovedSourceID("codybuddycn"), "codebuddy")
+        XCTAssertEqual(MascotSpriteCatalog.normalizedApprovedSourceID("cursor-cli"), "cursor")
+        XCTAssertEqual(MascotSpriteCatalog.normalizedApprovedSourceID("qoder-cli"), "qoder")
         XCTAssertEqual(MascotSpriteCatalog.spec(source: "traecli", status: .processing)?.sourceID, "trae")
         XCTAssertEqual(MascotSpriteCatalog.spec(source: "codybuddycn", status: .waitingApproval)?.sourceID, "codebuddy")
+        XCTAssertEqual(MascotSpriteCatalog.spec(source: "cursor-cli", status: .waitingQuestion)?.sourceID, "cursor")
+        XCTAssertEqual(MascotSpriteCatalog.spec(source: "qoder-cli", status: .running)?.sourceID, "qoder")
 
         XCTAssertNil(MascotSpriteCatalog.spec(source: "cline", status: .idle))
         XCTAssertNil(MascotSpriteCatalog.spec(source: "kiro", status: .running))
@@ -141,6 +145,8 @@ final class SpriteMascotRuntimeTests: XCTestCase {
         }
         XCTAssertNotNil(MascotSpriteCatalog.iconURL(source: "traecn"))
         XCTAssertNotNil(MascotSpriteCatalog.iconURL(source: "codybuddycn"))
+        XCTAssertNotNil(MascotSpriteCatalog.iconURL(source: "cursor-cli"))
+        XCTAssertNotNil(MascotSpriteCatalog.iconURL(source: "qoder-cli"))
         XCTAssertNil(MascotSpriteCatalog.iconURL(source: "pi"))
         XCTAssertNil(MascotSpriteCatalog.iconURL(source: "custom"))
     }

@@ -54,6 +54,19 @@ struct RemoteHost: Identifiable, Codable, Equatable, Sendable {
         return "\(trimmedUser)@\(host.trimmingCharacters(in: .whitespacesAndNewlines))"
     }
 
+    var validatedSSHTarget: String? {
+        let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isSafeSSHDestinationComponent(trimmedHost, allowEmpty: false) else { return nil }
+
+        let trimmedUser = user.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isSafeSSHDestinationComponent(trimmedUser, allowEmpty: true) else { return nil }
+
+        if trimmedUser.isEmpty {
+            return trimmedHost
+        }
+        return "\(trimmedUser)@\(trimmedHost)"
+    }
+
     var remoteSocketDirectory: String {
         "/tmp/bough-\(remoteSocketSlug)"
     }
@@ -79,5 +92,12 @@ struct RemoteHost: Identifiable, Codable, Equatable, Sendable {
             return "\(sshTarget):\(port)"
         }
         return sshTarget
+    }
+
+    private static func isSafeSSHDestinationComponent(_ value: String, allowEmpty: Bool) -> Bool {
+        if value.isEmpty { return allowEmpty }
+        if value.hasPrefix("-") { return false }
+        return value.rangeOfCharacter(from: .whitespacesAndNewlines) == nil
+            && value.rangeOfCharacter(from: .controlCharacters) == nil
     }
 }

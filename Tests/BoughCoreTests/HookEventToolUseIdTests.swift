@@ -47,6 +47,16 @@ final class HookEventToolUseIdTests: XCTestCase {
         XCTAssertEqual(event.toolUseId, "anthropic_tool_use_id")
     }
 
+    func testParsesLegacyPiToolCallId() throws {
+        let event = try decode([
+            "hook_event_name": "PermissionRequest",
+            "session_id": "pi-s1",
+            "tool_name": "Bash",
+            "_pi_tool_call_id": "pi_tool_123"
+        ])
+        XCTAssertEqual(event.toolUseId, "pi_tool_123")
+    }
+
     func testAbsentToolUseIdIsNil() throws {
         let event = try decode([
             "hook_event_name": "PreToolUse",

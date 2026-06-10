@@ -44,6 +44,36 @@ final class DiagnosticsExporterTests: XCTestCase {
         XCTAssertEqual(events.first?["promptPreview"] as? String, "diagnostics export marker")
     }
 
+    func testRecentHookEventsRedactsPromptPreviewSecrets() throws {
+        let appState = AppState()
+        appState.recordHookEvent(
+            source: "claude",
+            sessionId: "diagnostic-session",
+            eventName: "UserPromptSubmit",
+            toolName: nil,
+            viaPlugin: false,
+            payloadKeys: ["hook_event_name", "prompt", "session_id"],
+            promptPreview: "Bearer abc.def.ghi sk-ant-hookSECRET password = hunter2"
+        )
+
+        let events = DiagnosticsExporter.recentHookEvents(from: appState)
+        let json = String(data: try JSONSerialization.data(withJSONObject: events), encoding: .utf8) ?? ""
+
+        XCTAssertFalse(json.contains("Bearer abc.def.ghi"))
+        XCTAssertFalse(json.contains("sk-ant-hookSECRET"))
+        XCTAssertFalse(json.contains("hunter2"))
+        XCTAssertTrue(json.contains("<redacted>"))
+    }
+
+    func testDiagnosticsExporterCommandsUseBoundedProcessWaits() throws {
+        let source = try sourceFile("Sources/Bough/DiagnosticsExporter.swift")
+
+        XCTAssertTrue(source.contains("ProcessRunner.waitUntilExitOrTerminate(proc, timeout: 20)"))
+        XCTAssertTrue(source.contains("ditto timed out"))
+        XCTAssertTrue(source.contains("ProcessRunner.waitUntilExitOrTerminate(proc, timeout: 10)"))
+        XCTAssertTrue(source.contains("command timed out after 10s"))
+    }
+
     // MARK: - DIAG-04 Tests
     //
     // These tests stage fixture .claude/ and .codex/ trees inside a per-test
@@ -67,6 +97,14 @@ final class DiagnosticsExporterTests: XCTestCase {
         return tmp
     }
 
+    private func sourceFile(_ relativePath: String) throws -> String {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        return try String(contentsOf: repoRoot.appendingPathComponent(relativePath), encoding: .utf8)
+    }
+
     /// Writes `content` to `home/relativePath`, creating intermediate dirs.
     private func stageFile(_ relativePath: String, content: String, under home: URL) throws {
         let fm = FileManager.default
@@ -76,8 +114,8 @@ final class DiagnosticsExporterTests: XCTestCase {
     }
 
     // --- testHookConfigSnapshotKeys: cover both "present" and "absent" branches
-    //     of the [features] parser, the contains("bough") check, and the hooks
-    //     block extraction — none of which the previous test exercised.
+    //     of the [features] parser, the managed hook detection, and the hooks
+    //     block extraction.
 
     func testHookConfigSnapshotKeys_presentFixtures() throws {
         let home = try makeTempHome()
@@ -85,7 +123,7 @@ final class DiagnosticsExporterTests: XCTestCase {
                       content: #"{"hooks":{"UserPromptSubmit":[{"command":"echo hi"}]}}"#,
                       under: home)
         try stageFile(".codex/hooks.json",
-                      content: #"{"hooks":[{"command":"bough","event":"UserPromptSubmit"}]}"#,
+                      content: #"{"hooks":[{"command":"/Users/test/.bough/bough-bridge --source codex","event":"UserPromptSubmit"}]}"#,
                       under: home)
         try stageFile(".codex/config.toml",
                       content: "[other]\nx = 1\n\n[features]\nbough = true\nfoo = \"bar\"\n\n[next]\ny = 2\n",
@@ -99,9 +137,9 @@ final class DiagnosticsExporterTests: XCTestCase {
         XCTAssertTrue(snapshot.keys.contains("codexHooksInstalled"))
         XCTAssertTrue(snapshot.keys.contains("codexFeaturesSection"))
 
-        // codexHooksInstalled — contains("bough") must be true for staged fixture
+        // codexHooksInstalled — managed Bough hook command must be true for staged fixture.
         XCTAssertEqual(snapshot["codexHooksInstalled"] as? Bool, true,
-                       "codexHooksInstalled must be true when ~/.codex/hooks.json contains 'bough'")
+                       "codexHooksInstalled must be true when ~/.codex/hooks.json contains a managed Bough hook")
 
         // codexFeaturesSection — parser must extract only the [features] block,
         // stopping at the next [section] heading.
@@ -145,6 +183,85 @@ final class DiagnosticsExporterTests: XCTestCase {
         // claudeCodeHooksBlock — NSNull when settings.json is missing
         XCTAssertTrue(snapshot["claudeCodeHooksBlock"] is NSNull,
                       "claudeCodeHooksBlock must be NSNull when settings.json is absent")
+    }
+
+    func testHookConfigSnapshotReadsHomeScopedJSONCClaudeSettings() throws {
+        let home = try makeTempHome()
+        try stageFile(
+            ".claude/settings.json",
+            content: """
+            {
+              // JSONC comment
+              "statusLine": {
+                "command": "/tmp/bough-statusline-bridge.sh"
+              },
+              "hooks": {
+                "UserPromptSubmit": []
+              }
+            }
+            """,
+            under: home
+        )
+
+        let snapshot = DiagnosticsExporter.hookConfigSnapshot(home: home.path)
+
+        XCTAssertEqual(snapshot["claudeCodeStatusLine"] as? String, "/tmp/bough-statusline-bridge.sh")
+        XCTAssertFalse(snapshot["claudeCodeHooksBlock"] is NSNull)
+    }
+
+    func testHookConfigSnapshotDoesNotTreatPlainBoughTextAsInstalledHook() throws {
+        let home = try makeTempHome()
+        try stageFile(".codex/hooks.json",
+                      content: #"{"hooks":[{"command":"echo bough","event":"UserPromptSubmit"}]}"#,
+                      under: home)
+
+        let snapshot = DiagnosticsExporter.hookConfigSnapshot(home: home.path)
+
+        XCTAssertEqual(snapshot["codexHooksInstalled"] as? Bool, false)
+    }
+
+    func testHookConfigSnapshotDoesNotTreatUserBoughHookNameAsInstalledHook() throws {
+        let home = try makeTempHome()
+        try stageFile(".codex/hooks.json",
+                      content: #"{"hooks":[{"command":"/usr/local/bin/my-bough-hook","event":"UserPromptSubmit"}]}"#,
+                      under: home)
+
+        let snapshot = DiagnosticsExporter.hookConfigSnapshot(home: home.path)
+
+        XCTAssertEqual(snapshot["codexHooksInstalled"] as? Bool, false)
+    }
+
+    func testHookConfigSnapshotDetectsBareBoughBridgeCommand() throws {
+        let home = try makeTempHome()
+        try stageFile(".codex/hooks.json",
+                      content: #"{"hooks":[{"command":"bough-bridge --source codex","event":"UserPromptSubmit"}]}"#,
+                      under: home)
+
+        let snapshot = DiagnosticsExporter.hookConfigSnapshot(home: home.path)
+
+        XCTAssertEqual(snapshot["codexHooksInstalled"] as? Bool, true)
+    }
+
+    func testHookConfigSnapshotDoesNotTreatUserBoughBridgeNameAsInstalledHook() throws {
+        let home = try makeTempHome()
+        try stageFile(".codex/hooks.json",
+                      content: #"{"hooks":[{"command":"/usr/local/bin/my-bough-bridge","event":"UserPromptSubmit"}]}"#,
+                      under: home)
+
+        let snapshot = DiagnosticsExporter.hookConfigSnapshot(home: home.path)
+
+        XCTAssertEqual(snapshot["codexHooksInstalled"] as? Bool, false)
+    }
+
+    func testHookConfigSnapshotDoesNotTreatBridgePrefixPathAsInstalledHook() throws {
+        let home = try makeTempHome()
+        try stageFile(".codex/hooks.json",
+                      content: #"{"hooks":[{"command":"/Users/test/.bough/bin/bough-bridge-old --source codex","event":"UserPromptSubmit"}]}"#,
+                      under: home)
+
+        let snapshot = DiagnosticsExporter.hookConfigSnapshot(home: home.path)
+
+        XCTAssertEqual(snapshot["codexHooksInstalled"] as? Bool, false)
     }
 
     // --- testMigrationLogSynthesized: assert the helper reflects the staged
@@ -234,6 +351,7 @@ final class DiagnosticsExporterTests: XCTestCase {
         [features]
         bough = true
         token = "github_pat_exampleSECRET"
+        "ANTHROPIC_API_KEY": "sk-ant-test-quotedSECRET"
         authorization = "Bearer abc.def.ghi"
         source = "\(legacyRepoName)"
         """.write(to: src, atomically: true, encoding: .utf8)
@@ -246,8 +364,51 @@ final class DiagnosticsExporterTests: XCTestCase {
         XCTAssertTrue(copied.contains("bough = true"))
         XCTAssertTrue(copied.contains("<redacted>"))
         XCTAssertFalse(copied.contains("github_pat_exampleSECRET"))
+        XCTAssertFalse(copied.contains("sk-ant-test-quotedSECRET"))
         XCTAssertFalse(copied.contains("Bearer abc.def.ghi"))
+        XCTAssertFalse(copied.contains("abc.def.ghi"))
         XCTAssertFalse(copied.contains(legacyRepoName))
+    }
+
+    func testHookConfigSnapshotRedactsSensitiveHookStrings() throws {
+        let home = try makeTempHome()
+        try stageFile(
+            ".claude/settings.json",
+            content: """
+            {
+              "statusLine": {
+                "command": "echo Bearer abc.def.ghi"
+              },
+              "hooks": {
+                "UserPromptSubmit": [
+                  {
+                    "hooks": [
+                      {
+                        "type": "command",
+                        "command": "curl -H 'Authorization: Bearer abc.def.ghi' https://example.com",
+                        "env": {
+                          "GITHUB_TOKEN": "github_pat_exampleSECRET",
+                          "ANTHROPIC_API_KEY": "sk-ant-hookSECRET"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+            """,
+            under: home
+        )
+
+        let snapshot = DiagnosticsExporter.hookConfigSnapshot(home: home.path)
+        let data = try JSONSerialization.data(withJSONObject: snapshot, options: [.prettyPrinted, .sortedKeys])
+        let json = try XCTUnwrap(String(data: data, encoding: .utf8))
+
+        XCTAssertTrue(json.contains("<redacted>"))
+        XCTAssertFalse(json.contains("github_pat_exampleSECRET"))
+        XCTAssertFalse(json.contains("sk-ant-hookSECRET"))
+        XCTAssertFalse(json.contains("Bearer abc.def.ghi"))
+        XCTAssertFalse(json.contains("abc.def.ghi"))
     }
 
     func testCopyIfExists_noopWhenSourceAbsent() throws {

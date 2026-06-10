@@ -75,7 +75,7 @@ struct TerminalVisibilityDetector {
         // tmux takes priority: if session runs in a tmux pane, check that pane
         // regardless of which terminal app wraps tmux (iTerm2, Ghostty, etc.)
         if let pane = session.tmuxPane, !pane.isEmpty {
-            return isTmuxPaneActive(pane)
+            return isTmuxPaneActive(pane, tmuxEnv: session.tmuxEnv)
         }
 
         // Route by bundle ID first (precise), then by TERM_PROGRAM (fallback).
@@ -226,31 +226,53 @@ struct TerminalVisibilityDetector {
                     let winFocused = (window["is_focused"] as? Bool) == true
                     guard winFocused else { continue }
 
-                    // Match by window ID (precise)
-                    if let wid = session.kittyWindowId,
-                       let winId = window["id"] as? Int,
-                       "\(winId)" == wid { return true }
-
-                    return false
+                    return kittyFocusedWindowMatchesSession(session, window: window)
                 }
             }
         }
         return false
     }
 
+    static func kittyFocusedWindowMatchesSession(_ session: SessionSnapshot, window: [String: Any]) -> Bool {
+        if let wid = session.kittyWindowId?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !wid.isEmpty {
+            if let winId = window["id"] as? Int {
+                return "\(winId)" == wid
+            }
+            return false
+        }
+
+        guard let cwd = session.cwd?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !cwd.isEmpty,
+              let windowCwd = window["cwd"] as? String else { return false }
+        return normalizedKittyCwd(windowCwd) == normalizedKittyCwd(cwd)
+    }
+
+    private static func normalizedKittyCwd(_ cwd: String) -> String {
+        var path = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+        if path.hasPrefix("file://") {
+            path = URL(string: path)?.path ?? String(path.dropFirst("file://".count))
+        }
+        while path.count > 1, path.hasSuffix("/") {
+            path.removeLast()
+        }
+        return path
+    }
+
     // MARK: - tmux
 
     /// Check if the tmux pane is the currently active one.
-    private static func isTmuxPaneActive(_ pane: String) -> Bool {
+    private static func isTmuxPaneActive(_ pane: String, tmuxEnv: String? = nil) -> Bool {
         guard let bin = findBinary("tmux") else { return false }
+        let env = tmuxProcessEnv(tmuxEnv)
 
         // Get the currently active pane
-        guard let data = runProcess(bin, args: ["display-message", "-p", "#{session_name}:#{window_index}.#{pane_index}"]),
+        guard let data = runProcess(bin, args: ["display-message", "-p", "#{session_name}:#{window_index}.#{pane_index}"], env: env),
               let activePaneId = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !activePaneId.isEmpty else { return false }
 
         // The stored pane might be %N format; convert via list-panes
-        guard let listData = runProcess(bin, args: ["list-panes", "-a", "-F", "#{pane_id} #{session_name}:#{window_index}.#{pane_index}"]),
+        guard let listData = runProcess(bin, args: ["list-panes", "-a", "-F", "#{pane_id} #{session_name}:#{window_index}.#{pane_index}"], env: env),
               let listStr = String(data: listData, encoding: .utf8) else { return pane == activePaneId }
 
         for line in listStr.split(separator: "\n") {
@@ -288,9 +310,15 @@ struct TerminalVisibilityDetector {
     }
 
     @discardableResult
-    private static func runProcess(_ path: String, args: [String]) -> Data? {
+    private static func runProcess(_ path: String, args: [String], env: [String: String]? = nil) -> Data? {
         // 5s cap — visibility checks fire from the main thread (NotchPanelView,
         // PanelWindowController) and a stuck osascript would stutter the UI.
-        ProcessRunner.run(path: path, args: args, timeout: 5)
+        ProcessRunner.run(path: path, args: args, env: env, timeout: 5)
+    }
+
+    private static func tmuxProcessEnv(_ tmuxEnv: String?) -> [String: String]? {
+        guard let tmuxEnv = tmuxEnv?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !tmuxEnv.isEmpty else { return nil }
+        return ["TMUX": tmuxEnv]
     }
 }

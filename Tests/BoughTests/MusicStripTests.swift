@@ -167,6 +167,15 @@ final class MusicStripTests: XCTestCase {
         XCTAssertFalse(figure.contains("\"play.fill\""))
     }
 
+    func testArtworkTileDecodesOnlyWhenArtworkChanges() throws {
+        let source = try sourceFile("Sources/Bough/Notch/MusicStrip.swift")
+        let tile = try XCTUnwrap(source.slice(from: "private struct MusicArtworkTile", to: "struct MusicControlButton"))
+
+        XCTAssertTrue(tile.contains("_decodedImage = State(initialValue: nil)"))
+        XCTAssertTrue(tile.contains(".onChange(of: artwork, initial: true)"))
+        XCTAssertFalse(tile.contains("State(initialValue: artwork.flatMap { NSImage(data: $0.data) })"))
+    }
+
     func testExpandedStripAndControlsRespectReduceMotion() throws {
         let source = try sourceFile("Sources/Bough/Notch/MusicStrip.swift")
         let strip = try XCTUnwrap(source.slice(from: "struct MusicStrip: View", to: "@MainActor\nstruct CompactMusicPlayPauseControl"))

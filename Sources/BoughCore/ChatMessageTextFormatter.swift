@@ -3,6 +3,7 @@ import Foundation
 public enum ChatMessageTextFormatter {
     private static var markdownCache: [String: AttributedString] = [:]
     private static let markdownCacheLimit = 128
+    private static let markdownCacheLock = NSLock()
 
     public static func displayText(for message: ChatMessage) -> AttributedString {
         message.isUser ? literalText(message.text) : inlineMarkdown(message.text)
@@ -13,12 +14,20 @@ public enum ChatMessageTextFormatter {
     }
 
     public static func inlineMarkdown(_ text: String) -> AttributedString {
-        if let cached = markdownCache[text] { return cached }
+        markdownCacheLock.lock()
+        if let cached = markdownCache[text] {
+            markdownCacheLock.unlock()
+            return cached
+        }
+        markdownCacheLock.unlock()
 
         let result: AttributedString = text.contains("```")
             ? renderWithFencedCodeBlocks(text)
             : renderInlineOnly(text)
 
+        markdownCacheLock.lock()
+        defer { markdownCacheLock.unlock() }
+        if let cached = markdownCache[text] { return cached }
         if markdownCache.count >= markdownCacheLimit {
             markdownCache.removeAll(keepingCapacity: true)
         }

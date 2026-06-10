@@ -83,6 +83,16 @@ final class MusicMediaRemoteAdapterTests: XCTestCase {
         XCTAssertTrue(source.contains("payload?.hasDisplayableMediaRemoteMetadata == true"))
     }
 
+    func testAdapterSourceBoundsMediaRemoteCallbacksBeforeScriptFallback() throws {
+        let source = try sourceFile("Sources/Bough/Music/MediaRemoteNowPlayingService.swift")
+
+        XCTAssertTrue(source.contains("private static let callbackTimeoutNanoseconds"))
+        XCTAssertTrue(source.contains("private final class MediaRemoteContinuationGate"))
+        XCTAssertTrue(source.contains("Task.sleep(nanoseconds: Self.callbackTimeoutNanoseconds)"))
+        XCTAssertTrue(source.contains("await withMediaRemoteCallbackTimeout(defaultValue: NSDictionary())"))
+        XCTAssertTrue(source.contains("await withMediaRemoteCallbackTimeout(defaultValue: nil)"))
+    }
+
     func testAdapterSourceCachesQQMusicAlbumLookupMisses() throws {
         let source = try sourceFile("Sources/Bough/Music/MediaRemoteNowPlayingService.swift")
 

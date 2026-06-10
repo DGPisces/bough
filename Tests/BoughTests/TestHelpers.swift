@@ -1,4 +1,7 @@
+import Darwin
 import Foundation
+@testable import Bough
+@testable import BoughCore
 import XCTest
 
 /// Resolves the repository root from a test file's `#filePath` literal.
@@ -13,6 +16,9 @@ import XCTest
 /// private static let repoRoot = TestHelpers.repoRoot(from: #filePath)
 /// ```
 enum TestHelpers {
+    static let processEnvironmentLock = TestProcessStateLock()
+    static let processStateLock = processEnvironmentLock
+
     static func repoRoot(from filePath: String) -> URL {
         let root = URL(fileURLWithPath: filePath)
             .deletingLastPathComponent()   // BoughTests/
@@ -27,5 +33,50 @@ enum TestHelpers {
             "check deletingLastPathComponent() depth. Path: \(root.path)"
         )
         return root
+    }
+
+    static func restoreUserDefaultsValue(_ value: Any?, forKey key: String) {
+        if let value {
+            UserDefaults.standard.set(value, forKey: key)
+        } else {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
+    static func restoreSharedLanguage(_ language: String, savedDefaultValue: Any?) {
+        L10n.shared.language = language
+        restoreUserDefaultsValue(savedDefaultValue, forKey: SettingsKey.appLanguage)
+    }
+}
+
+final class TestProcessStateLock {
+    private static let lockName = "dev.dgpisces.bough.tests.process-state"
+    private let localLock = NSLock()
+    private let handle: FileHandle
+
+    init() {
+        let filename = Self.lockName.replacingOccurrences(of: "/", with: "-")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(filename).lock")
+        _ = FileManager.default.createFile(atPath: url.path, contents: nil)
+        do {
+            handle = try FileHandle(forUpdating: url)
+        } catch {
+            preconditionFailure("Failed to open test process-state lock \(url.path): \(error)")
+        }
+    }
+
+    func lock() {
+        localLock.lock()
+        while flock(handle.fileDescriptor, LOCK_EX) == -1 {
+            if errno != EINTR {
+                localLock.unlock()
+                preconditionFailure("Failed to lock test process-state file")
+            }
+        }
+    }
+
+    func unlock() {
+        precondition(flock(handle.fileDescriptor, LOCK_UN) == 0, "Failed to unlock test process-state file")
+        localLock.unlock()
     }
 }

@@ -288,80 +288,6 @@ private struct SettingsSearchShortcutBridge: NSViewRepresentable {
     }
 }
 
-// MARK: - Remote Page
-
-private struct RemoteHostsPage: View {
-    @ObservedObject private var l10n = L10n.shared
-    @ObservedObject private var remoteManager = RemoteManager.shared
-
-    @State private var name = ""
-    @State private var host = ""
-    @State private var user = ""
-    @State private var port = ""
-    @State private var identityFile = ""
-    @State private var authSocket = ""
-    @State private var autoConnect = false
-
-    var body: some View {
-        Form {
-            Section(l10n["remote_hosts"]) {
-                if remoteManager.hosts.isEmpty {
-                    Text(l10n["remote_hosts_empty"])
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(remoteManager.hosts) { remoteHost in
-                        RemoteHostRow(host: remoteHost)
-                    }
-                }
-            }
-
-            Section(l10n["add_remote_host"]) {
-                TextField(l10n["remote_name"], text: $name)
-                TextField(l10n["remote_host"], text: $host)
-                TextField(l10n["remote_user"], text: $user)
-                TextField(l10n["remote_port"], text: $port)
-                TextField(l10n["remote_identity"], text: $identityFile)
-                TextField(l10n["remote_auth_socket"], text: $authSocket,
-                          prompt: Text(l10n["remote_auth_socket_placeholder"]))
-                Toggle(l10n["remote_auto_connect"], isOn: $autoConnect)
-
-                Button(l10n["remote_add_button"]) {
-                    let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmedName.isEmpty, !trimmedHost.isEmpty else { return }
-
-                    remoteManager.addHost(RemoteHost(
-                        name: trimmedName,
-                        host: trimmedHost,
-                        user: user.trimmingCharacters(in: .whitespacesAndNewlines),
-                        port: Int(port.trimmingCharacters(in: .whitespacesAndNewlines)),
-                        identityFile: identityFile.trimmingCharacters(in: .whitespacesAndNewlines),
-                        autoConnect: autoConnect,
-                        authSocket: authSocket.trimmingCharacters(in: .whitespacesAndNewlines)
-                    ))
-
-                    name = ""
-                    host = ""
-                    user = ""
-                    port = ""
-                    identityFile = ""
-                    authSocket = ""
-                    autoConnect = false
-                }
-                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    || host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-
-            Section {
-                Text(l10n["remote_hint"])
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .formStyle(.grouped)
-    }
-}
-
 private struct RemoteHostRow: View {
     @ObservedObject private var l10n = L10n.shared
     @ObservedObject private var remoteManager = RemoteManager.shared
@@ -448,13 +374,6 @@ private struct RemoteHostRow: View {
         } message: {
             Text(String(format: l10n["settings_confirm_remove_remote_message"], host.name))
         }
-    }
-}
-
-private struct PageHeader: View {
-    let title: String
-    var body: some View {
-        EmptyView()
     }
 }
 
@@ -1017,215 +936,13 @@ private struct SessionDisplayPage: View {
     }
 }
 
-// MARK: - Behavior Page
-
-private struct BehaviorPage: View {
-    @ObservedObject private var l10n = L10n.shared
-    @AppStorage(SettingsKey.hideInFullscreen) private var hideInFullscreen = SettingsDefaults.hideInFullscreen
-    @AppStorage(SettingsKey.hideWhenNoSession) private var hideWhenNoSession = SettingsDefaults.hideWhenNoSession
-    @AppStorage(SettingsKey.collapseOnMouseLeave) private var collapseOnMouseLeave = SettingsDefaults.collapseOnMouseLeave
-    @AppStorage(SettingsKey.autoCollapseAfterSessionJump) private var autoCollapseAfterSessionJump = SettingsDefaults.autoCollapseAfterSessionJump
-    @AppStorage(SettingsKey.autoExpandOnCompletion) private var autoExpandOnCompletion = SettingsDefaults.autoExpandOnCompletion
-    @AppStorage(SettingsKey.pluginSessionMode) private var pluginSessionMode = SettingsDefaults.pluginSessionMode
-    @AppStorage(SettingsKey.hapticOnHover) private var hapticOnHover = SettingsDefaults.hapticOnHover
-    @AppStorage(SettingsKey.hapticIntensity) private var hapticIntensity = SettingsDefaults.hapticIntensity
-    @AppStorage(SettingsKey.sessionTimeout) private var sessionTimeout = SettingsDefaults.sessionTimeout
-    @AppStorage(SettingsKey.rotationInterval) private var rotationInterval = SettingsDefaults.rotationInterval
-    @AppStorage(SettingsKey.maxToolHistory) private var maxToolHistory = SettingsDefaults.maxToolHistory
-    @AppStorage(SettingsKey.autoApproveTools) private var autoApproveRaw: String = SettingsDefaults.autoApproveTools
-    @AppStorage(SettingsKey.excludedHookCwdSubstrings) private var excludedHookCwdSubstrings: String = SettingsDefaults.excludedHookCwdSubstrings
-    @AppStorage(SettingsKey.webhookEnabled) private var webhookEnabled: Bool = SettingsDefaults.webhookEnabled
-    @AppStorage(SettingsKey.webhookURL) private var webhookURL: String = SettingsDefaults.webhookURL
-    @AppStorage(SettingsKey.webhookEventFilter) private var webhookEventFilter: String = SettingsDefaults.webhookEventFilter
-    let highlightedTargetID: SettingsTargetID? = nil
-
-    private func autoApproveBinding(for name: String) -> Binding<Bool> {
-        Binding(
-            get: { autoApproveRaw.split(separator: ",").contains(Substring(name)) },
-            set: { isOn in
-                var set = Set(autoApproveRaw.split(separator: ",").map(String.init))
-                if isOn { set.insert(name) } else { set.remove(name) }
-                autoApproveRaw = set.sorted().joined(separator: ",")
-            }
-        )
-    }
-
-    private func autoApproveTargetID(for name: String) -> SettingsTargetID {
-        switch name {
-        case "TaskCreate": return .advancedAutoApproveTaskCreate
-        case "TaskUpdate": return .advancedAutoApproveTaskUpdate
-        case "TaskGet": return .advancedAutoApproveTaskGet
-        case "TaskList": return .advancedAutoApproveTaskList
-        case "TaskOutput": return .advancedAutoApproveTaskOutput
-        case "TaskStop": return .advancedAutoApproveTaskStop
-        case "TodoRead": return .advancedAutoApproveTodoRead
-        case "TodoWrite": return .advancedAutoApproveTodoWrite
-        case "EnterPlanMode": return .advancedAutoApproveEnterPlanMode
-        case "ExitPlanMode": return .advancedAutoApproveExitPlanMode
-        default: return .advancedAutomation
-        }
-    }
-
-    var body: some View {
-        Form {
-            Section(l10n["display_section"]) {
-                BehaviorToggleRow(
-                    title: l10n["hide_in_fullscreen"],
-                    desc: l10n["hide_in_fullscreen_desc"],
-                    isOn: $hideInFullscreen,
-                    animation: .hideFullscreen
-                )
-                BehaviorToggleRow(
-                    title: l10n["hide_when_no_session"],
-                    desc: l10n["hide_when_no_session_desc"],
-                    isOn: $hideWhenNoSession,
-                    animation: .hideNoSession
-                )
-                BehaviorToggleRow(
-                    title: l10n["collapse_on_mouse_leave"],
-                    desc: l10n["collapse_on_mouse_leave_desc"],
-                    isOn: $collapseOnMouseLeave,
-                    animation: .collapseMouseLeave
-                )
-                BehaviorToggleRow(
-                    title: l10n["auto_collapse_after_session_jump"],
-                    desc: l10n["auto_collapse_after_session_jump_desc"],
-                    isOn: $autoCollapseAfterSessionJump,
-                    animation: .clickJumpCollapse
-                )
-                BehaviorToggleRow(
-                    title: l10n["auto_expand_on_completion"],
-                    desc: l10n["auto_expand_on_completion_desc"],
-                    isOn: $autoExpandOnCompletion,
-                    animation: .completionExpand
-                )
-                BehaviorToggleRow(
-                    title: l10n["haptic_on_hover"],
-                    desc: l10n["haptic_on_hover_desc"],
-                    isOn: $hapticOnHover,
-                    animation: .hapticHover
-                )
-                if hapticOnHover {
-                    Picker(selection: $hapticIntensity) {
-                        Text(l10n["haptic_light"]).tag(1)
-                        Text(l10n["haptic_medium"]).tag(2)
-                        Text(l10n["haptic_strong"]).tag(3)
-                    } label: {
-                        EmptyView()
-                    }
-                    .pickerStyle(.segmented)
-                    .padding(.leading, BehaviorToggleRowMetrics.secondaryControlLeadingPadding)
-                }
-            }
-
-            Section(l10n["auto_approve_tools"]) {
-                Text(l10n["auto_approve_tools_desc"])
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                ForEach(SettingsManager.allAutoApproveTools, id: \.name) { tool in
-                    let targetID = autoApproveTargetID(for: tool.name)
-                    Toggle(isOn: autoApproveBinding(for: tool.name)) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(tool.name)
-                                .font(.system(size: 12, design: .monospaced))
-                            Text(l10n["auto_approve_\(tool.name)"])
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .id(targetID)
-                    .settingsControlHighlight(isHighlighted: highlightedTargetID == targetID)
-                }
-            }
-
-            Section(l10n["excluded_hook_cwd_title"]) {
-                Text(l10n["excluded_hook_cwd_desc"])
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                TextField(l10n["excluded_hook_cwd_placeholder"], text: $excludedHookCwdSubstrings)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-                    .id(SettingsTargetID.advancedExcludedHookPaths)
-                    .settingsControlHighlight(isHighlighted: highlightedTargetID == .advancedExcludedHookPaths)
-            }
-
-            Section(l10n["webhook_title"]) {
-                Text(l10n["webhook_desc"])
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Toggle(l10n["webhook_enable"], isOn: $webhookEnabled)
-                if webhookEnabled {
-                    TextField(l10n["webhook_url_placeholder"], text: $webhookURL)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
-                        .autocorrectionDisabled(true)
-                    TextField(l10n["webhook_filter_placeholder"], text: $webhookEventFilter)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
-                        .autocorrectionDisabled(true)
-                    Text(l10n["webhook_filter_hint"])
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Section(l10n["sessions"]) {
-                Picker(selection: $sessionTimeout) {
-                    Text(l10n["no_cleanup"]).tag(0)
-                    Text(l10n["10_minutes"]).tag(10)
-                    Text(l10n["30_minutes"]).tag(30)
-                    Text(l10n["1_hour"]).tag(60)
-                    Text(l10n["2_hours"]).tag(120)
-                } label: {
-                    Text(l10n["session_cleanup"])
-                    Text(l10n["session_cleanup_desc"])
-                }
-                .id(SettingsTargetID.advancedSessionCleanup)
-                .settingsControlHighlight(isHighlighted: highlightedTargetID == .advancedSessionCleanup)
-                Picker(selection: $rotationInterval) {
-                    Text(l10n["3_seconds"]).tag(3)
-                    Text(l10n["5_seconds"]).tag(5)
-                    Text(l10n["8_seconds"]).tag(8)
-                    Text(l10n["10_seconds"]).tag(10)
-                } label: {
-                    Text(l10n["rotation_interval"])
-                    Text(l10n["rotation_interval_desc"])
-                }
-                .id(SettingsTargetID.advancedRotationInterval)
-                .settingsControlHighlight(isHighlighted: highlightedTargetID == .advancedRotationInterval)
-                Picker(selection: $maxToolHistory) {
-                    Text("10").tag(10)
-                    Text("20").tag(20)
-                    Text("50").tag(50)
-                    Text("100").tag(100)
-                } label: {
-                    Text(l10n["tool_history_limit"])
-                    Text(l10n["tool_history_limit_desc"])
-                }
-                .id(SettingsTargetID.advancedToolHistoryLimit)
-                .settingsControlHighlight(isHighlighted: highlightedTargetID == .advancedToolHistoryLimit)
-                Picker(selection: $pluginSessionMode) {
-                    Text(l10n["plugin_session_mode_separate"]).tag("separate")
-                    Text(l10n["plugin_session_mode_merge"]).tag("merge")
-                    Text(l10n["plugin_session_mode_hide"]).tag("hide")
-                } label: {
-                    Text(l10n["plugin_session_mode"])
-                    Text(l10n["plugin_session_mode_desc"])
-                }
-                .id(SettingsTargetID.advancedPluginSessions)
-                .settingsControlHighlight(isHighlighted: highlightedTargetID == .advancedPluginSessions)
-            }
-        }
-        .formStyle(.grouped)
-    }
-}
-
 // MARK: - Integrations Page
 
 private struct IntegrationsPage: View {
     @ObservedObject private var l10n = L10n.shared
     @ObservedObject private var remoteManager = RemoteManager.shared
     @State private var cliStatuses: [String: Bool] = [:]
+    @State private var cliEnabledStates: [String: Bool] = [:]
     @State private var statusMessage = ""
     @State private var statusIsError = false
     @State private var refreshKey = 0
@@ -1271,23 +988,19 @@ private struct IntegrationsPage: View {
     /// re-establishes both halves.
     private static func computeClaudeIntegrationEnabled() -> Bool {
         let hookOn = ConfigInstaller.isEnabled(source: "claude")
-        let cmd = ConfigInstaller.currentClaudeCodeStatusLineCommand()
-        let wrapper = ConfigInstaller.claudeCodeStatusLineWrapperInstallPath()
-        let proposed = ConfigInstaller.proposedClaudeCodeStatusLineCommand()
-        let statusLineOn: Bool = {
-            guard let cmd else { return false }
-            if cmd == wrapper { return true }
-            if let proposed, cmd == proposed { return true }
-            return false
-        }()
+        let statusLineOn = ConfigInstaller.isBoughClaudeCodeStatusLineCommand(
+            ConfigInstaller.currentClaudeCodeStatusLineCommand()
+        )
         return hookOn && statusLineOn
     }
 
     private func refreshCLIStatuses() {
         for cli in ConfigInstaller.allCLIs {
             cliStatuses[cli.source] = ConfigInstaller.isInstalled(source: cli.source)
+            cliEnabledStates[cli.source] = ConfigInstaller.isEnabled(source: cli.source)
         }
         cliStatuses["opencode"] = ConfigInstaller.isInstalled(source: "opencode")
+        cliEnabledStates["opencode"] = ConfigInstaller.isEnabled(source: "opencode")
         claudeIntegrationEnabled = IntegrationsPage.computeClaudeIntegrationEnabled()
     }
 
@@ -1310,10 +1023,9 @@ private struct IntegrationsPage: View {
             )
         }
         if desired {
-            let result = await ChainInstallCoordinator.shared.install(replaceExisting: false)
+            let result = await ChainInstallCoordinator.shared.installClaudeIntegration(replaceExisting: false)
             switch result {
             case .installed, .chained:
-                _ = ConfigInstaller.setEnabled(source: "claude", enabled: true)
                 claudeIntegrationEnabled = true
             case .conflict:
                 // A user-installed third-party statusLine is in place. Surface
@@ -1330,8 +1042,7 @@ private struct IntegrationsPage: View {
                 claudeIntegrationEnabled = false
             }
         } else {
-            _ = ConfigInstaller.uninstallClaudeCodeStatusLine()
-            _ = ConfigInstaller.setEnabled(source: "claude", enabled: false)
+            _ = await ChainInstallCoordinator.shared.uninstallClaudeIntegration()
             claudeIntegrationEnabled = false
         }
     }
@@ -1379,6 +1090,7 @@ private struct IntegrationsPage: View {
             ) {
                 ForEach(ConfigInstaller.allCLIs, id: \.source) { cli in
                     let installed = cliStatuses[cli.source] ?? false
+                    let enabled = cliEnabledStates[cli.source] ?? ConfigInstaller.isEnabled(source: cli.source)
                     let exists = ConfigInstaller.cliExists(source: cli.source)
                     let targetID = localToolTargetID(for: cli.source)
                     if cli.source == "claude" {
@@ -1391,6 +1103,7 @@ private struct IntegrationsPage: View {
                             configPath: cli.displayConfigPath,
                             fullPath: cli.fullPath,
                             installed: installed,
+                            enabled: claudeIntegrationEnabled,
                             exists: exists,
                             subtitle: l10n["usage_claude_integration_subtitle"],
                             busy: claudeBusy,
@@ -1407,6 +1120,7 @@ private struct IntegrationsPage: View {
                             configPath: cli.displayConfigPath,
                             fullPath: cli.fullPath,
                             installed: installed,
+                            enabled: enabled,
                             exists: exists
                         ) { _ in refreshCLIStatuses() }
                         .id(targetID ?? .integrationsLocalTools)
@@ -1415,13 +1129,15 @@ private struct IntegrationsPage: View {
                 }
                 // OpenCode (plugin-based, not hooks)
                 let ocInstalled = cliStatuses["opencode"] ?? false
+                let ocEnabled = cliEnabledStates["opencode"] ?? ConfigInstaller.isEnabled(source: "opencode")
                 let ocExists = ConfigInstaller.cliExists(source: "opencode")
                 CLIStatusRow(
                     name: "OpenCode",
                     source: "opencode",
-                    configPath: "~/.config/opencode/config.json",
-                    fullPath: NSHomeDirectory() + "/.config/opencode/config.json",
+                    configPath: ConfigInstaller.opencodePluginDisplayPath(),
+                    fullPath: ConfigInstaller.opencodePluginInstallPath(),
                     installed: ocInstalled,
+                    enabled: ocEnabled,
                     exists: ocExists
                 ) { _ in refreshCLIStatuses() }
                 .id(SettingsTargetID.integrationsLocalToolOpenCode)
@@ -1493,7 +1209,15 @@ private struct IntegrationsPage: View {
                     let normalizedSource = customSource
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                         .lowercased()
-                    _ = ConfigInstaller.setEnabled(source: normalizedSource, enabled: true)
+                    guard ConfigInstaller.setEnabled(source: normalizedSource, enabled: true) else {
+                        _ = ConfigInstaller.removeCustomCLI(source: normalizedSource)
+                        _ = ConfigInstaller.setEnabled(source: normalizedSource, enabled: false)
+                        statusMessage = "Custom CLI saved, but hook installation failed"
+                        statusIsError = true
+                        refreshCLIStatuses()
+                        refreshKey += 1
+                        return
+                    }
                     customName = ""
                     customSource = ""
                     customConfigPath = ""
@@ -1732,6 +1456,7 @@ private struct CLIStatusRow: View {
     let configPath: String
     let fullPath: String
     let installed: Bool
+    let enabled: Bool
     let exists: Bool
     /// Regression guard: subtitle text under the row label.
     /// Used by the Claude Code row to explain that the toggle wires up
@@ -1748,10 +1473,8 @@ private struct CLIStatusRow: View {
     let overrideEnabled: Bool?
     var onToggle: ((Bool) -> Void)?
 
-    @State private var enabled: Bool
-
     init(name: String, source: String, configPath: String, fullPath: String,
-         installed: Bool, exists: Bool,
+         installed: Bool, enabled: Bool? = nil, exists: Bool,
          subtitle: String? = nil,
          busy: Bool = false,
          overrideEnabled: Bool? = nil,
@@ -1761,12 +1484,12 @@ private struct CLIStatusRow: View {
         self.configPath = configPath
         self.fullPath = fullPath
         self.installed = installed
+        self.enabled = enabled ?? ConfigInstaller.isEnabled(source: source)
         self.exists = exists
         self.subtitle = subtitle
         self.busy = busy
         self.overrideEnabled = overrideEnabled
         self.onToggle = onToggle
-        _enabled = State(initialValue: overrideEnabled ?? ConfigInstaller.isEnabled(source: source))
     }
 
     var body: some View {
@@ -1806,32 +1529,22 @@ private struct CLIStatusRow: View {
                         .frame(width: 14, height: 14)
                 }
                 if exists {
-                    Toggle("", isOn: $enabled)
-                        .labelsHidden()
-                        .disabled(busy)
-                        .onChange(of: enabled) { _, newValue in
-                            // Regression guard: when the parent
-                            // owns the install side-effect (Claude Code),
-                            // it is responsible for calling setEnabled itself
-                            // inside its async handler so the order of
-                            // operations is deterministic. The parent signals
-                            // this by providing `overrideEnabled`; in that
-                            // case the row stays a pure presenter and only
-                            // forwards the new value upstream.
+                    let toggleBinding = Binding<Bool>(
+                        get: { overrideEnabled ?? enabled },
+                        set: { newValue in
                             if overrideEnabled == nil {
-                                ConfigInstaller.setEnabled(source: source, enabled: newValue)
+                                let ok = ConfigInstaller.setEnabled(source: source, enabled: newValue)
+                                if !ok {
+                                    onToggle?(false)
+                                    return
+                                }
                             }
                             onToggle?(newValue)
                         }
-                        .onChange(of: overrideEnabled ?? enabled) { _, newValue in
-                            // Keep the visual toggle in sync with the parent's
-                            // authoritative state (e.g. after an install
-                            // failure rolls back).
-                            if let override = overrideEnabled, override != enabled {
-                                enabled = override
-                            }
-                            _ = newValue
-                        }
+                    )
+                    Toggle("", isOn: toggleBinding)
+                        .labelsHidden()
+                        .disabled(busy)
                 }
             }
             if let subtitle, exists {

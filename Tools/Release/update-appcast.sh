@@ -22,7 +22,7 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BUILD_DIR="$REPO_ROOT/.build"
-APPCAST="$REPO_ROOT/Tools/Release/appcast.xml"
+APPCAST="${BOUGH_APPCAST_PATH:-$REPO_ROOT/Tools/Release/appcast.xml}"
 SIGN_UPDATE="$BUILD_DIR/artifacts/sparkle/Sparkle/bin/sign_update"
 
 if [[ ! -x "$SIGN_UPDATE" ]]; then
@@ -126,7 +126,7 @@ fi
 echo "==> Updating version ${VERSION} in $APPCAST"
 if /usr/bin/grep -qF "<sparkle:version>${BUILD}</sparkle:version>" "$APPCAST"; then
     if [[ "${BOUGH_APPCAST_REPLACE_EXISTING:-0}" != "1" ]]; then
-        echo "ERROR: build ${BUILD} (v${VERSION}) is already in Tools/Release/appcast.xml. Bump CFBundleVersion in Platform/Apple/Info.plist, edit by hand, or set BOUGH_APPCAST_REPLACE_EXISTING=1 for a same-build asset re-sign." >&2
+        echo "ERROR: build ${BUILD} (v${VERSION}) is already in $APPCAST. Bump CFBundleVersion in Platform/Apple/Info.plist, edit by hand, or set BOUGH_APPCAST_REPLACE_EXISTING=1 for a same-build asset re-sign." >&2
         exit 1
     fi
     NEW_ITEM="$NEW_ITEM" BUILD="$BUILD" /usr/bin/perl -0pi -e '
@@ -148,7 +148,7 @@ else
     ' "$NEW_ITEM" "$APPCAST"
 fi
 
-echo "==> Tools/Release/appcast.xml updated:"
+echo "==> Appcast updated: $APPCAST"
 echo "    releaseTag=${RELEASE_TAG}"
 echo "    releaseLabel=${RELEASE_LABEL}"
 echo "    shortVersionString=${VERSION}"

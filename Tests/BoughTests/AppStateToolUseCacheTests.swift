@@ -19,7 +19,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
 
         appState.handleEvent(event)
 
-        let cached = try XCTUnwrap(appState.pendingToolUses["toolu_1"])
+        let cached = try XCTUnwrap(appState.pendingToolUses[toolUseKey(sessionId: "s1", toolUseId: "toolu_1")])
         XCTAssertEqual(cached.sessionId, "s1")
         XCTAssertEqual(cached.toolName, "Bash")
     }
@@ -27,11 +27,11 @@ final class AppStateToolUseCacheTests: XCTestCase {
     func testPostToolUseClearsCache() throws {
         let appState = AppState()
         appState.handleEvent(try makeHookEvent(name: "PreToolUse", sessionId: "s1", toolName: "Bash", toolUseId: "toolu_1"))
-        XCTAssertNotNil(appState.pendingToolUses["toolu_1"])
+        XCTAssertNotNil(appState.pendingToolUses[toolUseKey(sessionId: "s1", toolUseId: "toolu_1")])
 
         appState.handleEvent(try makeHookEvent(name: "PostToolUse", sessionId: "s1", toolName: "Bash", toolUseId: "toolu_1"))
 
-        XCTAssertNil(appState.pendingToolUses["toolu_1"])
+        XCTAssertNil(appState.pendingToolUses[toolUseKey(sessionId: "s1", toolUseId: "toolu_1")])
     }
 
     func testPostToolUseFailureAlsoClearsCache() throws {
@@ -40,19 +40,19 @@ final class AppStateToolUseCacheTests: XCTestCase {
 
         appState.handleEvent(try makeHookEvent(name: "PostToolUseFailure", sessionId: "s1", toolName: "Bash", toolUseId: "toolu_1"))
 
-        XCTAssertNil(appState.pendingToolUses["toolu_1"])
+        XCTAssertNil(appState.pendingToolUses[toolUseKey(sessionId: "s1", toolUseId: "toolu_1")])
     }
 
     func testPruneRemovesExpiredRecords() throws {
         let appState = AppState()
-        appState.pendingToolUses["ancient"] = PreToolUseRecord(
+        appState.pendingToolUses[toolUseKey(sessionId: "s1", toolUseId: "ancient")] = PreToolUseRecord(
             sessionId: "s1",
             toolName: "Bash",
             toolDescription: nil,
             toolInput: nil,
             receivedAt: Date(timeIntervalSinceNow: -(AppState.pendingToolUseTTL + 60))
         )
-        appState.pendingToolUses["fresh"] = PreToolUseRecord(
+        appState.pendingToolUses[toolUseKey(sessionId: "s1", toolUseId: "fresh")] = PreToolUseRecord(
             sessionId: "s1",
             toolName: "Bash",
             toolDescription: nil,
@@ -62,8 +62,8 @@ final class AppStateToolUseCacheTests: XCTestCase {
 
         appState.prunePendingToolUses()
 
-        XCTAssertNil(appState.pendingToolUses["ancient"])
-        XCTAssertNotNil(appState.pendingToolUses["fresh"])
+        XCTAssertNil(appState.pendingToolUses[toolUseKey(sessionId: "s1", toolUseId: "ancient")])
+        XCTAssertNotNil(appState.pendingToolUses[toolUseKey(sessionId: "s1", toolUseId: "fresh")])
     }
 
     // MARK: - Duplicate PermissionRequest replay
@@ -98,6 +98,35 @@ final class AppStateToolUseCacheTests: XCTestCase {
         XCTAssertEqual(try behavior(secondResponse), "allow")
     }
 
+    func testSameToolUseIdDifferentSessionDoesNotMergePermissionRequests() async throws {
+        let appState = AppState()
+        let first = try makePermissionEvent(sessionId: "s1", toolName: "Bash", toolUseId: "shared")
+        let second = try makePermissionEvent(sessionId: "s2", toolName: "Bash", toolUseId: "shared")
+
+        let firstTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(first, continuation: cont)
+            }
+        }
+        let secondTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(second, continuation: cont)
+            }
+        }
+        await Task.yield()
+
+        XCTAssertEqual(appState.permissionQueue.count, 2)
+        await assertTaskNotResolved(firstTask)
+        await assertTaskNotResolved(secondTask)
+
+        appState.approvePermission()
+        let firstResponse = await firstTask.value
+        XCTAssertEqual(try behavior(firstResponse), "allow")
+        appState.approvePermission()
+        let secondResponse = await secondTask.value
+        XCTAssertEqual(try behavior(secondResponse), "allow")
+    }
+
     // MARK: - Stale queue drain via PostToolUse
 
     func testPostToolUseDrainsQueuedPermissionForSameId() async throws {
@@ -123,6 +152,42 @@ final class AppStateToolUseCacheTests: XCTestCase {
         let response = await responseTask.value
         XCTAssertEqual(try behavior(response), "deny")
         XCTAssertEqual(appState.permissionQueue.count, 0)
+    }
+
+    func testPostToolUseDrainClearsDismissedPermissionId() async throws {
+        let appState = AppState()
+        let first = try makePermissionEvent(sessionId: "s1", toolName: "Bash", toolUseId: "toolu_redismiss")
+
+        let firstTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(first, continuation: cont)
+            }
+        }
+        await Task.yield()
+        appState.dismissPermissionPrompt()
+        XCTAssertNil(appState.activePermissionQueueIndex)
+
+        appState.handleEvent(try makeHookEvent(
+            name: "PostToolUse",
+            sessionId: "s1",
+            toolName: "Bash",
+            toolUseId: "toolu_redismiss"
+        ))
+        let firstResponse = await firstTask.value
+        XCTAssertEqual(try behavior(firstResponse), "deny")
+
+        let second = try makePermissionEvent(sessionId: "s1", toolName: "Bash", toolUseId: "toolu_redismiss")
+        let secondTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(second, continuation: cont)
+            }
+        }
+        await Task.yield()
+
+        XCTAssertEqual(appState.activePermissionQueueIndex, 0)
+        appState.approvePermission()
+        let secondResponse = await secondTask.value
+        XCTAssertEqual(try behavior(secondResponse), "allow")
     }
 
     func testPostToolUseDoesNotAffectUnrelatedQueueEntries() async throws {
@@ -158,6 +223,69 @@ final class AppStateToolUseCacheTests: XCTestCase {
         appState.approvePermission()
         let keptResponse = await keptTask.value
         XCTAssertEqual(try behavior(keptResponse), "allow")
+    }
+
+    func testPostToolUseDoesNotDrainSameToolUseIdFromDifferentSession() async throws {
+        let appState = AppState()
+        let pending = try makePermissionEvent(sessionId: "s2", toolName: "Bash", toolUseId: "shared_drain")
+
+        let responseTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(pending, continuation: cont)
+            }
+        }
+        await Task.yield()
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+
+        appState.handleEvent(try makeHookEvent(
+            name: "PostToolUse",
+            sessionId: "s1",
+            toolName: "Bash",
+            toolUseId: "shared_drain"
+        ))
+
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+        await assertTaskNotResolved(responseTask)
+
+        appState.approvePermission()
+        let response = await responseTask.value
+        XCTAssertEqual(try behavior(response), "allow")
+    }
+
+    func testDismissedPermissionIdIsScopedBySession() async throws {
+        let appState = AppState()
+        let first = try makePermissionEvent(sessionId: "s1", toolName: "Bash", toolUseId: "shared_dismiss")
+        let second = try makePermissionEvent(sessionId: "s2", toolName: "Bash", toolUseId: "shared_dismiss")
+
+        let firstTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(first, continuation: cont)
+            }
+        }
+        await Task.yield()
+        appState.dismissPermissionPrompt()
+        XCTAssertNil(appState.activePermissionQueueIndex)
+
+        let secondTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(second, continuation: cont)
+            }
+        }
+        await Task.yield()
+
+        XCTAssertEqual(appState.activePermissionQueueIndex, 0)
+        appState.approvePermission()
+        let secondResponse = await secondTask.value
+        XCTAssertEqual(try behavior(secondResponse), "allow")
+
+        appState.handleEvent(try makeHookEvent(
+            name: "PostToolUse",
+            sessionId: "s1",
+            toolName: "Bash",
+            toolUseId: "shared_dismiss"
+        ))
+        let firstResponse = await firstTask.value
+        XCTAssertEqual(try behavior(firstResponse), "deny")
     }
 
     // MARK: - issue #147 regression: parallel/plugin tool calls must not deny pending permissions
@@ -275,7 +403,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
 
     // MARK: - Backfill from cache
 
-    func testEnrichBackfillsMissingToolNameFromCache() throws {
+    func testEnrichBackfillsMissingToolNameFromCache() async throws {
         let appState = AppState()
         appState.handleEvent(try makeHookEvent(
             name: "PreToolUse",
@@ -292,15 +420,46 @@ final class AppStateToolUseCacheTests: XCTestCase {
             "tool_use_id": "toolu_enrich"
         ])
 
-        Task {
+        let responseTask = Task<Data, Never> {
             await withCheckedContinuation { cont in
                 appState.handlePermissionRequest(thin, continuation: cont)
             }
         }
 
-        // Give the main actor a tick to execute the synchronous path.
+        // Give the main actor a tick to enqueue the request before reading state.
+        await Task.yield()
         let session = appState.sessions["s1"]
         XCTAssertEqual(session?.currentTool, "Bash")
+        appState.approvePermission()
+        _ = await responseTask.value
+    }
+
+    func testAlwaysApprovalUsesEnrichedToolNameFromCache() async throws {
+        let appState = AppState()
+        appState.handleEvent(try makeHookEvent(
+            name: "PreToolUse",
+            sessionId: "s1",
+            toolName: "Bash",
+            toolUseId: "toolu_always",
+            toolInput: ["command": "ls"]
+        ))
+
+        let thin = try makeRawHookEvent([
+            "hook_event_name": "PermissionRequest",
+            "session_id": "s1",
+            "tool_use_id": "toolu_always"
+        ])
+
+        let responseTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(thin, continuation: cont)
+            }
+        }
+
+        await Task.yield()
+        appState.approvePermission(always: true)
+        let response = await responseTask.value
+        XCTAssertEqual(try alwaysRuleToolName(response), "Bash")
     }
 
     // MARK: - Helpers
@@ -344,11 +503,33 @@ final class AppStateToolUseCacheTests: XCTestCase {
         return event
     }
 
+    private func toolUseKey(sessionId: String, toolUseId: String, source: String? = nil) -> ToolUseKey {
+        var payload: [String: Any] = [
+            "hook_event_name": "PreToolUse",
+            "session_id": sessionId,
+            "tool_use_id": toolUseId
+        ]
+        if let source { payload["_source"] = source }
+        let data = try! JSONSerialization.data(withJSONObject: payload)
+        return ToolUseKey(event: HookEvent(from: data)!)!
+    }
+
     private func behavior(_ data: Data) throws -> String {
         let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
         let hookSpecific = try XCTUnwrap(json["hookSpecificOutput"] as? [String: Any])
         let decision = try XCTUnwrap(hookSpecific["decision"] as? [String: Any])
         return try XCTUnwrap(decision["behavior"] as? String)
+    }
+
+    private func alwaysRuleToolName(_ data: Data) throws -> String {
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let hookSpecific = try XCTUnwrap(json["hookSpecificOutput"] as? [String: Any])
+        let decision = try XCTUnwrap(hookSpecific["decision"] as? [String: Any])
+        let updatedPermissions = try XCTUnwrap(decision["updatedPermissions"] as? [[String: Any]])
+        let firstUpdate = try XCTUnwrap(updatedPermissions.first)
+        let rules = try XCTUnwrap(firstUpdate["rules"] as? [[String: Any]])
+        let firstRule = try XCTUnwrap(rules.first)
+        return try XCTUnwrap(firstRule["toolName"] as? String)
     }
 
     private func assertTaskNotResolved(_ task: Task<Data, Never>, timeout: TimeInterval = 0.05) async {

@@ -134,12 +134,47 @@ final class UsageThresholdDetectorTests: XCTestCase {
         ).isEmpty)
     }
 
+    func testStaleSnapshotsDoNotTriggerThresholdCrossings() {
+        let freshPrevious = makeSnapshot(weeklyUsed: 75.0)
+        let freshCurrent = makeSnapshot(weeklyUsed: 81.0)
+
+        XCTAssertTrue(UsageThresholdDetector.detectCrossings(
+            previous: freshPrevious.markingStale(reason: "stale prior"),
+            current: freshCurrent,
+            detectedAt: detectedAt
+        ).isEmpty)
+        XCTAssertTrue(UsageThresholdDetector.detectCrossings(
+            previous: freshPrevious,
+            current: freshCurrent.markingStale(reason: "stale current"),
+            detectedAt: detectedAt
+        ).isEmpty)
+    }
+
+    func testPartialAvailabilityWithAvailableWeeklyStillTriggersWeeklyThreshold() {
+        let previous = makeSnapshot(weeklyUsed: 75.0)
+        let current = makeSnapshot(
+            weeklyUsed: 81.0,
+            fiveHour: .unavailable(reason: "five-hour missing"),
+            availability: .partial(reason: "five-hour missing")
+        )
+
+        let crossings = UsageThresholdDetector.detectCrossings(
+            previous: previous,
+            current: current,
+            detectedAt: detectedAt
+        )
+
+        XCTAssertEqual(crossings.map(\.level), [.warning20])
+    }
+
     // MARK: - Helpers
 
     private func makeSnapshot(
         weeklyUsed: Double,
         tool: UsageTool = .codex,
-        resetsAt: Date = Date(timeIntervalSince1970: 1_801_000_000)
+        resetsAt: Date = Date(timeIntervalSince1970: 1_801_000_000),
+        fiveHour: UsageWindowSlot? = nil,
+        availability: UsageAvailability = .available
     ) -> UsageSnapshot {
         let weekly = UsageWindowSnapshot(
             kind: .weekly,
@@ -149,7 +184,7 @@ final class UsageThresholdDetectorTests: XCTestCase {
             sourceLabel: "test",
             updatedAt: detectedAt
         )
-        let fiveHour = UsageWindowSnapshot(
+        let defaultFiveHour = UsageWindowSnapshot(
             kind: .fiveHour,
             usedPercent: 10,
             resetsAt: resetsAt,
@@ -160,10 +195,10 @@ final class UsageThresholdDetectorTests: XCTestCase {
         return UsageSnapshot(
             tool: tool,
             planName: "prolite",
-            fiveHour: .available(fiveHour),
+            fiveHour: fiveHour ?? .available(defaultFiveHour),
             weekly: .available(weekly),
             today: nil,
-            availability: .available,
+            availability: availability,
             lastRefresh: detectedAt
         )
     }

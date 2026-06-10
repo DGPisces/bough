@@ -60,6 +60,7 @@ struct NotchPanelView: View {
     @State private var curtainOffset: CGFloat = 0
     @State private var curtainOpacity: Double = 1
     @State private var displayedToolStatus: Bool = SettingsDefaults.showToolStatus
+    @State private var toolStatusTransitionTask: Task<Void, Never>?
     @State private var musicRenderRevision = 0
     @Namespace private var musicArtworkNamespace
     @Namespace private var mascotTransitionNamespace
@@ -382,19 +383,32 @@ struct NotchPanelView: View {
                     curtainOffset = -notchHeight
                     curtainOpacity = 0
                 }
-                // Phase 2: switch width while hidden
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                toolStatusTransitionTask?.cancel()
+                toolStatusTransitionTask = Task { @MainActor in
+                    // Phase 2: switch width while hidden
+                    try? await Task.sleep(for: .milliseconds(250))
+                    guard !Task.isCancelled else { return }
                     displayedToolStatus = newValue
-                }
-                // Phase 3: entire bar slides back down
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    // Phase 3: entire bar slides back down
+                    try? await Task.sleep(for: .milliseconds(100))
+                    guard !Task.isCancelled else { return }
                     withAnimation(.easeOut(duration: 0.25)) {
                         curtainOffset = 0
                         curtainOpacity = 1
                     }
                 }
             }
-            .onAppear { displayedToolStatus = showToolStatus }
+            .onAppear {
+                displayedToolStatus = showToolStatus
+                curtainOffset = 0
+                curtainOpacity = 1
+            }
+            .onDisappear {
+                toolStatusTransitionTask?.cancel()
+                toolStatusTransitionTask = nil
+                curtainOffset = 0
+                curtainOpacity = 1
+            }
             .contentShape(Rectangle())
             .onHover { hovering in handlePanelHover(hovering) }
 
@@ -1510,7 +1524,7 @@ private struct QuestionBar: View {
     let queuePosition: Int
     let queueTotal: Int
     let onAnswer: (String) -> Void
-    let onAnswerMulti: ([(question: String, answer: String)]) -> Void
+    let onAnswerMulti: ([(question: String, answer: AskUserQuestionAnswerValue)]) -> Void
     let onSkip: () -> Void
 
     @State private var textInput = ""
@@ -1519,7 +1533,7 @@ private struct QuestionBar: View {
 
     // Multi-question wizard state
     @State private var currentQuestionIndex: Int = 0
-    @State private var collectedAnswers: [(question: String, answer: String)] = []
+    @State private var collectedAnswers: [(question: String, answer: AskUserQuestionAnswerValue)] = []
     @State private var selectedIndices: Set<Int> = []
     @State private var showOtherInput: Bool = false
     @State private var otherText: String = ""
@@ -1757,6 +1771,10 @@ private struct QuestionBar: View {
     // MARK: - Navigation
 
     private func advanceWithAnswer(_ answer: String) {
+        advanceWithAnswer(.single(answer))
+    }
+
+    private func advanceWithAnswer(_ answer: AskUserQuestionAnswerValue) {
         guard let item = currentItem else { return }
         collectedAnswers.append((question: item.payload.question, answer: answer))
 
@@ -1779,7 +1797,7 @@ private struct QuestionBar: View {
             parts.append(otherText)
         }
         guard !parts.isEmpty else { return }
-        advanceWithAnswer(parts.joined(separator: ", "))
+        advanceWithAnswer(.multiple(parts))
     }
 
     private func goBack() {
@@ -2384,9 +2402,9 @@ private struct SessionCard: View {
     private var fontSize: CGFloat { CGFloat(contentFontSize) }
     private var aiLineLimit: Int? { aiMessageLines > 0 ? aiMessageLines : nil }
     private var approvalQueueIndex: Int? {
-        appState.permissionQueue.firstIndex { ($0.event.sessionId ?? "default") == sessionId }
+        appState.visiblePermissionQueueIndex(forSession: sessionId)
     }
-    private var isActiveApproval: Bool { approvalQueueIndex == 0 }
+    private var isActiveApproval: Bool { approvalQueueIndex == appState.activePermissionQueueIndex }
     private var statusNameColor: Color {
         if session.status == .idle && session.interrupted {
             return Color(red: 1.0, green: 0.45, blue: 0.35)

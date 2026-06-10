@@ -60,6 +60,10 @@ public enum UsageThresholdDetector {
         detectedAt: Date
     ) -> [UsageThresholdCrossing] {
         guard let previous else { return [] }
+        guard previous.availability.supportsThresholdDetection,
+              current.availability.supportsThresholdDetection else {
+            return []
+        }
         guard let previousWeekly = previous.weekly.thresholdSourceSnapshot,
               let currentWeekly = current.weekly.thresholdSourceSnapshot else {
             return []
@@ -90,12 +94,23 @@ public enum UsageThresholdDetector {
     }
 }
 
+private extension UsageAvailability {
+    var supportsThresholdDetection: Bool {
+        switch self {
+        case .available, .partial:
+            return true
+        case .loading, .stale, .unavailable:
+            return false
+        }
+    }
+}
+
 private extension UsageWindowSlot {
     var thresholdSourceSnapshot: UsageWindowSnapshot? {
         switch self {
-        case .available(let snapshot), .stale(let snapshot, _):
+        case .available(let snapshot):
             return snapshot
-        case .loading, .unavailable:
+        case .stale, .loading, .unavailable:
             return nil
         }
     }

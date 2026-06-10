@@ -54,8 +54,8 @@ extension AppState {
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = true
         panel.canCreateDirectories = false
-        panel.title = "选择要 AirDrop 的项目"
-        panel.prompt = "选择"
+        panel.title = L10n.shared["airdrop_open_panel_title"]
+        panel.prompt = L10n.shared["airdrop_open_panel_prompt"]
         airDropOpenPanel = panel
         panel.begin { [weak self, panel] response in
             Task { @MainActor in

@@ -15,6 +15,7 @@ final class ConfigInstallerCodexConfigTomlHygieneTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        TestHelpers.processEnvironmentLock.lock()
         savedCodexHome = ProcessInfo.processInfo.environment["CODEX_HOME"]
     }
 
@@ -24,6 +25,7 @@ final class ConfigInstallerCodexConfigTomlHygieneTests: XCTestCase {
         } else {
             unsetenv("CODEX_HOME")
         }
+        TestHelpers.processEnvironmentLock.unlock()
         super.tearDown()
     }
 
@@ -38,6 +40,14 @@ final class ConfigInstallerCodexConfigTomlHygieneTests: XCTestCase {
         let home = fm.temporaryDirectory
             .appendingPathComponent("bough-codex-home-\(UUID().uuidString)", isDirectory: true)
         try? fm.createDirectory(at: home, withIntermediateDirectories: true)
+        let previous = ProcessInfo.processInfo.environment["CODEX_HOME"]
+        defer {
+            if let previous {
+                setenv("CODEX_HOME", previous, 1)
+            } else {
+                unsetenv("CODEX_HOME")
+            }
+        }
         defer { try? fm.removeItem(at: home) }
         setenv("CODEX_HOME", home.path, 1)
         try body(home, home.appendingPathComponent("config.toml"))
@@ -51,6 +61,11 @@ final class ConfigInstallerCodexConfigTomlHygieneTests: XCTestCase {
         try String(contentsOf: url, encoding: .utf8)
     }
 
+    private func sourceFile(_ relativePath: String) throws -> String {
+        let url = TestHelpers.repoRoot(from: #filePath).appendingPathComponent(relativePath)
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
     /// Returns the SHA-256 digest of the file at `url` as raw Data, or fails the test.
     private func sha256(_ url: URL) throws -> Data {
         let fileData = try Data(contentsOf: url)
@@ -58,6 +73,17 @@ final class ConfigInstallerCodexConfigTomlHygieneTests: XCTestCase {
     }
 
     // MARK: - Tests
+
+    func testCodexConfigFailureIsPropagatedByInstallSetEnabledAndRepair() throws {
+        let source = try sourceFile("Sources/Bough/ConfigInstaller.swift")
+
+        XCTAssertTrue(source.contains("if !installCodexHooksIfEnabled(fm: fm, bridgeInstalled: bridgeInstalled) { ok = false }"))
+        XCTAssertTrue(source.contains("guard enableCodexHooksConfig(fm: fm),"))
+        XCTAssertTrue(source.contains("let configInstalled = enableCodexHooksConfig(fm: fm)"))
+        XCTAssertTrue(source.contains("let configChanged = configBefore != configAfter"))
+        XCTAssertTrue(source.contains("if configInstalled && configChanged {\n                        repaired.append(cli.name)\n                    }"))
+        XCTAssertTrue(source.contains("configInstalled,\n                   isHooksInstalled(for: cli, fm: fm)"))
+    }
 
     /// Behavior 1 (D-13 Pass-1): A config.toml containing a marker-bracketed `[[hooks]]` block
     /// has that entire range excised by Pass 1; all content outside the markers is preserved.
@@ -163,6 +189,30 @@ final class ConfigInstallerCodexConfigTomlHygieneTests: XCTestCase {
                           "Hand-edited hooks block must be preserved")
             XCTAssertTrue(result.contains("/usr/local/bin/my-script"),
                           "User command must be preserved")
+        }
+    }
+
+    func testCleanupPreservesBridgePrefixOnlyHooksBlocks() throws {
+        let originalContent = """
+            [hooks.pre_tool_use]
+            command = "/Users/x/.bough/bin/bough-bridge-old --source codex"
+            timeout = 30
+
+            [hooks.post_tool_use]
+            command = "/usr/local/bin/my-bough-bridge --flag"
+            timeout = 30
+
+            [features]
+            hooks = true
+            """
+
+        try withTemporaryCodexHome { _, config in
+            try write(originalContent, to: config)
+
+            let outcome = ConfigInstaller.testCleanupBoughHooksFromCodexConfigToml()
+
+            XCTAssertEqual(outcome, .nothingToDo)
+            XCTAssertEqual(try read(config), originalContent)
         }
     }
 

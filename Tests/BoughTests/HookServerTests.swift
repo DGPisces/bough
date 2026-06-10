@@ -1,4 +1,5 @@
 import XCTest
+import Darwin
 
 @testable import Bough
 @testable import BoughCore
@@ -6,12 +7,14 @@ import XCTest
 @MainActor
 final class HookServerTests: XCTestCase {
     private var defaults: UserDefaults!
+    private var suiteName: String!
     private var savedCodexHome: String?
 
     override func setUp() {
         super.setUp()
+        TestHelpers.processEnvironmentLock.lock()
         savedCodexHome = ProcessInfo.processInfo.environment["CODEX_HOME"]
-        let suiteName = "HookServerTests-\(name)"
+        suiteName = "HookServerTests-\(name)"
         defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
     }
@@ -22,7 +25,10 @@ final class HookServerTests: XCTestCase {
         } else {
             unsetenv("CODEX_HOME")
         }
+        defaults.removePersistentDomain(forName: suiteName)
         defaults = nil
+        suiteName = nil
+        TestHelpers.processEnvironmentLock.unlock()
         super.tearDown()
     }
 
@@ -61,6 +67,25 @@ final class HookServerTests: XCTestCase {
             let event = try makePermissionRequestEvent(source: "codex", toolName: "Bash")
 
             XCTAssertTrue(HookServer.shouldDeferCodexPermissionToAutoReview(event))
+        }
+    }
+
+    func testCodexAutoReviewDeferDoesNotScanTranscriptByDefault() throws {
+        try withTemporaryCodexHome { home, _ in
+            let transcript = home.appendingPathComponent("thread.jsonl")
+            try write(
+                """
+                {"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"`approvals_reviewer` is `auto_review`: sandbox escalations are reviewed."}]}}
+                """,
+                to: transcript
+            )
+            let event = try makePermissionRequestEvent(
+                source: "codex",
+                toolName: "Bash",
+                extra: ["transcript_path": transcript.path]
+            )
+
+            XCTAssertFalse(HookServer.shouldDeferCodexPermissionToAutoReview(event))
         }
     }
 
@@ -124,6 +149,26 @@ final class HookServerTests: XCTestCase {
         }
     }
 
+    func testCodexRuntimeApprovalPolicyNeverOverridesConfigAutoReview() throws {
+        try withTemporaryCodexHome { _, config in
+            try write(
+                """
+                approval_policy = "on-request"
+                approvals_reviewer = "auto_review"
+                """,
+                to: config
+            )
+
+            let event = try makePermissionRequestEvent(
+                source: "codex",
+                toolName: "Bash",
+                extra: ["approval_policy": "never"]
+            )
+
+            XCTAssertFalse(HookServer.shouldDeferCodexPermissionToAutoReview(event))
+        }
+    }
+
     func testCodexAutoReviewDeferRecognizesDeveloperTranscriptContext() throws {
         try withTemporaryCodexHome { home, _ in
             let transcript = home.appendingPathComponent("thread.jsonl")
@@ -139,7 +184,7 @@ final class HookServerTests: XCTestCase {
                 extra: ["transcript_path": transcript.path]
             )
 
-            XCTAssertTrue(HookServer.shouldDeferCodexPermissionToAutoReview(event))
+            XCTAssertTrue(HookServer.shouldDeferCodexPermissionToAutoReview(event, allowTranscriptScan: true))
         }
     }
 
@@ -166,7 +211,7 @@ final class HookServerTests: XCTestCase {
                 extra: ["transcript_path": transcript.path]
             )
 
-            XCTAssertTrue(HookServer.shouldDeferCodexPermissionToAutoReview(event))
+            XCTAssertTrue(HookServer.shouldDeferCodexPermissionToAutoReview(event, allowTranscriptScan: true))
         }
     }
 
@@ -222,7 +267,7 @@ final class HookServerTests: XCTestCase {
                 ]
             )
 
-            XCTAssertTrue(HookServer.shouldDeferCodexPermissionToAutoReview(event))
+            XCTAssertTrue(HookServer.shouldDeferCodexPermissionToAutoReview(event, allowTranscriptScan: true))
         }
     }
 
@@ -231,6 +276,65 @@ final class HookServerTests: XCTestCase {
 
         XCTAssertTrue(bridgeSource.contains("CODEX_THREAD_ID"))
         XCTAssertTrue(bridgeSource.contains("\"_codex_thread_id\""))
+    }
+
+    func testHiddenPluginModeDoesNotAutoAllowPermissionRequests() throws {
+        let source = try sourceFile("Sources/Bough/HookServer.swift")
+        let start = try XCTUnwrap(source.range(of: "private static func hiddenPluginResponse"))
+        let tail = source[start.lowerBound...]
+        let end = try XCTUnwrap(tail.range(of: "private static func pluginPpid"))
+        let body = String(tail[..<end.lowerBound])
+
+        XCTAssertTrue(body.contains("Data(\"{}\".utf8)"))
+        XCTAssertFalse(body.contains("\"behavior\": \"allow\""))
+        XCTAssertFalse(body.contains("\"behavior\":\"allow\""))
+        XCTAssertFalse(body.contains("decision"))
+    }
+
+    func testSocketCleanupRefusesToDeleteRegularFile() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HookServerTests-\(UUID().uuidString).txt")
+        try Data("do not delete".utf8).write(to: path)
+        defer { try? FileManager.default.removeItem(at: path) }
+
+        XCTAssertFalse(HookServer.testRemoveSocketIfPresent(path.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path.path))
+    }
+
+    func testSocketCleanupRefusesToDeleteCustomExistingSocket() throws {
+        let path = "/tmp/bough-hookserver-\(UUID().uuidString).sock"
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        defer {
+            close(fd)
+            unlink(path)
+        }
+
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        #if os(macOS)
+        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+        #endif
+        let pathBytes = Array(path.utf8)
+        try withUnsafeMutableBytes(of: &address.sun_path) { buffer in
+            guard pathBytes.count < buffer.count else {
+                throw NSError(domain: "HookServerTests", code: 3)
+            }
+            for (index, byte) in pathBytes.enumerated() {
+                buffer[index] = byte
+            }
+            buffer[pathBytes.count] = 0
+        }
+
+        let bindResult = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        XCTAssertEqual(bindResult, 0)
+
+        XCTAssertFalse(HookServer.testRemoveSocketIfPresent(path))
+        XCTAssertEqual(access(path, F_OK), 0)
     }
 
     private static func claudePayload() -> Data {
@@ -256,6 +360,14 @@ final class HookServerTests: XCTestCase {
             .appendingPathComponent("bough-codex-home-\(UUID().uuidString)", isDirectory: true)
         try? fm.createDirectory(at: home, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: home) }
+        let previous = ProcessInfo.processInfo.environment["CODEX_HOME"]
+        defer {
+            if let previous {
+                setenv("CODEX_HOME", previous, 1)
+            } else {
+                unsetenv("CODEX_HOME")
+            }
+        }
         setenv("CODEX_HOME", home.path, 1)
         try body(home, home.appendingPathComponent("config.toml"))
     }

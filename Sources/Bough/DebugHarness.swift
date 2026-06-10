@@ -112,6 +112,11 @@ enum AirDropDemoScenario: String, CaseIterable, Identifiable {
 
 @MainActor
 enum DebugHarness {
+    private static var idlePreviewTimer: Timer?
+
+    static var activeIdlePreviewTimerForTesting: Timer? {
+        idlePreviewTimer
+    }
 
     /// Check launch arguments for --preview flag, return scenario if found
     static func requestedScenario() -> PreviewScenario? {
@@ -122,6 +127,7 @@ enum DebugHarness {
 
     /// Inject mock data into appState for the given scenario
     static func apply(_ scenario: PreviewScenario, to appState: AppState) {
+        stopIdlePreviewTimer()
         switch scenario {
         case .working:
             applyWorking(to: appState)
@@ -164,6 +170,7 @@ enum DebugHarness {
     }
 
     static func applyAirDropDemo(_ scenario: AirDropDemoScenario, to state: AppState) {
+        stopIdlePreviewTimer()
         UserDefaults.standard.set(true, forKey: SettingsKey.airDropEnabled)
         state.clearAirDropPreviewScenario()
         state.previewPermissionEvent = nil
@@ -197,13 +204,13 @@ enum DebugHarness {
             state.airDropPreviewScenarioName = "airdrop-\(scenario.title)"
         case .unavailable:
             state.showAirDropDropZone()
-            state.airDropState = .unavailable("此项目无法使用 AirDrop")
+            state.airDropState = .unavailable(AirDropFlowMessageKey.unavailable)
         case .failed:
             state.showAirDropDropZone()
-            state.airDropState = .failed("AirDrop 未完成")
+            state.airDropState = .failed(AirDropFlowMessageKey.failed)
         case .cleanupError:
             state.showAirDropDropZone()
-            state.airDropState = .cleanupError("无法清理临时文件")
+            state.airDropState = .cleanupError(AirDropFlowMessageKey.cleanupFailed)
         case .completionOverlay:
             applyCompletion(to: state)
             state.showAirDropDropZone()
@@ -660,7 +667,7 @@ enum DebugHarness {
         state.activeSessionId = nil
         state.surface = .collapsed
         // Continuously clear sessions to block hook events during preview
-        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+        idlePreviewTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
             Task { @MainActor in
                 if !state.sessions.isEmpty {
                     state.sessions.removeAll()
@@ -670,6 +677,11 @@ enum DebugHarness {
                 }
             }
         }
+    }
+
+    private static func stopIdlePreviewTimer() {
+        idlePreviewTimer?.invalidate()
+        idlePreviewTimer = nil
     }
 
     // MARK: - Stress Test (30 sessions)

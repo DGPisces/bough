@@ -45,22 +45,22 @@ if command -v gtimeout >/dev/null 2>&1; then
 elif command -v timeout >/dev/null 2>&1; then
     printf '%s' "$INPUT" | timeout 0.5s bash -c "$PREV_CMD" 2>/dev/null || true
 else
-    # Pure-bash watchdog: run prev_cmd in background, kill it after 0.5s if
-    # still alive. `wait` returns the child's exit status; the sleeper is
-    # cleaned up unconditionally. Stdin piping is preserved via process
-    # substitution so prev_cmd still receives Claude's payload.
+    # Pure-bash watchdog: job control puts the background shell in its own
+    # process group, so the watchdog can stop children spawned by prev_cmd too.
     (
-        printf '%s' "$INPUT" | bash -c "$PREV_CMD" 2>/dev/null &
+        set -m
+        bash -c "$PREV_CMD" < <(printf '%s' "$INPUT") 2>/dev/null &
         prev_pid=$!
-        ( sleep 0.5; kill "$prev_pid" 2>/dev/null ) &
+        ( sleep 0.5; kill -TERM "-$prev_pid" 2>/dev/null || kill -TERM "$prev_pid" 2>/dev/null ) &
         watchdog_pid=$!
         wait "$prev_pid" 2>/dev/null || true
         kill "$watchdog_pid" 2>/dev/null || true
         wait "$watchdog_pid" 2>/dev/null || true
-    ) || true
+        set +m
+    ) 2>/dev/null || true
 fi
 
 # Run the Bough bridge silently (D-04). The bridge writes
 # `~/.bough/claude-usage.json` atomically and emits nothing visible.
 # Failures here must not break the wrapper for the same reason as above.
-printf '%s' "$INPUT" | "__BOUGH_BRIDGE_PATH__" >/dev/null 2>&1 || true
+printf '%s' "$INPUT" | __BOUGH_BRIDGE_PATH__ >/dev/null 2>&1 || true

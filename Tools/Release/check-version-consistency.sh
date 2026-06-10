@@ -35,7 +35,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PLIST="$REPO_ROOT/Platform/Apple/Info.plist"
-APPCAST="$REPO_ROOT/Tools/Release/appcast.xml"
+APPCAST="${BOUGH_APPCAST_PATH:-$REPO_ROOT/Tools/Release/appcast.xml}"
 
 # ---------------------------------------------------------------------------
 # CLI parsing
@@ -47,8 +47,12 @@ while [[ $# -gt 0 ]]; do
             DMG_PATH="${2:?--with-dmg requires a path}"
             shift 2
             ;;
+        --appcast)
+            APPCAST="${2:?--appcast requires a path}"
+            shift 2
+            ;;
         *)
-            echo "ERROR: unknown argument '$1' (usage: $0 [--with-dmg PATH])" >&2
+            echo "ERROR: unknown argument '$1' (usage: $0 [--with-dmg PATH] [--appcast PATH])" >&2
             exit 2
             ;;
     esac
@@ -69,10 +73,12 @@ SRC_BUILD=$(plutil -extract CFBundleVersion raw "$PLIST")
 # ---------------------------------------------------------------------------
 APPCAST_SHORT=""
 APPCAST_BUILD=""
-if [[ -f "$APPCAST" ]]; then
-    APPCAST_SHORT=$(/usr/bin/perl -ne 'if (/<sparkle:shortVersionString>([^<]+)</) { print $1; exit; }' "$APPCAST")
-    APPCAST_BUILD=$(/usr/bin/perl -ne 'if (/<sparkle:version>([^<]+)</) { print $1; exit; }' "$APPCAST")
+if [[ ! -f "$APPCAST" ]]; then
+    echo "ERROR: appcast not found at $APPCAST" >&2
+    exit 2
 fi
+APPCAST_SHORT=$(/usr/bin/perl -ne 'if (/<sparkle:shortVersionString>([^<]+)</) { print $1; exit; }' "$APPCAST")
+APPCAST_BUILD=$(/usr/bin/perl -ne 'if (/<sparkle:version>([^<]+)</) { print $1; exit; }' "$APPCAST")
 
 # ---------------------------------------------------------------------------
 # 3. git tag on HEAD (empty = untagged development commit).
@@ -149,12 +155,12 @@ fi
 if [[ "$SKIP_APPCAST_VERSION_CHECK" == "1" ]]; then
     :
 elif [[ -z "$APPCAST_SHORT" && -z "$APPCAST_BUILD" ]]; then
-    echo "INFO: Tools/Release/appcast.xml has no <item> entries — skipping appcast agreement check." >&2
+    echo "INFO: $APPCAST has no <item> entries — skipping appcast agreement check." >&2
 elif [[ -z "$APPCAST_SHORT" ]]; then
-    echo "MISMATCH: Tools/Release/appcast.xml has <sparkle:version> but no <sparkle:shortVersionString> (build='$APPCAST_BUILD')" >&2
+    echo "MISMATCH: $APPCAST has <sparkle:version> but no <sparkle:shortVersionString> (build='$APPCAST_BUILD')" >&2
     fail=1
 elif [[ -z "$APPCAST_BUILD" ]]; then
-    echo "MISMATCH: Tools/Release/appcast.xml has <sparkle:shortVersionString> but no <sparkle:version> (short='$APPCAST_SHORT')" >&2
+    echo "MISMATCH: $APPCAST has <sparkle:shortVersionString> but no <sparkle:version> (short='$APPCAST_SHORT')" >&2
     fail=1
 fi
 

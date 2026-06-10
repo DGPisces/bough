@@ -52,13 +52,14 @@ final class SmartSuppressRemovalTests: XCTestCase {
     private func sourceFiles(under relativePath: String) throws -> [SourceFile] {
         let root = TestHelpers.repoRoot(from: #filePath)
         let directory = root.appendingPathComponent(relativePath)
-        let urls = FileManager.default.enumerator(
+        let enumerator = try XCTUnwrap(FileManager.default.enumerator(
             at: directory,
             includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles]
-        )?.compactMap { $0 as? URL } ?? []
+        ), "Failed to enumerate source scan root: \(directory.path)")
+        let urls = enumerator.compactMap { $0 as? URL }
 
-        return try urls
+        let sources = try urls
             .filter { $0.pathExtension == "swift" }
             .map { url in
                 SourceFile(
@@ -66,6 +67,8 @@ final class SmartSuppressRemovalTests: XCTestCase {
                     contents: try String(contentsOf: url, encoding: .utf8)
                 )
             }
+        XCTAssertFalse(sources.isEmpty, "Source scan must include Swift files under \(relativePath).")
+        return sources
     }
 
     private struct SourceFile {

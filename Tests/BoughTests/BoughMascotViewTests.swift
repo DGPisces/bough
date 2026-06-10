@@ -39,7 +39,7 @@ final class BoughMascotViewTests: XCTestCase {
         let bitmap = try XCTUnwrap(NSBitmapImageRep(data: try Data(contentsOf: url)))
 
         XCTAssertLessThan(
-            bitmap.alpha(atX: 0, y: 0),
+            try bitmap.alpha(atX: 0, y: 0),
             16,
             "idle-sheet.png must not bake the checkerboard preview background into the About mascot."
         )
@@ -55,7 +55,7 @@ final class BoughMascotViewTests: XCTestCase {
         let bitmap = try XCTUnwrap(NSBitmapImageRep(data: try Data(contentsOf: url)))
 
         XCTAssertLessThan(
-            bitmap.alpha(atX: 0, y: 0),
+            try bitmap.alpha(atX: 0, y: 0),
             16,
             "Platform/Apple/icon-source/icon-master-1024.png should have transparent corners so the notch icon has no white border."
         )
@@ -146,8 +146,8 @@ final class BoughMascotViewTests: XCTestCase {
 }
 
 private extension NSBitmapImageRep {
-    func alpha(atX x: Int, y: Int) -> CGFloat {
-        guard let color = colorAt(x: x, y: y) else { return 0 }
+    func alpha(atX x: Int, y: Int) throws -> CGFloat {
+        let color = try XCTUnwrap(colorAt(x: x, y: y), "Missing bitmap color at \(x),\(y)")
         return color.alphaComponent * 255
     }
 }

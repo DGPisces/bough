@@ -106,7 +106,7 @@ public struct WarpPaneResolver {
     private func performQuery(cwdCandidates: [String]) throws -> [WarpPaneMatch] {
         let uri = WarpPaneResolver.fileURI(for: sqlitePath)
         var db: OpaquePointer?
-        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX
+        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_FULLMUTEX
         let openStatus = sqlite3_open_v2(uri, &db, flags, nil)
         guard openStatus == SQLITE_OK, let handle = db else {
             let message = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "code=\(openStatus)"
@@ -161,7 +161,8 @@ public struct WarpPaneResolver {
         }
 
         var matches: [WarpPaneMatch] = []
-        while sqlite3_step(query) == SQLITE_ROW {
+        var stepStatus = sqlite3_step(query)
+        while stepStatus == SQLITE_ROW {
             let paneId = sqlite3_column_int64(query, 0)
             let uuidHex: String
             if let blobPointer = sqlite3_column_blob(query, 1) {
@@ -190,6 +191,11 @@ public struct WarpPaneResolver {
                 isPaneActive: paneActive,
                 isPaneFocused: paneFocused
             ))
+            stepStatus = sqlite3_step(query)
+        }
+        guard stepStatus == SQLITE_DONE else {
+            let message = String(cString: sqlite3_errmsg(handle))
+            throw WarpPaneResolverError.queryFailed("step: \(message)")
         }
         return matches
     }

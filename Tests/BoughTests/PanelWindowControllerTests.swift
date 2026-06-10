@@ -75,6 +75,12 @@ final class PanelWindowControllerTests: XCTestCase {
         XCTAssertFalse(source.contains("appState.activeSessionCount == 0"))
     }
 
+    func testSpecificScreenChoiceGuardsNegativeIndex() throws {
+        let source = try sourceFile("Sources/Bough/PanelWindowController.swift")
+
+        XCTAssertTrue(source.contains("let index = Int(choice.dropFirst(7)),\n           index >= 0,\n           index < NSScreen.screens.count"))
+    }
+
     private func sourceFile(_ relativePath: String) throws -> String {
         let url = TestHelpers.repoRoot(from: #filePath).appendingPathComponent(relativePath)
         return try String(contentsOf: url, encoding: .utf8)

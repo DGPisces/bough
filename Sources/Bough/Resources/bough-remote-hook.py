@@ -7,11 +7,13 @@ import subprocess
 import sys
 
 VERSION = "1.0.0"
-SOCKET_PATH = os.environ.get("BOUGH_SOCKET_PATH", "/tmp/bough.sock")
+SOCKET_PATH = os.environ.get("BOUGH_SOCKET_PATH", f"/tmp/bough-{os.getuid()}.sock")
 REMOTE_HOST_ID = os.environ.get("BOUGH_REMOTE_HOST_ID", "")
 REMOTE_HOST_NAME = os.environ.get("BOUGH_REMOTE_HOST_NAME", "")
 SOURCE = os.environ.get("BOUGH_SOURCE", "")
-TIMEOUT_SECONDS = 300
+CONNECT_TIMEOUT_SECONDS = 3
+ACK_TIMEOUT_SECONDS = 3
+BLOCKING_RESPONSE_TIMEOUT_SECONDS = 86400
 
 
 def _normalize_event(name):
@@ -93,7 +95,7 @@ def _claude_jsonl_path(session_id, cwd):
     if not session_id or not cwd:
         return None
     home = os.path.expanduser("~")
-    project_dir = cwd.replace("/", "-").replace(".", "-")
+    project_dir = _claude_project_dir_encoded(cwd)
     path = os.path.join(home, ".claude", "projects", project_dir, f"{session_id}.jsonl")
     return path if os.path.exists(path) else None
 
@@ -102,9 +104,23 @@ def _codebuddy_jsonl_path(session_id, cwd):
     if not session_id or not cwd:
         return None
     home = os.path.expanduser("~")
-    project_dir = cwd.replace("/", "-").replace(".", "-")
+    project_dir = _app_project_dir_encoded(cwd)
     path = os.path.join(home, ".codebuddy", "projects", project_dir, f"{session_id}.jsonl")
     return path if os.path.exists(path) else None
+
+
+def _claude_project_dir_encoded(cwd):
+    # Claude Code encodes every non-alphanumeric character as "-" (matches
+    # claudeProjectDirEncoded() in Sources/Bough/AppState.swift).
+    return "".join(
+        ch if ("a" <= ch <= "z" or "A" <= ch <= "Z" or "0" <= ch <= "9") else "-"
+        for ch in cwd
+    )
+
+
+def _app_project_dir_encoded(cwd):
+    encoded = _claude_project_dir_encoded(cwd)
+    return encoded[1:] if encoded.startswith("-") else encoded
 
 
 def _scan_session_jsonl(path):
@@ -128,9 +144,12 @@ def _scan_session_jsonl(path):
                     continue
 
                 msg_type = payload.get("type")
-                role = payload.get("role")
-                content = payload.get("content")
-                if not isinstance(content, str) or not content.strip():
+                message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
+                role = payload.get("role") or message.get("role")
+                content = _jsonl_content_text(payload.get("content"))
+                if not content:
+                    content = _jsonl_content_text(message.get("content"))
+                if not content:
                     continue
 
                 if msg_type == "summary" and not summary:
@@ -151,12 +170,43 @@ def _scan_session_jsonl(path):
     }
 
 
+def _jsonl_content_text(content):
+    if isinstance(content, str):
+        text = content.strip()
+        return text or None
+    if not isinstance(content, list):
+        return None
+    parts = []
+    for part in content:
+        if isinstance(part, str):
+            text = part
+        elif isinstance(part, dict):
+            text = part.get("text") or part.get("input_text") or part.get("output_text") or ""
+        else:
+            text = ""
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+    if not parts:
+        return None
+    return "\n".join(parts)
+
+
 def _scan_claude_jsonl(session_id, cwd):
     return _scan_session_jsonl(_claude_jsonl_path(session_id, cwd))
 
 
 def _scan_codebuddy_jsonl(session_id, cwd):
     return _scan_session_jsonl(_codebuddy_jsonl_path(session_id, cwd))
+
+
+def _needs_session_jsonl_scan(normalized_event, payload):
+    if normalized_event == "UserPromptSubmit":
+        return not payload.get("prompt")
+    if normalized_event == "SessionStart":
+        return not payload.get("session_title")
+    if normalized_event in {"Stop", "AfterAgentResponse"}:
+        return not payload.get("last_assistant_message")
+    return False
 
 
 def _read_stdin_json():
@@ -168,13 +218,14 @@ def _read_stdin_json():
 
 def _send_event(payload, expects_response):
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(TIMEOUT_SECONDS)
+    sock.settimeout(CONNECT_TIMEOUT_SECONDS)
     try:
         sock.connect(SOCKET_PATH)
         sock.sendall(json.dumps(payload).encode("utf-8"))
         sock.shutdown(socket.SHUT_WR)
+        sock.settimeout(BLOCKING_RESPONSE_TIMEOUT_SECONDS if expects_response else ACK_TIMEOUT_SECONDS)
+        response = sock.recv(65536)
         if expects_response:
-            response = sock.recv(65536)
             return response.decode("utf-8") if response else None
         return None
     except (OSError, socket.error):
@@ -203,7 +254,7 @@ def _get_tty():
             if not parts:
                 break
             tty = parts[0]
-            if tty and tty not in {"??", "-"}:
+            if tty and tty not in {"??", "?", "-"}:
                 return tty if tty.startswith("/dev/") else f"/dev/{tty}"
             if len(parts) >= 2:
                 pid = int(parts[1])
@@ -240,7 +291,9 @@ def main():
     payload["_remote_host_name"] = REMOTE_HOST_NAME
     payload["_tty"] = payload.get("_tty") or _get_tty()
 
-    if SOURCE == "claude":
+    should_scan_jsonl = _needs_session_jsonl_scan(normalized_event, payload)
+
+    if SOURCE == "claude" and should_scan_jsonl:
         extras = _scan_claude_jsonl(session_id, cwd)
         for key, value in extras.items():
             if value and not payload.get(key):
@@ -250,7 +303,7 @@ def main():
             if prompt:
                 payload["prompt"] = prompt
 
-    if SOURCE == "codebuddy":
+    if SOURCE == "codebuddy" and should_scan_jsonl:
         extras = _scan_codebuddy_jsonl(session_id, cwd)
         for key, value in extras.items():
             if value and not payload.get(key):

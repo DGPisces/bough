@@ -58,8 +58,14 @@ final class AirDropSettingsAndDemoTests: XCTestCase {
     }
 
     func testAirDropSettingsCopyDescribesSharingSwitch() {
+        TestHelpers.processStateLock.lock()
+        let savedLanguage = L10n.shared.language
+        let savedLanguageDefaultValue = UserDefaults.standard.object(forKey: SettingsKey.appLanguage)
         L10n.shared.language = "en"
-        defer { L10n.shared.language = "system" }
+        defer {
+            TestHelpers.restoreSharedLanguage(savedLanguage, savedDefaultValue: savedLanguageDefaultValue)
+            TestHelpers.processStateLock.unlock()
+        }
 
         XCTAssertEqual(L10n.shared["airdrop_enabled"], "Enable AirDrop")
         XCTAssertTrue(L10n.shared["airdrop_enabled_desc"].contains("files, folders, links, and selected text"))

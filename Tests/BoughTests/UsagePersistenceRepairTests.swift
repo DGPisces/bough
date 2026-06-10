@@ -4,10 +4,9 @@
 // PERSIST-04: Verifies that ConfigInstaller.verifyClaudeCodeStatusLinePathDrift()
 // repairs a stale bundle-container path in a settings.json file.
 //
-// This test uses the #if DEBUG entry points on ConfigInstaller — those are the
-// stable public test seam for the installer and are intentionally not guarded away
-// in test builds. No real ~/.claude/settings.json is read or written; all I/O goes
-// to a UUID-namespaced temp directory that is removed in tearDown.
+// This test uses ConfigInstaller's internal test seam. No real
+// ~/.claude/settings.json is read or written; all I/O goes to a
+// UUID-namespaced temp directory that is removed in tearDown.
 
 import XCTest
 @testable import Bough

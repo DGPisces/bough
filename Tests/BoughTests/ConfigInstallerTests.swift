@@ -8,6 +8,7 @@ final class ConfigInstallerTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        TestHelpers.processEnvironmentLock.lock()
         savedCodexHome = ProcessInfo.processInfo.environment["CODEX_HOME"]
     }
 
@@ -17,6 +18,7 @@ final class ConfigInstallerTests: XCTestCase {
         } else {
             unsetenv("CODEX_HOME")
         }
+        TestHelpers.processEnvironmentLock.unlock()
         super.tearDown()
     }
 
@@ -52,6 +54,14 @@ final class ConfigInstallerTests: XCTestCase {
         let home = fm.temporaryDirectory
             .appendingPathComponent("ConfigInstallerTests-CodexHome-\(UUID().uuidString)")
         try? fm.createDirectory(at: home, withIntermediateDirectories: true)
+        let previous = ProcessInfo.processInfo.environment["CODEX_HOME"]
+        defer {
+            if let previous {
+                setenv("CODEX_HOME", previous, 1)
+            } else {
+                unsetenv("CODEX_HOME")
+            }
+        }
         defer { try? fm.removeItem(at: home) }
         setenv("CODEX_HOME", home.path, 1)
         try body(home, home.appendingPathComponent("config.toml"))
@@ -61,6 +71,18 @@ final class ConfigInstallerTests: XCTestCase {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try contents.write(to: url, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+    }
+
+    private func sourceFile(_ relativePath: String) throws -> String {
+        let url = TestHelpers.repoRoot(from: #filePath).appendingPathComponent(relativePath)
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    private func sourceSlice(_ source: String, from start: String, to end: String) throws -> String {
+        let startRange = try XCTUnwrap(source.range(of: start))
+        let afterStart = source[startRange.lowerBound...]
+        let endRange = try XCTUnwrap(afterStart.range(of: end))
+        return String(afterStart[..<endRange.lowerBound])
     }
 
     func testPreserveCodexHooksDoesNotTreatArrayCloseAsFeatureSectionEnd() throws {
@@ -170,7 +192,87 @@ final class ConfigInstallerTests: XCTestCase {
         )
     }
 
-    func testRemoveManagedHookEntriesAlsoPrunesLegacyVibeIslandHooks() throws {
+    func testClaudeVersionDetectionIncludesAppleSiliconHomebrewPath() throws {
+        let source = try sourceFile("Sources/Bough/ConfigInstaller.swift")
+        let body = try sourceSlice(
+            source,
+            from: "private static func detectClaudeVersion",
+            to: "/// Compare semver strings"
+        )
+
+        XCTAssertTrue(body.contains(#""/opt/homebrew/bin/claude""#))
+        XCTAssertTrue(body.contains("timeout: 5"))
+    }
+
+    func testCustomCLIRejectsMissingConfigDirectory() {
+        let missingPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("missing-\(UUID().uuidString)/settings.json")
+            .path
+
+        let result = ConfigInstaller.addCustomCLI(
+            name: "Missing",
+            source: "missing-\(UUID().uuidString)",
+            configPath: missingPath,
+            format: .nested
+        )
+
+        XCTAssertFalse(result.ok)
+        XCTAssertEqual(result.message, "Config directory does not exist")
+    }
+
+    func testCustomCLIAcceptsHomeResolvedConfigDirectories() throws {
+        let fm = FileManager.default
+        let dirName = ".bough-custom-cli-test-\(UUID().uuidString)"
+        let dir = fm.homeDirectoryForCurrentUser.appendingPathComponent(dirName, isDirectory: true)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+
+        let paths = [
+            "~/\(dirName)/settings.json",
+            "\(dirName)/settings.json"
+        ]
+        for (index, path) in paths.enumerated() {
+            let source = "homepath-\(index)-\(UUID().uuidString.lowercased())"
+            defer { _ = ConfigInstaller.removeCustomCLI(source: source) }
+
+            let result = ConfigInstaller.addCustomCLI(
+                name: "Home Path \(index)",
+                source: source,
+                configPath: path,
+                format: .nested
+            )
+
+            XCTAssertTrue(result.ok, result.message)
+        }
+    }
+
+    func testCustomCLIEnableFailureRollsBackEnabledPreference() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("ConfigInstallerTests-CustomCLI-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let source = "custom-\(UUID().uuidString.lowercased())"
+        let config = root.appendingPathComponent("settings.json")
+        try "{".write(to: config, atomically: true, encoding: .utf8)
+        defer {
+            _ = ConfigInstaller.removeCustomCLI(source: source)
+            UserDefaults.standard.removeObject(forKey: "cli_enabled_\(source)")
+        }
+
+        let result = ConfigInstaller.addCustomCLI(
+            name: "Custom",
+            source: source,
+            configPath: config.path,
+            format: .nested
+        )
+
+        XCTAssertTrue(result.ok)
+        XCTAssertFalse(ConfigInstaller.setEnabled(source: source, enabled: true))
+        XCTAssertFalse(ConfigInstaller.isEnabled(source: source))
+    }
+
+    func testRemoveManagedHookEntriesAlsoPrunesLegacyManagedHooks() throws {
         let hooks: [String: Any] = [
             "SessionEnd": [
                 [
@@ -242,6 +344,25 @@ final class ConfigInstallerTests: XCTestCase {
         XCTAssertTrue(cleaned.contains("default_model"))
     }
 
+    func testRemoveKimiHooksPreservesBridgePrefixOnlyCommands() {
+        let toml = """
+        [[hooks]]
+        event = "Stop"
+        command = "/Users/test/.bough/bin/bough-bridge-old --source kimi"
+        timeout = 5
+
+        [[hooks]]
+        event = "UserPromptSubmit"
+        command = "/usr/local/bin/my-bough-bridge"
+        timeout = 1
+        """
+
+        let cleaned = ConfigInstaller.removeKimiHooks(from: toml)
+
+        XCTAssertTrue(cleaned.contains("bough-bridge-old"))
+        XCTAssertTrue(cleaned.contains("my-bough-bridge"))
+    }
+
     func testContentsContainsKimiHookDetectsInstalledEvent() {
         let toml = """
         [[hooks]]
@@ -277,6 +398,91 @@ final class ConfigInstallerTests: XCTestCase {
 
         let notificationTimeout = events.first { $0.0 == "Notification" }?.1
         XCTAssertEqual(notificationTimeout, 600, "Kimi max timeout is 600")
+    }
+
+    func testClaudeForkDefaultEventsIncludeBlockingPermissionAndFailureHooks() {
+        let events = ConfigInstaller.defaultEvents(for: .claude)
+        let eventNames = Set(events.map { $0.0 })
+
+        XCTAssertTrue(eventNames.contains("PermissionRequest"))
+        XCTAssertEqual(events.first { $0.0 == "PermissionRequest" }?.1, 86400)
+        XCTAssertTrue(eventNames.contains("PostToolUseFailure"))
+    }
+
+    func testCodexSetEnabledDoesNotCreateHooksWhenConfigTomlIsMalformed() throws {
+        try withTemporaryCodexHome { home, config in
+            let key = "cli_enabled_codex"
+            let saved = UserDefaults.standard.object(forKey: key)
+            defer {
+                if let saved {
+                    UserDefaults.standard.set(saved, forKey: key)
+                } else {
+                    UserDefaults.standard.removeObject(forKey: key)
+                }
+            }
+            try """
+            [features
+            codex_hooks = true
+            """.write(to: config, atomically: true, encoding: .utf8)
+
+            XCTAssertFalse(ConfigInstaller.setEnabled(source: "codex", enabled: true))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: home.appendingPathComponent("hooks.json").path))
+        }
+    }
+
+    func testCodexInstallCreatesCodexHomeWhenMissing() throws {
+        let fm = FileManager.default
+        let home = fm.temporaryDirectory
+            .appendingPathComponent("ConfigInstallerTests-MissingCodexHome-\(UUID().uuidString)")
+        let previous = ProcessInfo.processInfo.environment["CODEX_HOME"]
+        let key = "cli_enabled_codex"
+        let saved = UserDefaults.standard.object(forKey: key)
+        defer {
+            if let previous {
+                setenv("CODEX_HOME", previous, 1)
+            } else {
+                unsetenv("CODEX_HOME")
+            }
+            if let saved {
+                UserDefaults.standard.set(saved, forKey: key)
+            } else {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+            try? fm.removeItem(at: home)
+        }
+
+        setenv("CODEX_HOME", home.path, 1)
+        UserDefaults.standard.set(true, forKey: key)
+
+        XCTAssertFalse(fm.fileExists(atPath: home.path))
+        XCTAssertTrue(ConfigInstaller.testInstallCodexHooksIfEnabled())
+        XCTAssertTrue(fm.fileExists(atPath: home.appendingPathComponent("config.toml").path))
+        XCTAssertTrue(fm.fileExists(atPath: home.appendingPathComponent("hooks.json").path))
+        XCTAssertTrue(try String(contentsOf: home.appendingPathComponent("config.toml"), encoding: .utf8).contains("hooks = true"))
+        XCTAssertTrue(try String(contentsOf: home.appendingPathComponent("hooks.json"), encoding: .utf8).contains("PermissionRequest"))
+    }
+
+    func testBuiltInClaudeForksUseFullClaudeEventSet() throws {
+        let forkSources = [
+            "qoder",
+            "droid",
+            "codebuddy",
+            "codybuddycn",
+            "stepfun",
+            "antigravity",
+            "workbuddy",
+            "hermes",
+        ]
+
+        for source in forkSources {
+            let cli = try XCTUnwrap(
+                ConfigInstaller.allCLIs.first { $0.source == source },
+                "\(source) should be registered"
+            )
+            let events = Set(cli.events.map { $0.0 })
+            XCTAssertTrue(events.contains("PermissionRequest"), "\(source) should install approval hooks")
+            XCTAssertTrue(events.contains("PostToolUseFailure"), "\(source) should install failure hooks")
+        }
     }
 
     /// Hermetic integration test: uses a temporary directory instead of touching ~/.kimi/config.toml.
@@ -322,6 +528,98 @@ final class ConfigInstallerTests: XCTestCase {
         XCTAssertFalse(uninstalled.contains("bough-bridge"), "Bough hooks should be removed after uninstall")
     }
 
+    func testInstallKimiHooksDoesNotOverwriteNonUTF8Config() throws {
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+
+        let configPath = tempDir.appendingPathComponent("config.toml").path
+        let original = Data([0x68, 0x6f, 0x6f, 0x6b, 0x73, 0x20, 0xff, 0xfe])
+        XCTAssertTrue(fm.createFile(atPath: configPath, contents: original))
+
+        let cli = CLIConfig(
+            name: "Kimi Code CLI",
+            source: "kimi",
+            configPath: configPath,
+            configKey: "hooks",
+            format: .kimi,
+            events: ConfigInstaller.defaultEvents(for: .kimi)
+        )
+
+        XCTAssertFalse(ConfigInstaller.installKimiHooks(cli: cli, fm: fm))
+        XCTAssertEqual(fm.contents(atPath: configPath), original)
+    }
+
+    func testKimiLegacyScalarCommentingOnlyTouchesTopLevelHooks() {
+        let toml = """
+        hooks=[\"UserPromptSubmit\"]
+        hooks\t= false
+
+        [features]
+        hooks = true
+
+        [[hooks]]
+        event = "UserPromptSubmit"
+        command = "echo user"
+        """
+
+        let commented = ConfigInstaller.commentOutTopLevelKimiHooksScalar(in: toml)
+
+        XCTAssertTrue(commented.contains("# [Bough] commented out legacy scalar hooks to avoid TOML conflict\n# hooks=[\"UserPromptSubmit\"]"))
+        XCTAssertTrue(commented.contains("# [Bough] commented out legacy scalar hooks to avoid TOML conflict\n# hooks\t= false"))
+        XCTAssertTrue(commented.contains("[features]\nhooks = true"))
+        XCTAssertTrue(commented.contains("[[hooks]]\nevent = \"UserPromptSubmit\""))
+    }
+
+    func testKimiLegacyScalarRestoreOnlyUsesBoughMarker() {
+        let toml = """
+        # hooks = user-commented
+        # [Bough] commented out legacy scalar hooks to avoid TOML conflict
+        # hooks = false
+
+        [features]
+        # hooks = nested-comment
+        hooks = true
+        """
+
+        let restored = ConfigInstaller.restoreKimiCommentedLegacyScalars(in: toml)
+
+        XCTAssertTrue(restored.contains("# hooks = user-commented"))
+        XCTAssertTrue(restored.contains("\nhooks = false\n"))
+        XCTAssertTrue(restored.contains("[features]\n# hooks = nested-comment\nhooks = true"))
+        XCTAssertFalse(restored.contains("# [Bough] commented out legacy scalar hooks"))
+    }
+
+    func testKimiTomlEscapesBridgeCommandWithWhitespace() throws {
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+
+        let configPath = tempDir.appendingPathComponent("config.toml").path
+        let cli = CLIConfig(
+            name: "Kimi Code CLI",
+            source: "kimi",
+            configPath: configPath,
+            configKey: "hooks",
+            format: .kimi,
+            events: [("UserPromptSubmit", 5, true)]
+        )
+
+        XCTAssertTrue(ConfigInstaller.installKimiHooks(
+            cli: cli,
+            fm: fm,
+            bridgeCommand: "/Users/$Some User/.bough/bough-bridge"
+        ))
+
+        let installed = try String(contentsOfFile: configPath, encoding: .utf8)
+        XCTAssertTrue(
+            installed.contains(#"command = "\"/Users/\\$Some User/.bough/bough-bridge\" --source kimi""#),
+            installed
+        )
+    }
+
     func testUninstallRemovesBoughOwnedCopilotHookFile() throws {
         let fm = FileManager.default
         let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -359,6 +657,168 @@ final class ConfigInstallerTests: XCTestCase {
         try ConfigInstaller.testUninstallHooksForCLI(cli)
 
         XCTAssertFalse(fm.fileExists(atPath: configPath.path), "Copilot's bough.json is Bough-owned and should be removed on uninstall")
+    }
+
+    func testUninstallRemovesBoughOwnedCopilotHookFileUsingLegacyBinBridgePath() throws {
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+
+        let configPath = tempDir.appendingPathComponent(".copilot/hooks/bough.json")
+        try fm.createDirectory(at: configPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var cli = CLIConfig(
+            name: "Copilot",
+            source: "copilot",
+            configPath: ".copilot/hooks/bough.json",
+            configKey: "hooks",
+            format: .copilot,
+            events: [("PostToolUse", 5, false)]
+        )
+        cli.rootOverride = { tempDir.path }
+        let original = """
+        {
+          "version": 1,
+          "hooks": {
+            "PostToolUse": [
+              {
+                "type": "command",
+                "bash": "/Users/test/.bough/bin/bough-bridge --source copilot --event PostToolUse",
+                "timeoutSec": 5
+              }
+            ]
+          }
+        }
+        """
+
+        fm.createFile(atPath: configPath.path, contents: Data(original.utf8))
+
+        try ConfigInstaller.testUninstallHooksForCLI(cli)
+
+        XCTAssertFalse(fm.fileExists(atPath: configPath.path), "Legacy bin bridge path should still mark the whole file as Bough-owned")
+    }
+
+    func testUninstallPreservesCopilotHookFileWhenBridgePathOnlySharesPrefix() throws {
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+
+        let configPath = tempDir.appendingPathComponent(".copilot/hooks/bough.json")
+        try fm.createDirectory(at: configPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var cli = CLIConfig(
+            name: "Copilot",
+            source: "copilot",
+            configPath: ".copilot/hooks/bough.json",
+            configKey: "hooks",
+            format: .copilot,
+            events: [("PostToolUse", 5, false)]
+        )
+        cli.rootOverride = { tempDir.path }
+        let original = """
+        {
+          "version": 1,
+          "hooks": {
+            "PostToolUse": [
+              {
+                "type": "command",
+                "bash": "/Users/test/.bough/bin/bough-bridge-old --source copilot --event PostToolUse",
+                "timeoutSec": 5
+              }
+            ]
+          }
+        }
+        """
+
+        fm.createFile(atPath: configPath.path, contents: Data(original.utf8))
+
+        try ConfigInstaller.testUninstallHooksForCLI(cli)
+
+        XCTAssertTrue(fm.fileExists(atPath: configPath.path), "Prefix-only bridge paths are user-owned and must not delete the whole file")
+        let after = try String(contentsOf: configPath, encoding: .utf8)
+        XCTAssertTrue(after.contains("bough-bridge-old"))
+    }
+
+    func testUninstallPreservesCopilotHookFileWhenSourceOnlySharesPrefix() throws {
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+
+        let configPath = tempDir.appendingPathComponent(".copilot/hooks/bough.json")
+        try fm.createDirectory(at: configPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var cli = CLIConfig(
+            name: "Copilot",
+            source: "copilot",
+            configPath: ".copilot/hooks/bough.json",
+            configKey: "hooks",
+            format: .copilot,
+            events: [("PostToolUse", 5, false)]
+        )
+        cli.rootOverride = { tempDir.path }
+        let original = """
+        {
+          "version": 1,
+          "hooks": {
+            "PostToolUse": [
+              {
+                "type": "command",
+                "bash": "/Users/test/.bough/bough-bridge --source copilot-old --event PostToolUse",
+                "timeoutSec": 5
+              }
+            ]
+          }
+        }
+        """
+
+        fm.createFile(atPath: configPath.path, contents: Data(original.utf8))
+
+        try ConfigInstaller.testUninstallHooksForCLI(cli)
+
+        XCTAssertTrue(fm.fileExists(atPath: configPath.path), "Prefix-only source tags are user-owned and must not delete the whole file")
+        let after = try String(contentsOf: configPath, encoding: .utf8)
+        XCTAssertTrue(after.contains("--source copilot-old"))
+    }
+
+    func testUninstallPreservesCopilotHookFileWhenEqualsSourceOnlySharesPrefix() throws {
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+
+        let configPath = tempDir.appendingPathComponent(".copilot/hooks/bough.json")
+        try fm.createDirectory(at: configPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var cli = CLIConfig(
+            name: "Copilot",
+            source: "copilot",
+            configPath: ".copilot/hooks/bough.json",
+            configKey: "hooks",
+            format: .copilot,
+            events: [("PostToolUse", 5, false)]
+        )
+        cli.rootOverride = { tempDir.path }
+        let original = """
+        {
+          "version": 1,
+          "hooks": {
+            "PostToolUse": [
+              {
+                "type": "command",
+                "bash": "/Users/test/.bough/bough-bridge --source=copilotx --event PostToolUse",
+                "timeoutSec": 5
+              }
+            ]
+          }
+        }
+        """
+
+        fm.createFile(atPath: configPath.path, contents: Data(original.utf8))
+
+        try ConfigInstaller.testUninstallHooksForCLI(cli)
+
+        XCTAssertTrue(fm.fileExists(atPath: configPath.path), "Equals-form prefix source tags are user-owned and must not delete the whole file")
+        let after = try String(contentsOf: configPath, encoding: .utf8)
+        XCTAssertTrue(after.contains("--source=copilotx"))
     }
 
     func testUninstallRemovesBoughOwnedKiroAgentFile() throws {
@@ -480,12 +940,12 @@ final class ConfigInstallerTests: XCTestCase {
         XCTAssertTrue(after.contains("user-hook"))
     }
 
-    func testMergeCocoHooksAppendsHooksSectionWhenMissing() {
+    func testMergeCocoHooksAppendsHooksSectionWhenMissing() throws {
         let original = "model:\n    name: GPT-5.4\n"
 
         let merged = ConfigInstaller.mergeTraecliHooks(into: original)
 
-        let hooks = try! yamlHooks(merged)
+        let hooks = try yamlHooks(merged)
         XCTAssertEqual(hooks.count, 1)
         let cmd = hooks.first?["command"] as? String
         XCTAssertTrue(cmd?.contains("bough-bridge --source traecli") ?? false)
@@ -500,7 +960,7 @@ final class ConfigInstallerTests: XCTestCase {
         XCTAssertTrue(events.contains("stop"))
     }
 
-    func testMergeCocoHooksReplacesExistingManagedBlockWithoutTouchingUserHooks() {
+    func testMergeCocoHooksReplacesExistingManagedBlockWithoutTouchingUserHooks() throws {
         let original = """
 hooks:
   - type: command
@@ -528,7 +988,7 @@ hooks:
 
         let merged = ConfigInstaller.mergeTraecliHooks(into: original)
 
-        let hooks = try! yamlHooks(merged)
+        let hooks = try yamlHooks(merged)
         let commands = hooks.compactMap { $0["command"] as? String }
         XCTAssertTrue(commands.contains("echo user-hook"))
 
@@ -537,7 +997,7 @@ hooks:
         XCTAssertEqual(hooks.count, 2)
     }
 
-    func testMergeTraecliHooksRemovesQuotedBridgeCommandToAvoidDuplicates() {
+    func testMergeTraecliHooksRemovesQuotedBridgeCommandToAvoidDuplicates() throws {
         let bridge = "\(NSHomeDirectory())/.bough/bough-bridge"
         let original = """
 hooks:
@@ -562,23 +1022,23 @@ hooks:
 
         let merged = ConfigInstaller.mergeTraecliHooks(into: original)
 
-        let hooks = try! yamlHooks(merged)
+        let hooks = try yamlHooks(merged)
         let commands = hooks.compactMap { $0["command"] as? String }
         XCTAssertEqual(commands.filter { $0.contains("bough-bridge") }.count, 1)
         XCTAssertEqual(commands.filter { $0.contains("--source traecli") }.count, 1)
     }
 
-    func testMergeTraecliHooksHandlesHooksFlowSequenceWithoutBreakingYAML() {
+    func testMergeTraecliHooksHandlesHooksFlowSequenceWithoutBreakingYAML() throws {
         let original = "model: GPT-5.4\nhooks: []\n"
         let merged = ConfigInstaller.mergeTraecliHooks(into: original)
 
         // Should rewrite hooks into a list and inject our managed hook.
-        let hooks = try! yamlHooks(merged)
+        let hooks = try yamlHooks(merged)
         let commands = hooks.compactMap { $0["command"] as? String }
         XCTAssertEqual(commands.filter { $0.contains("--source traecli") }.count, 1)
     }
 
-    func testMergeTraecliHooksNormalizesMixedIndentationToValidYAML() {
+    func testMergeTraecliHooksNormalizesMixedIndentationToValidYAML() throws {
         // Simulate a user file with 4-space indented list items, which previously could
         // become invalid YAML when we injected a 2-space indented managed block.
         let original = """
@@ -593,7 +1053,7 @@ hooks:
 
         let merged = ConfigInstaller.mergeTraecliHooks(into: original)
         // Must be parseable and must contain both user + managed hook.
-        let hooks = try! yamlHooks(merged)
+        let hooks = try yamlHooks(merged)
         let commands = hooks.compactMap { $0["command"] as? String }
         XCTAssertTrue(commands.contains("echo user-hook"))
         XCTAssertEqual(commands.filter { $0.contains("bough-bridge") && $0.contains("--source traecli") }.count, 1)
@@ -605,6 +1065,30 @@ hooks:
         let once = ConfigInstaller.mergeTraecliHooks(into: original)
         let twice = ConfigInstaller.mergeTraecliHooks(into: once)
         XCTAssertEqual(once, twice)
+    }
+
+    func testMergeTraecliHooksLeavesMalformedYAMLByteIdentical() {
+        let original = "model: [\nhooks: []"
+
+        let merged = ConfigInstaller.mergeTraecliHooks(into: original)
+
+        XCTAssertEqual(merged, original)
+    }
+
+    func testInstallTraecliHooksRefusesMalformedYAMLWithoutRewrite() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BoughConfigInstallerTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let configURL = tempDir.appendingPathComponent("traecli.yaml")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let original = "model: [\nhooks: []"
+        try original.write(to: configURL, atomically: true, encoding: .utf8)
+
+        var cli = ConfigInstaller.testMakeCLI(format: .traecli, configPath: "traecli.yaml")
+        cli.rootOverride = { tempDir.path }
+
+        XCTAssertThrowsError(try ConfigInstaller.testInstallHooksForCLI(cli))
+        XCTAssertEqual(try String(contentsOf: configURL, encoding: .utf8), original)
     }
 
     func testMergeTraecliHooksPreservesUserCommentsAndKeyOrder() throws {
@@ -642,7 +1126,7 @@ hooks:
         XCTAssertEqual(commands.filter { $0.contains("--source traecli") }.count, 1)
     }
 
-    func testMergeTraecliHooksRemovesManagedBlockEvenWithTrailingComments() {
+    func testMergeTraecliHooksRemovesManagedBlockEvenWithTrailingComments() throws {
         let original = """
 hooks:
   - type: command # keep
@@ -670,7 +1154,7 @@ hooks:
 
         let merged = ConfigInstaller.mergeTraecliHooks(into: original)
 
-        let hooks = try! yamlHooks(merged)
+        let hooks = try yamlHooks(merged)
         let commands = hooks.compactMap { $0["command"] as? String }
         XCTAssertTrue(commands.contains("echo user-hook"))
         XCTAssertEqual(commands.filter { $0.contains("--source traecli") }.count, 1)
@@ -694,6 +1178,39 @@ hooks:
         XCTAssertFalse(cleaned.contains("bough-bridge --source traecli"))
         XCTAssertFalse(cleaned.contains("BOUGH_MANAGED_TRAECLI_HOOK"))
         XCTAssertFalse(cleaned.contains("trailing comment"))
+    }
+
+    func testRemoveManagedTraecliHooksPreservesCommentsAndKeyOrder() throws {
+        let original = """
+# top-level comment about my config
+model: gpt-5
+# comment before hooks
+hooks:
+  - type: command
+    command: '\(NSHomeDirectory())/.bough/bough-bridge --source traecli'
+    matchers:
+      - event: stop
+  - type: command
+    command: 'echo user-hook'
+    matchers:
+      - event: session_start
+# trailing comment
+"""
+
+        let cleaned = ConfigInstaller.removeManagedTraecliHooks(from: original)
+
+        XCTAssertTrue(cleaned.contains("# top-level comment about my config"))
+        XCTAssertTrue(cleaned.contains("# comment before hooks"))
+        XCTAssertTrue(cleaned.contains("# trailing comment"))
+        XCTAssertFalse(cleaned.contains("bough-bridge --source traecli"))
+        XCTAssertTrue(cleaned.contains("echo user-hook"))
+
+        let modelIdx = try XCTUnwrap(cleaned.range(of: "model:")?.lowerBound)
+        let hooksIdx = try XCTUnwrap(cleaned.range(of: "hooks:")?.lowerBound)
+        XCTAssertLessThan(modelIdx, hooksIdx)
+
+        let commands = try yamlHooks(cleaned).compactMap { $0["command"] as? String }
+        XCTAssertEqual(commands, ["echo user-hook"])
     }
 
     func testRemoveManagedTraecliHooksDoesNotDeleteOtherCommands() {
@@ -823,6 +1340,7 @@ hooks:
             "file:///old/bough-opencode.js",
             "file:///some/bough.js",
             "\(previousPlugin)",
+            "file:///user/my-bough-plugin.js",
             "file:///user/other.js"
           ]
         }
@@ -836,7 +1354,9 @@ hooks:
         )
         let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(merged.utf8)) as? [String: Any])
         let plugins = try XCTUnwrap(json["plugin"] as? [String])
-        XCTAssertEqual(plugins.filter { $0.contains("bough") }.count, 1)
+        XCTAssertFalse(plugins.contains("file:///old/bough-opencode.js"))
+        XCTAssertTrue(plugins.contains("file:///some/bough.js"))
+        XCTAssertTrue(plugins.contains("file:///user/my-bough-plugin.js"))
         XCTAssertTrue(plugins.contains(previousPlugin))
         XCTAssertTrue(plugins.contains("file:///user/other.js"))
         XCTAssertTrue(plugins.contains("file:///new/bough-opencode.js"))
@@ -871,7 +1391,7 @@ hooks:
         let original = """
         {
           "model": "sonnet",
-          "plugin": ["file:///tmp/bough-opencode.js", "file:///user/other.js"]
+          "plugin": ["file:///tmp/bough-opencode.js", "file:///user/my-bough-plugin.js", "file:///user/other.js"]
         }
         """
         let cleaned = try XCTUnwrap(
@@ -882,7 +1402,7 @@ hooks:
         )
         let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(cleaned.utf8)) as? [String: Any])
         XCTAssertEqual(json["model"] as? String, "sonnet")
-        XCTAssertEqual(json["plugin"] as? [String], ["file:///user/other.js"])
+        XCTAssertEqual(json["plugin"] as? [String], ["file:///user/my-bough-plugin.js", "file:///user/other.js"])
     }
 
     func testRemoveOpencodePluginRefReturnsNilOnMalformedJSON() {
@@ -984,5 +1504,122 @@ hooks:
         XCTAssertTrue(cleaned.contains("file:///user/other.js"))
         XCTAssertFalse(cleaned.contains("file:///tmp/bough-opencode.js"))
         XCTAssertFalse(cleaned.contains("\\/"), "No slash escaping")
+    }
+
+    func testOpencodeEffectiveConfigPathPrefersJsoncThenJsonThenLegacyConfig() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("ConfigInstallerOpencode-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: dir) }
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        XCTAssertEqual(
+            ConfigInstaller.opencodeEffectiveConfigPath(configDir: dir.path, fm: fm),
+            dir.appendingPathComponent("opencode.json").path
+        )
+
+        let legacy = dir.appendingPathComponent("config.json")
+        fm.createFile(atPath: legacy.path, contents: Data("{}".utf8))
+        XCTAssertEqual(ConfigInstaller.opencodeEffectiveConfigPath(configDir: dir.path, fm: fm), legacy.path)
+
+        let json = dir.appendingPathComponent("opencode.json")
+        fm.createFile(atPath: json.path, contents: Data("{}".utf8))
+        XCTAssertEqual(ConfigInstaller.opencodeEffectiveConfigPath(configDir: dir.path, fm: fm), json.path)
+
+        let jsonc = dir.appendingPathComponent("opencode.jsonc")
+        fm.createFile(atPath: jsonc.path, contents: Data("{} // comment".utf8))
+        XCTAssertEqual(ConfigInstaller.opencodeEffectiveConfigPath(configDir: dir.path, fm: fm), jsonc.path)
+    }
+
+    func testInstallOpencodePluginUsesLocalAutoloadOnly() throws {
+        let source = try sourceFile("Sources/Bough/ConfigInstaller.swift")
+        let body = try sourceSlice(
+            source,
+            from: "private static func installOpencodePlugin",
+            to: "private static func uninstallOpencodePlugin"
+        )
+
+        XCTAssertTrue(body.contains("OpenCode auto-loads local plugins"))
+        XCTAssertTrue(body.contains("removeOpencodePluginRef"))
+        XCTAssertFalse(body.contains("mergeOpencodePluginRef("))
+        XCTAssertFalse(body.contains("pluginRef"))
+    }
+
+    func testOpencodeInstalledStateUsesLocalAutoloadPluginFile() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("ConfigInstallerOpencodeInstalled-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: dir) }
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let plugin = dir.appendingPathComponent("plugins/bough-opencode.js")
+        let config = dir.appendingPathComponent("opencode.json")
+        try fm.createDirectory(at: plugin.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("// version: v4\nexport default {}\n".utf8).write(to: plugin)
+        try Data(#"{"model":"anthropic/claude-sonnet-4"}"#.utf8).write(to: config)
+
+        XCTAssertTrue(ConfigInstaller.testIsOpencodePluginInstalled(
+            pluginPath: plugin.path,
+            configPaths: [config.path],
+            fm: fm
+        ))
+    }
+
+    func testOpencodeInstalledStateStillAcceptsLegacyConfigRefWhenPluginIsCurrent() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("ConfigInstallerOpencodeLegacyInstalled-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: dir) }
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let plugin = dir.appendingPathComponent("plugins/bough-opencode.js")
+        let config = dir.appendingPathComponent("opencode.json")
+        try fm.createDirectory(at: plugin.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("// version: v4\nexport default {}\n".utf8).write(to: plugin)
+        try Data(#"{"plugin":["file:///tmp/bough-opencode.js"]}"#.utf8).write(to: config)
+
+        XCTAssertTrue(ConfigInstaller.testIsOpencodePluginInstalled(
+            pluginPath: plugin.path,
+            configPaths: [config.path],
+            fm: fm
+        ))
+    }
+
+    func testOpencodeInstalledStateRejectsOutdatedLocalPlugin() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("ConfigInstallerOpencodeOutdated-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: dir) }
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let plugin = dir.appendingPathComponent("plugins/bough-opencode.js")
+        let config = dir.appendingPathComponent("opencode.json")
+        try fm.createDirectory(at: plugin.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("// version: v3\nexport default {}\n".utf8).write(to: plugin)
+        try Data(#"{"plugin":["file:///tmp/bough-opencode.js"]}"#.utf8).write(to: config)
+
+        XCTAssertFalse(ConfigInstaller.testIsOpencodePluginInstalled(
+            pluginPath: plugin.path,
+            configPaths: [config.path],
+            fm: fm
+        ))
+    }
+
+    func testOpencodeBundledPluginIsESM() throws {
+        let source = try sourceFile("Sources/Bough/Resources/bough-opencode.js")
+
+        XCTAssertTrue(source.contains("import { execFile, execSync } from \"child_process\";"))
+        XCTAssertTrue(source.contains("import { connect } from \"net\";"))
+        XCTAssertFalse(source.contains("require("))
+    }
+
+    func testHookScriptAndBridgeInstallEnsureBoughDirectory() throws {
+        let source = try sourceFile("Sources/Bough/ConfigInstaller.swift")
+        let hookScriptBody = try sourceSlice(
+            source,
+            from: "private static func installHookScript",
+            to: "private static func installBridgeBinary"
+        )
+        let bridgeBody = try sourceSlice(
+            source,
+            from: "private static func installBridgeBinary",
+            to: "private static func stripQuarantine"
+        )
+
+        XCTAssertTrue(hookScriptBody.contains("BoughPrivateStorage.ensurePrivateDirectory"))
+        XCTAssertTrue(bridgeBody.contains("BoughPrivateStorage.ensurePrivateDirectory"))
     }
 }

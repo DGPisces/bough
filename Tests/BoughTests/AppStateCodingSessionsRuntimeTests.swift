@@ -26,7 +26,7 @@ final class AppStateCodingSessionsRuntimeTests: XCTestCase {
         appState.activeSessionId = "manual-session"
         appState.surface = .collapsed
         appState.attachedTranscriptPaths["manual-session"] = "/tmp/manual-session.jsonl"
-        appState.pendingToolUses["tool-1"] = PreToolUseRecord(
+        appState.pendingToolUses[toolUseKey(sessionId: "manual-session", toolUseId: "tool-1", source: "codex")] = PreToolUseRecord(
             sessionId: "manual-session",
             toolName: "Bash",
             toolDescription: "echo test",
@@ -94,6 +94,17 @@ final class AppStateCodingSessionsRuntimeTests: XCTestCase {
         ]
         let data = try JSONSerialization.data(withJSONObject: payload)
         return try XCTUnwrap(HookEvent(from: data))
+    }
+
+    private func toolUseKey(sessionId: String, toolUseId: String, source: String) -> ToolUseKey {
+        let payload: [String: Any] = [
+            "hook_event_name": "PreToolUse",
+            "session_id": sessionId,
+            "tool_use_id": toolUseId,
+            "_source": source
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: payload)
+        return ToolUseKey(event: HookEvent(from: data)!)!
     }
 
     private func extractPermissionBehavior(from responseData: Data) throws -> String {

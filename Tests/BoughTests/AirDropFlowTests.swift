@@ -166,10 +166,31 @@ final class AirDropFlowTests: XCTestCase {
         controller.prepare(payload: AirDropPasteboardPayload(text: "send me"), source: .drag)
         controller.submit(includeText: true)
 
-        XCTAssertEqual(controller.state, .unavailable("此项目无法使用 AirDrop"))
+        XCTAssertEqual(controller.state, .unavailable(AirDropFlowMessageKey.unavailable))
         let textRoot = root.appendingPathComponent("BoughAirDropText", isDirectory: true)
         let residualItems = try? FileManager.default.contentsOfDirectory(atPath: textRoot.path)
         XCTAssertTrue((residualItems ?? []).isEmpty)
+    }
+
+    func testResetWhileOpeningCleansTemporaryTextDirectory() throws {
+        let root = makeTempRoot()
+        let performer = FakeAirDropSharePerformer()
+        let controller = makeController(root: root, performer: performer)
+
+        controller.prepare(payload: AirDropPasteboardPayload(text: "send me"), source: .drag)
+        controller.submit(includeText: true)
+
+        guard case .opening(let transfer) = controller.state else {
+            return XCTFail("Expected opening state")
+        }
+        let temporaryFile = try XCTUnwrap(transfer.temporaryTextFiles.first)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: temporaryFile.directoryURL.path))
+
+        controller.reset()
+
+        XCTAssertEqual(controller.state, .idle)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: temporaryFile.directoryURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: temporaryFile.directoryURL.deletingLastPathComponent().path))
     }
 
     func testPureTextCancelDoesNotCreateTemporaryFile() throws {
@@ -301,7 +322,7 @@ final class AirDropFlowTests: XCTestCase {
 
         performer.closeNativeDialog()
 
-        XCTAssertEqual(controller.state, .failed("AirDrop 未完成"))
+        XCTAssertEqual(controller.state, .failed(AirDropFlowMessageKey.failed))
         XCTAssertFalse(FileManager.default.fileExists(atPath: temporaryFile.directoryURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: temporaryFile.directoryURL.deletingLastPathComponent().path))
     }

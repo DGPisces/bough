@@ -10,6 +10,10 @@ struct DiagnosticsExporter {
         let hookEvents: [[String: Any]]
     }
 
+    private final class CommandOutputBox: @unchecked Sendable {
+        var data = Data()
+    }
+
     @MainActor
     static func export(appState: AppState) {
         let panel = NSSavePanel()
@@ -84,19 +88,22 @@ struct DiagnosticsExporter {
         let socketInfo = "path: \(socketPath)\nexists: \(socketExists)\n"
         try? socketInfo.write(to: root.appendingPathComponent("state/socket.txt"), atomically: true, encoding: .utf8)
 
+        let logsDir = root.appendingPathComponent("logs", isDirectory: true)
+        try fm.createDirectory(at: logsDir, withIntermediateDirectories: true)
+
         // 5. Unified system logs (last 2 hours)
         let logOutput = runCommand("/usr/bin/log", args: [
             "show", "--style", "compact", "--info", "--debug",
             "--last", "2h", "--predicate", "subsystem == \"com.dgpisces.bough\""
         ])
-        try? logOutput.write(to: root.appendingPathComponent("logs/unified.log"), atomically: true, encoding: .utf8)
+        try? logOutput.write(to: logsDir.appendingPathComponent("unified.log"), atomically: true, encoding: .utf8)
 
         // 6. sw_vers
         let swVers = runCommand("/usr/bin/sw_vers", args: [])
-        try? swVers.write(to: root.appendingPathComponent("logs/sw_vers.txt"), atomically: true, encoding: .utf8)
+        try? swVers.write(to: logsDir.appendingPathComponent("sw_vers.txt"), atomically: true, encoding: .utf8)
 
         // 7. Recent crash reports
-        copyCrashReports(to: root.appendingPathComponent("logs/crash-reports", isDirectory: true))
+        copyCrashReports(to: logsDir.appendingPathComponent("crash-reports", isDirectory: true))
 
         // Zip
         if fm.fileExists(atPath: destination.path) {
@@ -106,8 +113,14 @@ struct DiagnosticsExporter {
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
         proc.arguments = ["-c", "-k", "--keepParent", root.path, destination.path]
         try proc.run()
-        proc.waitUntilExit()
+        let dittoExited = ProcessRunner.waitUntilExitOrTerminate(proc, timeout: 20)
         try? fm.removeItem(at: tmp)
+
+        guard dittoExited else {
+            throw NSError(domain: "DiagnosticsExporter", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "ditto timed out"
+            ])
+        }
 
         guard proc.terminationStatus == 0 else {
             throw NSError(domain: "DiagnosticsExporter", code: 1, userInfo: [
@@ -153,7 +166,7 @@ struct DiagnosticsExporter {
             if let source = event.source { dict["source"] = source }
             if let sessionId = event.sessionId { dict["sessionId"] = String(sessionId.prefix(12)) }
             if let toolName = event.toolName { dict["toolName"] = toolName }
-            if let preview = event.promptPreview { dict["promptPreview"] = preview }
+            if let preview = event.promptPreview { dict["promptPreview"] = sanitizedDiagnosticsText(preview) }
             return dict
         }
     }
@@ -189,24 +202,24 @@ struct DiagnosticsExporter {
         let home = home ?? fm.homeDirectoryForCurrentUser.path
 
         // claudeCodeStatusLine
-        let statusLine: Any = ConfigInstaller.currentClaudeCodeStatusLineCommand() ?? NSNull()
+        let settingsPath = home + "/.claude/settings.json"
+        let statusLine: Any = ConfigInstaller.currentClaudeCodeStatusLineCommand(settingsPath: settingsPath)
+            .map(sanitizedDiagnosticsText) ?? NSNull()
 
         // claudeCodeHooksBlock — parse ~/.claude/settings.json and extract top-level "hooks" key
-        let settingsPath = home + "/.claude/settings.json"
         var claudeCodeHooksBlock: Any = NSNull()
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: settingsPath)),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        if let json = ConfigInstaller.parseJSONCFile(at: settingsPath, fm: fm),
            let hooks = json["hooks"] {
-            claudeCodeHooksBlock = hooks
+            claudeCodeHooksBlock = sanitizedJSONValue(hooks)
         }
 
-        // codexHooksInstalled — ~/.codex/hooks.json exists and contains "bough"
+        // codexHooksInstalled — ~/.codex/hooks.json exists and contains a managed Bough hook.
         let codexHooksPath = home + "/.codex/hooks.json"
         var codexHooksInstalled = false
         if fm.fileExists(atPath: codexHooksPath),
            let data = try? Data(contentsOf: URL(fileURLWithPath: codexHooksPath)),
            let content = String(data: data, encoding: .utf8) {
-            codexHooksInstalled = content.contains("bough")
+            codexHooksInstalled = containsManagedCodexHookMarker(content)
         }
 
         // codexFeaturesSection — lines under [features] table in ~/.codex/config.toml
@@ -228,7 +241,7 @@ struct DiagnosticsExporter {
                     featureLines.append(line)
                 }
             }
-            codexFeaturesSection = featureLines.joined(separator: "\n")
+            codexFeaturesSection = sanitizedDiagnosticsText(featureLines.joined(separator: "\n"))
         }
 
         return [
@@ -237,6 +250,30 @@ struct DiagnosticsExporter {
             "codexHooksInstalled": codexHooksInstalled,
             "codexFeaturesSection": codexFeaturesSection,
         ]
+    }
+
+    private static func containsManagedCodexHookMarker(_ content: String) -> Bool {
+        let lower = content.lowercased()
+        if lower.contains("bough-hook-v1-start") || lower.contains("bough-hook-v1-end") {
+            return true
+        }
+        if lower.contains("bough_hook_v1") {
+            return true
+        }
+        if lower.contains("~/.bough/bough-hook.sh") || lower.contains("/.bough/bough-hook.sh") {
+            return true
+        }
+        if lower.contains("~/.claude/hooks/bough-hook.sh")
+            || lower.contains("/.claude/hooks/bough-hook.sh") {
+            return true
+        }
+        if ConfigInstaller.containsBoughBridgeCommand(content) {
+            return true
+        }
+        if lower.range(of: #"(^|/)bough-opencode\.js($|[?#])"#, options: .regularExpression) != nil {
+            return true
+        }
+        return false
     }
 
     /// Builds the migration-log payload. Internal for testability.
@@ -312,16 +349,10 @@ struct DiagnosticsExporter {
 
     static func sanitizedDiagnosticsText(_ content: String) -> String {
         var sanitized = content
-        let sensitiveKeyPattern = #"(?i)(token|secret|password|authorization|bearer|api[_-]?key|private[_-]?key|pat)(\s*[:=]\s*)(["']?)[^"'\n\r,} ]+(["']?)"#
-        sanitized = sanitized.replacingOccurrences(
-            of: sensitiveKeyPattern,
-            with: "$1$2$3<redacted>$4",
-            options: .regularExpression
-        )
-
         let tokenPatterns = [
             #"github_pat_[A-Za-z0-9_]+"#,
             #"gh[pousr]_[A-Za-z0-9_]+"#,
+            #"sk-[A-Za-z0-9._\-]+"#,
             #"Bearer\s+[A-Za-z0-9._~+/\-]+=*"#,
         ]
         for pattern in tokenPatterns {
@@ -332,12 +363,36 @@ struct DiagnosticsExporter {
             )
         }
 
+        let sensitiveKeyPattern = #"(?i)(["']?)([A-Za-z0-9_.-]*(?:token|secret|password|authorization|bearer|api[_-]?key|private[_-]?key|pat)[A-Za-z0-9_.-]*)(["']?)(\s*[:=]\s*)(["']?)[^"'\n\r,}]+(["']?)"#
+        sanitized = sanitized.replacingOccurrences(
+            of: sensitiveKeyPattern,
+            with: "$1$2$3$4$5<redacted>$6",
+            options: .regularExpression
+        )
+
         sanitized = sanitized.replacingOccurrences(
             of: ["bough", "internal"].joined(separator: "-"),
             with: "bough",
             options: .caseInsensitive
         )
         return sanitized
+    }
+
+    private static func sanitizedJSONValue(_ value: Any) -> Any {
+        switch value {
+        case let string as String:
+            return sanitizedDiagnosticsText(string)
+        case let dict as [String: Any]:
+            var sanitized: [String: Any] = [:]
+            for (key, value) in dict {
+                sanitized[key] = sanitizedJSONValue(value)
+            }
+            return sanitized
+        case let array as [Any]:
+            return array.map(sanitizedJSONValue)
+        default:
+            return value
+        }
     }
 
     private static func runCommand(_ executable: String, args: [String]) -> String {
@@ -349,9 +404,18 @@ struct DiagnosticsExporter {
         proc.standardError = FileHandle.nullDevice
         do {
             try proc.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            proc.waitUntilExit()
-            return String(data: data, encoding: .utf8) ?? ""
+            let box = CommandOutputBox()
+            let drained = DispatchSemaphore(value: 0)
+            DispatchQueue.global(qos: .userInitiated).async {
+                box.data = pipe.fileHandleForReading.readDataToEndOfFile()
+                drained.signal()
+            }
+            let exited = ProcessRunner.waitUntilExitOrTerminate(proc, timeout: 10)
+            _ = drained.wait(timeout: .now() + 1)
+            guard exited else {
+                return "error: command timed out after 10s: \(executable)"
+            }
+            return String(data: box.data, encoding: .utf8) ?? ""
         } catch {
             return "error: \(error.localizedDescription)"
         }

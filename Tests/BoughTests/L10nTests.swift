@@ -3,13 +3,30 @@ import XCTest
 
 final class L10nTests: XCTestCase {
     private static let supportedLanguages = ["en", "zh"]
+    private var savedLanguage: String!
+    private var savedLanguageDefaultValue: Any?
+    private var lockedProcessState = false
 
     override func setUp() {
+        super.setUp()
+        TestHelpers.processStateLock.lock()
+        lockedProcessState = true
+        savedLanguage = L10n.shared.language
+        savedLanguageDefaultValue = UserDefaults.standard.object(forKey: SettingsKey.appLanguage)
         L10n.shared.language = "en"
     }
 
     override func tearDown() {
-        L10n.shared.language = "system"
+        if lockedProcessState {
+            TestHelpers.restoreSharedLanguage(savedLanguage, savedDefaultValue: savedLanguageDefaultValue)
+        }
+        savedLanguage = nil
+        savedLanguageDefaultValue = nil
+        if lockedProcessState {
+            TestHelpers.processStateLock.unlock()
+            lockedProcessState = false
+        }
+        super.tearDown()
     }
 
     func testChineseTranslationsContainAllKeysPresentInEnglish() {

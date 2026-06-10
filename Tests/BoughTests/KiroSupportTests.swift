@@ -52,6 +52,13 @@ final class KiroSupportTests: XCTestCase {
         XCTAssertEqual(snapshot.sourceLabel, "Kiro")
     }
 
+    func testKiroProcessFallbackIsWired() throws {
+        XCTAssertTrue(CLIProcessResolver.sourceMatchesExecutablePath("/opt/homebrew/bin/kiro", source: "kiro"))
+        let source = try Self.sourceFile("Sources/Bough/AppState.swift")
+        XCTAssertTrue(source.contains(#"case "kiro":       return findKiroPids"#))
+        XCTAssertTrue(source.contains("private nonisolated static func findKiroPids"))
+    }
+
     // MARK: - ConfigInstaller — Kiro CLIConfig + default events
 
     func testKiroDefaultEventsAreCamelCaseAndComplete() {
@@ -68,5 +75,14 @@ final class KiroSupportTests: XCTestCase {
         XCTAssertEqual(HookFormat.kiroAgent.storageValue, "kiroAgent")
         XCTAssertEqual(HookFormat(storageValue: "kiroAgent"), .kiroAgent)
         XCTAssertEqual(HookFormat(storageValue: "kiroagent"), .kiroAgent)  // case-insensitive
+    }
+
+    private static func sourceFile(_ relativePath: String) throws -> String {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(relativePath)
+        return try String(contentsOf: url, encoding: .utf8)
     }
 }

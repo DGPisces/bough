@@ -176,6 +176,23 @@ print_env_assignment() {
     printf '%s=%q' "$1" "$2"
 }
 
+assert_resource_tree_clean() {
+    local resource_dir="$REPO_ROOT/Sources/Bough/Resources"
+    [[ -d "$resource_dir" ]] || return 0
+
+    local found
+    found="$(
+        find "$resource_dir" \
+            \( -name '__pycache__' -o -name '*.pyc' -o -name '*.pyo' -o -name '.DS_Store' \) \
+            -print
+    )"
+    if [[ -n "$found" ]]; then
+        echo "Generated files found under Sources/Bough/Resources:" >&2
+        echo "$found" >&2
+        die "clean generated resource files before building release artifacts"
+    fi
+}
+
 default_feed_url() {
     printf 'https://raw.githubusercontent.com/DGPisces/bough/appcast/appcast.xml'
 }
@@ -218,8 +235,13 @@ remote_feed_url_allowed() {
 }
 
 stable_appcast_url() {
-    local appcast_path="${BOUGH_APPCAST_PATH:-$REPO_ROOT/Tools/Release/appcast.xml}"
+    local appcast_path
+    appcast_path="$(release_appcast_path)"
     /usr/bin/perl -0ne 'if (m{<item>.*?<enclosure\s+[^>]*url="([^"]+)"}s) { print $1; exit }' "$appcast_path"
+}
+
+release_appcast_path() {
+    printf '%s' "${APPCAST_PATH:-${BOUGH_APPCAST_PATH:-$REPO_ROOT/Tools/Release/appcast.xml}}"
 }
 
 release_plist_path() {
@@ -300,7 +322,12 @@ assert_settings_entry_in_dmg() {
 
     local app_dir="$mount_dir/Bough.app"
     if [[ ! -d "$app_dir" ]]; then
-        app_dir="$(find "$mount_dir" -maxdepth 2 -name 'Bough.app' -type d -print -quit)"
+        for candidate in "$mount_dir"/*/Bough.app; do
+            if [[ -d "$candidate" ]]; then
+                app_dir="$candidate"
+                break
+            fi
+        done
     fi
 
     if [[ -z "$app_dir" || ! -d "$app_dir" ]]; then
@@ -353,7 +380,12 @@ assert_macos_sdk_in_dmg() {
 
     local app_dir="$mount_dir/Bough.app"
     if [[ ! -d "$app_dir" ]]; then
-        app_dir="$(find "$mount_dir" -maxdepth 2 -name 'Bough.app' -type d -print -quit)"
+        for candidate in "$mount_dir"/*/Bough.app; do
+            if [[ -d "$candidate" ]]; then
+                app_dir="$candidate"
+                break
+            fi
+        done
     fi
 
     if [[ -z "$app_dir" || ! -d "$app_dir" ]]; then
@@ -553,11 +585,14 @@ cmd_assert_new_build() {
 
 cmd_build() {
     parse_args "$@"
+    assert_resource_tree_clean
     if [[ "$DRY_RUN" == "1" ]]; then
-        echo "BUILD_ARCH=arm64 Tools/Build/build-dmg.sh"
+        echo "BOUGH_SKIP_APPCAST_VERSION_CHECK=1 BUILD_ARCH=arm64 Tools/Build/build-dmg.sh"
         return
     fi
-    BUILD_ARCH="${BUILD_ARCH:-arm64}" "$REPO_ROOT/Tools/Build/build-dmg.sh"
+    BOUGH_SKIP_APPCAST_VERSION_CHECK=1 \
+        BUILD_ARCH="${BUILD_ARCH:-arm64}" \
+        "$REPO_ROOT/Tools/Build/build-dmg.sh"
 }
 
 cmd_publish_asset() {
@@ -597,6 +632,10 @@ cmd_update_appcast() {
     validate_label_for_tag "$TAG" "$LABEL"
 
     if [[ "$DRY_RUN" == "1" ]]; then
+        local appcast_path
+        appcast_path="$(release_appcast_path)"
+        print_env_assignment BOUGH_APPCAST_PATH "$appcast_path"
+        printf ' '
         print_env_assignment BOUGH_RELEASE_TAG "$TAG"
         printf ' '
         print_env_assignment BOUGH_RELEASE_LABEL "$LABEL"
@@ -608,6 +647,7 @@ cmd_update_appcast() {
     fi
 
     [[ -f "$DMG" ]] || die "DMG not found: $DMG"
+    BOUGH_APPCAST_PATH="$(release_appcast_path)" \
     BOUGH_RELEASE_TAG="$TAG" \
     BOUGH_RELEASE_LABEL="$LABEL" \
     BOUGH_DMG_DOWNLOAD_URL="$DOWNLOAD_URL" \
@@ -621,14 +661,21 @@ cmd_verify() {
     require_value "--download-url" "$DOWNLOAD_URL"
     validate_tag "$TAG"
     validate_download_url_tag "$DOWNLOAD_URL" "$TAG"
+    assert_resource_tree_clean
 
     if [[ "$DRY_RUN" == "1" ]]; then
+        local appcast_path
+        appcast_path="$(release_appcast_path)"
+        if is_prerelease_tag "$TAG"; then
+            print_env_assignment BOUGH_SKIP_APPCAST_VERSION_CHECK 1
+            printf ' '
+        fi
         print_env_assignment BOUGH_RELEASE_TAG "$TAG"
         printf ' '
-        print_command Tools/Release/check-version-consistency.sh --with-dmg "$DMG"
+        print_command Tools/Release/check-version-consistency.sh --with-dmg "$DMG" --appcast "$appcast_path"
         if ! is_prerelease_tag "$TAG"; then
-            print_command xmllint --noout Tools/Release/appcast.xml
-            print_command Tools/Release/release-flow.sh _assert-stable-appcast-url --download-url "$DOWNLOAD_URL"
+            print_command xmllint --noout "$appcast_path"
+            print_command Tools/Release/release-flow.sh _assert-stable-appcast-url --appcast "$appcast_path" --download-url "$DOWNLOAD_URL"
         fi
         print_command Tools/Release/release-flow.sh _assert-settings-entry --dmg "$DMG"
         print_command Tools/Release/release-flow.sh _assert-macos-sdk --dmg "$DMG" --min-macos "$MIN_MACOS" --min-sdk "$MIN_SDK"
@@ -639,9 +686,15 @@ cmd_verify() {
     fi
 
     [[ -f "$DMG" ]] || die "DMG not found: $DMG"
-    BOUGH_RELEASE_TAG="$TAG" "$REPO_ROOT/Tools/Release/check-version-consistency.sh" --with-dmg "$DMG"
+    if is_prerelease_tag "$TAG"; then
+        BOUGH_SKIP_APPCAST_VERSION_CHECK=1 BOUGH_RELEASE_TAG="$TAG" \
+            "$REPO_ROOT/Tools/Release/check-version-consistency.sh" --with-dmg "$DMG" --appcast "$(release_appcast_path)"
+    else
+        BOUGH_RELEASE_TAG="$TAG" \
+            "$REPO_ROOT/Tools/Release/check-version-consistency.sh" --with-dmg "$DMG" --appcast "$(release_appcast_path)"
+    fi
     if ! is_prerelease_tag "$TAG"; then
-        xmllint --noout "$REPO_ROOT/Tools/Release/appcast.xml"
+        xmllint --noout "$(release_appcast_path)"
         verify_stable_appcast_download_url "$DOWNLOAD_URL"
     fi
     assert_settings_entry_in_dmg "$DMG"

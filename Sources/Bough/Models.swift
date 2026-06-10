@@ -2,16 +2,63 @@ import Foundation
 import BoughCore
 
 struct PermissionRequest {
+    let id = UUID()
     let event: HookEvent
     let continuation: CheckedContinuation<Data, Never>
 
     var toolUseId: String? { event.toolUseId }
+    var toolUseKey: ToolUseKey? { ToolUseKey(event: event) }
+    var dismissalId: String {
+        if let toolUseKey { return "tool:\(toolUseKey.storageString)" }
+        return "request:\(id.uuidString)"
+    }
+}
+
+struct ToolUseKey: Hashable {
+    let sessionId: String
+    let source: String
+    let toolUseId: String
+
+    init?(event: HookEvent) {
+        guard let toolUseId = event.toolUseId, !toolUseId.isEmpty else { return nil }
+        self.sessionId = event.sessionId ?? "default"
+        self.source = Self.normalizedSource(from: event)
+        self.toolUseId = toolUseId
+    }
+
+    var storageString: String {
+        "\(sessionId):\(source):\(toolUseId)"
+    }
+
+    private static func normalizedSource(from event: HookEvent) -> String {
+        let raw = event.rawJSON["_source"] as? String
+        if let normalized = SessionSnapshot.normalizedSupportedSource(raw) {
+            return normalized
+        }
+        return raw?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+    }
 }
 
 struct AskUserQuestionItem {
     let payload: QuestionPayload
     let answerKey: String
     let multiSelect: Bool
+}
+
+enum AskUserQuestionAnswerValue {
+    case single(String)
+    case multiple([String])
+
+    var jsonValue: Any {
+        switch self {
+        case .single(let value):
+            return value
+        case .multiple(let values):
+            return values
+        }
+    }
 }
 
 struct AskUserQuestionState {

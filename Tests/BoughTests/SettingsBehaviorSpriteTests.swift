@@ -44,8 +44,8 @@ final class SettingsBehaviorSpriteTests: XCTestCase {
 
             XCTAssertEqual(bitmap.pixelsWide, 6912, "\(animation.rawValue) width")
             XCTAssertEqual(bitmap.pixelsHigh, 96, "\(animation.rawValue) height")
-            XCTAssertTrue(hasTransparentPixel(bitmap), "\(animation.rawValue) should keep a transparent sprite-sheet background.")
-            assertFirstFrameMatchesLastFrame(bitmap, "\(animation.rawValue)-sheet.png")
+            XCTAssertTrue(try hasTransparentPixel(bitmap), "\(animation.rawValue) should keep a transparent sprite-sheet background.")
+            try assertFirstFrameMatchesLastFrame(bitmap, "\(animation.rawValue)-sheet.png")
         }
     }
 
@@ -131,10 +131,12 @@ final class SettingsBehaviorSpriteTests: XCTestCase {
         return try XCTUnwrap(NSBitmapImageRep(data: data), "\(spec.filename) should be readable PNG data.")
     }
 
-    private func hasTransparentPixel(_ bitmap: NSBitmapImageRep) -> Bool {
+    private func hasTransparentPixel(_ bitmap: NSBitmapImageRep) throws -> Bool {
         for y in 0..<bitmap.pixelsHigh {
-            for x in 0..<bitmap.pixelsWide where bitmap.settingsBehaviorColor(atX: x, y: y).alphaComponent < 0.001 {
-                return true
+            for x in 0..<bitmap.pixelsWide {
+                if try bitmap.settingsBehaviorColor(atX: x, y: y).alphaComponent < 0.001 {
+                    return true
+                }
             }
         }
         return false
@@ -145,13 +147,13 @@ final class SettingsBehaviorSpriteTests: XCTestCase {
         _ message: @autoclosure () -> String,
         file: StaticString = #filePath,
         line: UInt = #line
-    ) {
+    ) throws {
         let frameWidth = 144
         let lastFrameX = bitmap.pixelsWide - frameWidth
         for y in 0..<96 {
             for x in 0..<frameWidth {
-                let first = bitmap.settingsBehaviorColor(atX: x, y: y)
-                let last = bitmap.settingsBehaviorColor(atX: lastFrameX + x, y: y)
+                let first = try bitmap.settingsBehaviorColor(atX: x, y: y)
+                let last = try bitmap.settingsBehaviorColor(atX: lastFrameX + x, y: y)
                 XCTAssertEqual(first.redComponent, last.redComponent, accuracy: 0.001, "\(message()) red @ \(x),\(y)", file: file, line: line)
                 XCTAssertEqual(first.greenComponent, last.greenComponent, accuracy: 0.001, "\(message()) green @ \(x),\(y)", file: file, line: line)
                 XCTAssertEqual(first.blueComponent, last.blueComponent, accuracy: 0.001, "\(message()) blue @ \(x),\(y)", file: file, line: line)
@@ -191,7 +193,10 @@ final class SettingsBehaviorSpriteTests: XCTestCase {
 }
 
 private extension NSBitmapImageRep {
-    func settingsBehaviorColor(atX x: Int, y: Int) -> NSColor {
-        colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) ?? .clear
+    func settingsBehaviorColor(atX x: Int, y: Int) throws -> NSColor {
+        try XCTUnwrap(
+            colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+            "Missing settings behavior sprite color at \(x),\(y)"
+        )
     }
 }

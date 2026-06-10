@@ -70,6 +70,9 @@ final class PublicGitHubGovernanceTests: XCTestCase {
         XCTAssertTrue(release.contains("(.browserDownloadUrl // .url)"))
         XCTAssertTrue(release.contains("BOUGH_HOMEBREW_TAP_TOKEN"))
         XCTAssertTrue(release.contains("Tools/Release/release-flow.sh open-tap-pr"))
+        XCTAssertTrue(release.contains("git -C \"$APPCAST_STAGING\" diff --cached --quiet"))
+        XCTAssertTrue(release.contains("No appcast changes to publish."))
+        XCTAssertFalse(release.contains("commit -m \"Update appcast for ${BOUGH_RELEASE_TAG}\" || exit 0"))
         XCTAssertFalse(release.contains("gh pr merge"))
         XCTAssertFalse(release.contains("self-hosted"))
         XCTAssertFalse(release.contains("DGPisces/\(Self.legacyRepoName)"))
@@ -85,7 +88,7 @@ final class PublicGitHubGovernanceTests: XCTestCase {
             XCTAssertTrue(readme.contains("brew tap DGPisces/tap"))
             XCTAssertTrue(readme.contains("brew install --cask bough"))
             XCTAssertTrue(readme.contains("GitHub Releases"))
-            XCTAssertTrue(readme.contains("Bough.dmg"))
+            XCTAssertTrue(readme.contains("Bough-vX.Y.Z.dmg"))
             XCTAssertTrue(readme.contains("brew update"))
             XCTAssertTrue(readme.contains("brew upgrade --cask bough"))
         }
@@ -101,6 +104,27 @@ final class PublicGitHubGovernanceTests: XCTestCase {
         XCTAssertFalse(files.contains(".github/workflows/\(Self.privateCIWorkflowName)"))
         XCTAssertFalse(files.contains(".github/PULL_REQUEST_TEMPLATE.md"))
         XCTAssertFalse(files.contains { $0.hasPrefix(".github/ISSUE_TEMPLATE/") })
+    }
+
+    func testPublicTreeExcludesPrivateAgentContextFiles() throws {
+        let tracked = try trackedFiles()
+        let deniedRootFiles = [
+            "AGENTS.md",
+            "CLAUDE.md",
+        ]
+
+        for file in deniedRootFiles {
+            XCTAssertFalse(tracked.contains(file), "\(file) must not be tracked in the public repo")
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: repoRoot.appendingPathComponent(file).path),
+                "\(file) must not be present in the public repo root"
+            )
+        }
+
+        XCTAssertFalse(tracked.contains { $0.hasPrefix(".agents/") })
+        XCTAssertFalse(tracked.contains { $0.hasPrefix(".claude/") })
+        XCTAssertFalse(tracked.contains { $0.localizedCaseInsensitiveContains(Self.legacyRepoName) })
+        XCTAssertFalse(tracked.contains(".github/workflows/\(Self.privateCIWorkflowName)"))
     }
 
     private static var attributionTraceScriptName: String {
@@ -126,15 +150,35 @@ final class PublicGitHubGovernanceTests: XCTestCase {
     private func allFiles(under relativePath: String) throws -> Set<String> {
         let root = repoRoot.appendingPathComponent(relativePath)
         var result = Set<String>()
-        guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else {
-            return result
-        }
+        let enumerator = try XCTUnwrap(
+            FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil),
+            "Failed to enumerate public governance root: \(root.path)"
+        )
         for case let url as URL in enumerator {
             var isDirectory: ObjCBool = false
             if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue {
                 result.insert(url.path.replacingOccurrences(of: repoRoot.path + "/", with: ""))
             }
         }
+        XCTAssertFalse(result.isEmpty, "Public governance scan must include files under \(relativePath).")
         return result
+    }
+
+    private func trackedFiles() throws -> Set<String> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", repoRoot.path, "ls-files"]
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        try process.run()
+        process.waitUntilExit()
+
+        let output = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let error = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 0, "git ls-files failed: \(error)")
+        return Set(output.split(separator: "\n").map(String.init))
     }
 }

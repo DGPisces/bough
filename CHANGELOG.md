@@ -2,6 +2,36 @@
 
 All notable changes to Bough are documented here.
 
+## [v1.0.5] - 2026-06-09
+
+### English
+
+Security hardening, broader CLI integrations, and reliability fixes.
+
+- Hardened local data handling: `~/.bough` files and the usage SQLite store are now user-private (0700/0600), socket cleanup refuses to delete non-Bough files, and shell/SSH command construction quotes all untrusted values.
+- Made permission handling fail closed: hidden plugin mode no longer auto-allows requests, and unanswerable permission prompts deny instead of allow.
+- Added Kiro, Cursor CLI, and Qoder CLI session sources, plus custom CLI registration with rollback on hook install failure.
+- Allowed Claude Code hooks and the statusLine bridge to coexist, with JSONC settings support and a stable bridge copy under `~/.bough`.
+- Added multi-select answers for AskUserQuestion prompts and scoped permission queues per session to stop cross-session tool-use collisions.
+- Fixed Claude project directory encoding (every non-alphanumeric character maps to `-`), restoring transcript discovery for paths containing dots.
+- Fixed an AppState teardown crash when the last reference was released off the main thread.
+- Improved usage monitoring: stale or future-dated samples are quarantined, threshold notifications survive restarts, and corrupt-store repair preserves WAL sidecars.
+- Hardened the release pipeline: signing now fails closed without a Developer ID identity, DMG assets are version-named, and generated files are blocked from release artifacts.
+
+### 简体中文
+
+安全加固、更广的 CLI 集成与可靠性修复。
+
+- 加固本地数据处理：`~/.bough` 文件与用量 SQLite 存储改为用户私有权限（0700/0600），socket 清理拒绝删除非 Bough 文件，shell/SSH 命令构造对所有不可信值加引号。
+- 权限处理改为 fail-closed：隐藏插件模式不再自动放行请求，无法应答的权限弹窗按拒绝处理而非放行。
+- 新增 Kiro、Cursor CLI、Qoder CLI 会话源，并支持自定义 CLI 注册（hook 安装失败时自动回滚）。
+- Claude Code hooks 与 statusLine bridge 可共存，支持 JSONC 设置文件，并在 `~/.bough` 下使用稳定的 bridge 副本。
+- AskUserQuestion 支持多选答案；权限队列按会话隔离，消除跨会话 tool-use 冲突。
+- 修复 Claude 项目目录编码（所有非字母数字字符映射为 `-`），含点路径的 transcript 发现恢复正常。
+- 修复最后引用在非主线程释放时 AppState 析构崩溃的问题。
+- 改进用量监控：隔离过期或未来时间戳的样本，阈值通知在重启后仍可送达，损坏存储修复时保留 WAL 附属文件。
+- 加固发布流水线：缺少 Developer ID 证书时签名直接失败，DMG 资产带版本号命名，并阻止生成文件混入发布产物。
+
 ## [v1.0.4] - 2026-06-04
 
 ### English

@@ -87,6 +87,7 @@ struct TerminalActivator {
         // handles e.g. OpenCode CLI launched from Ghostty but editing in VS Code — without
         // this, the inherited TERM_PROGRAM=ghostty would jump to the wrong terminal.
         if session.termBundleId == nil,
+           !hasTerminalEvidence(session),
            let nativeBundleId = sourceToNativeAppBundleId[session.source],
            NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == nativeBundleId }) {
             activateByBundleId(nativeBundleId)
@@ -189,6 +190,20 @@ struct TerminalActivator {
             activateTerminalWindow(bundleId: bundleId, cwd: cwd, fallbackName: termApp)
         } else {
             bringToFront(termApp)
+        }
+    }
+
+    private static func hasTerminalEvidence(_ session: SessionSnapshot) -> Bool {
+        [
+            session.termApp,
+            session.ttyPath,
+            session.itermSessionId,
+            session.tmuxPane,
+            session.kittyWindowId,
+            session.cmuxSurfaceId,
+            session.cmuxWorkspaceId,
+        ].contains { value in
+            value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         }
     }
 

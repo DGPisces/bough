@@ -6,12 +6,30 @@ import ServiceManagement
 
 @MainActor
 final class SettingsUsagePageTests: XCTestCase {
+    private var savedLanguage: String!
+    private var savedLanguageDefaultValue: Any?
+    private var lockedProcessState = false
+
     override func setUp() {
+        super.setUp()
+        TestHelpers.processStateLock.lock()
+        lockedProcessState = true
+        savedLanguage = L10n.shared.language
+        savedLanguageDefaultValue = UserDefaults.standard.object(forKey: SettingsKey.appLanguage)
         L10n.shared.language = "en"
     }
 
     override func tearDown() {
-        L10n.shared.language = "system"
+        if lockedProcessState {
+            TestHelpers.restoreSharedLanguage(savedLanguage, savedDefaultValue: savedLanguageDefaultValue)
+        }
+        savedLanguage = nil
+        savedLanguageDefaultValue = nil
+        if lockedProcessState {
+            TestHelpers.processStateLock.unlock()
+            lockedProcessState = false
+        }
+        super.tearDown()
     }
 
     func testUsagePageIsVisibleBeforeRemote() {
@@ -495,6 +513,43 @@ final class SettingsUsagePageTests: XCTestCase {
         )
     }
 
+    func testClaudeIntegrationToggleUsesParentControlledBindingWhenOverrideIsPresent() throws {
+        let source = try sourceFile("Sources/Bough/SettingsView.swift")
+        let row = try XCTUnwrap(source.slice(from: "private struct CLIStatusRow: View", to: "// MARK: - Advanced Page"))
+
+        XCTAssertTrue(row.contains("let toggleBinding = Binding<Bool>("))
+        XCTAssertTrue(row.contains("get: { overrideEnabled ?? enabled }"))
+        XCTAssertTrue(row.contains("if overrideEnabled == nil"))
+        XCTAssertTrue(row.contains("Toggle(\"\", isOn: toggleBinding)"))
+        XCTAssertFalse(row.contains("Toggle(\"\", isOn: $enabled)"))
+    }
+
+    func testIntegrationRowsRefreshEnabledStateFromParent() throws {
+        let source = try sourceFile("Sources/Bough/SettingsView.swift")
+        let integrations = try XCTUnwrap(source.slice(from: "private struct IntegrationsPage: View", to: "private struct CLIStatusRow: View"))
+        let row = try XCTUnwrap(source.slice(from: "private struct CLIStatusRow: View", to: "// MARK: - Advanced Page"))
+
+        XCTAssertTrue(integrations.contains("@State private var cliEnabledStates: [String: Bool] = [:]"))
+        XCTAssertTrue(integrations.contains("cliEnabledStates[cli.source] = ConfigInstaller.isEnabled(source: cli.source)"))
+        XCTAssertTrue(integrations.contains("cliEnabledStates[\"opencode\"] = ConfigInstaller.isEnabled(source: \"opencode\")"))
+        XCTAssertTrue(integrations.contains("enabled: enabled"))
+        XCTAssertTrue(integrations.contains("enabled: ocEnabled"))
+        XCTAssertTrue(row.contains("let enabled: Bool"))
+        XCTAssertFalse(row.contains("@State private var enabled"))
+    }
+
+    func testCustomCLIToggleAndAddHandleInstallFailure() throws {
+        let source = try sourceFile("Sources/Bough/SettingsView.swift")
+        let integrations = try XCTUnwrap(source.slice(from: "private struct IntegrationsPage: View", to: "private struct CLIStatusRow: View"))
+        let row = try XCTUnwrap(source.slice(from: "private struct CLIStatusRow: View", to: "// MARK: - Advanced Page"))
+
+        XCTAssertTrue(integrations.contains("guard ConfigInstaller.setEnabled(source: normalizedSource, enabled: true) else"))
+        XCTAssertTrue(integrations.contains("ConfigInstaller.removeCustomCLI(source: normalizedSource)"))
+        XCTAssertTrue(integrations.contains("hook installation failed"))
+        XCTAssertTrue(row.contains("let ok = ConfigInstaller.setEnabled(source: source, enabled: newValue)"))
+        XCTAssertTrue(row.contains("onToggle?(false)"))
+    }
+
     private func sourceFile(_ relativePath: String) throws -> String {
         let url = Self.repoRoot
             .appendingPathComponent(relativePath)
@@ -505,20 +560,20 @@ final class SettingsUsagePageTests: XCTestCase {
         let settingsView = try sourceFile("Sources/Bough/SettingsView.swift")
         let settingsDirectory = Self.repoRoot
             .appendingPathComponent("Sources/Bough/Settings", isDirectory: true)
-        guard let enumerator = FileManager.default.enumerator(
+        let enumerator = try XCTUnwrap(FileManager.default.enumerator(
             at: settingsDirectory,
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
-        ) else {
-            return settingsView
-        }
+        ), "Failed to enumerate settings source root: \(settingsDirectory.path)")
 
-        let splitSources = try enumerator
+        let splitFiles = try enumerator
             .compactMap { $0 as? URL }
             .filter { $0.pathExtension == "swift" }
             .sorted { $0.path < $1.path }
             .map { try String(contentsOf: $0, encoding: .utf8) }
-            .joined(separator: "\n")
+        XCTAssertFalse(splitFiles.isEmpty, "Settings source scan must include split Swift files.")
+        let splitSources = splitFiles.joined(separator: "\n")
+        XCTAssertTrue(splitSources.contains("struct UsagePage: View"))
 
         return [settingsView, splitSources].joined(separator: "\n")
     }
@@ -530,10 +585,7 @@ final class SettingsUsagePageTests: XCTestCase {
         )
     }
 
-    private static let repoRoot = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
+    private static let repoRoot = TestHelpers.repoRoot(from: #filePath)
 }
 
 private final class FakeSettingsUsageMonitorClient: UsageMonitorAppServiceClient {

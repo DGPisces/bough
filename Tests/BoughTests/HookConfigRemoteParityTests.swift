@@ -6,6 +6,7 @@ final class HookConfigRemoteParityTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        TestHelpers.processEnvironmentLock.lock()
         savedCodexHome = ProcessInfo.processInfo.environment["CODEX_HOME"]
     }
 
@@ -15,6 +16,7 @@ final class HookConfigRemoteParityTests: XCTestCase {
         } else {
             unsetenv("CODEX_HOME")
         }
+        TestHelpers.processEnvironmentLock.unlock()
         super.tearDown()
     }
 
@@ -331,6 +333,14 @@ final class HookConfigRemoteParityTests: XCTestCase {
             try original.write(to: config, atomically: true, encoding: .utf8)
         }
 
+        let previous = ProcessInfo.processInfo.environment["CODEX_HOME"]
+        defer {
+            if let previous {
+                setenv("CODEX_HOME", previous, 1)
+            } else {
+                unsetenv("CODEX_HOME")
+            }
+        }
         setenv("CODEX_HOME", root.path, 1)
         _ = ConfigInstaller.testEnableCodexHooksConfigWithDetectedVersion(detectedVersion)
 

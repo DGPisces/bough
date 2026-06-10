@@ -63,6 +63,7 @@ jobs:
 
           printf '%s' "$APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          echo "BOUGH_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security import "$CERTIFICATE_PATH" \
@@ -85,7 +86,6 @@ jobs:
           SIGN_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | /usr/bin/awk -F\" '/Developer ID Application/ { print $2; exit }')"
           [[ -n "$SIGN_IDENTITY" ]]
           {
-            echo "BOUGH_KEYCHAIN_PATH=$KEYCHAIN_PATH"
             echo "BOUGH_NOTARY_PROFILE=$NOTARY_PROFILE"
             echo "SIGN_IDENTITY=$SIGN_IDENTITY"
           } >> "$GITHUB_ENV"
@@ -93,6 +93,7 @@ jobs:
       - name: Build signed universal DMG
         run: |
           BUILD_ARCH=universal \
+          BOUGH_SKIP_APPCAST_VERSION_CHECK=1 \
           SIGN_IDENTITY="$SIGN_IDENTITY" \
           NOTARY_PROFILE="$BOUGH_NOTARY_PROFILE" \
             Tools/Build/build-dmg.sh
@@ -190,10 +191,14 @@ jobs:
           fi
           cp Tools/Release/appcast.xml "$APPCAST_STAGING/appcast.xml"
           git -C "$APPCAST_STAGING" add appcast.xml
+          if git -C "$APPCAST_STAGING" diff --cached --quiet; then
+            echo "No appcast changes to publish."
+            exit 0
+          fi
           git -C "$APPCAST_STAGING" \
             -c user.name="github-actions[bot]" \
             -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit -m "Update appcast for ${BOUGH_RELEASE_TAG}" || exit 0
+            commit -m "Update appcast for ${BOUGH_RELEASE_TAG}"
           git -C "$APPCAST_STAGING" push origin HEAD:appcast
 
       - name: Verify stable remote feed

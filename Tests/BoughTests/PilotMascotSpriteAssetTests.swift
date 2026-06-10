@@ -67,10 +67,10 @@ final class PilotMascotSpriteAssetTests: XCTestCase {
             for filename in expectedFiles {
                 let bitmap = try loadBitmap(source: source, filename: filename)
 
-                XCTAssertLessThan(bitmap.alpha(atX: 0, y: 0), 16, "\(source)/\(filename) first-frame top-left should be transparent.")
-                XCTAssertLessThan(bitmap.alpha(atX: 31, y: 0), 16, "\(source)/\(filename) first-frame top-right should be transparent.")
-                XCTAssertLessThan(bitmap.alpha(atX: 0, y: 31), 16, "\(source)/\(filename) first-frame bottom-left should be transparent.")
-                XCTAssertLessThan(bitmap.alpha(atX: 31, y: 31), 16, "\(source)/\(filename) first-frame bottom-right should be transparent.")
+                XCTAssertLessThan(try bitmap.alpha(atX: 0, y: 0), 16, "\(source)/\(filename) first-frame top-left should be transparent.")
+                XCTAssertLessThan(try bitmap.alpha(atX: 31, y: 0), 16, "\(source)/\(filename) first-frame top-right should be transparent.")
+                XCTAssertLessThan(try bitmap.alpha(atX: 0, y: 31), 16, "\(source)/\(filename) first-frame bottom-left should be transparent.")
+                XCTAssertLessThan(try bitmap.alpha(atX: 31, y: 31), 16, "\(source)/\(filename) first-frame bottom-right should be transparent.")
             }
         }
     }
@@ -79,7 +79,7 @@ final class PilotMascotSpriteAssetTests: XCTestCase {
         for source in sources {
             for filename in ["idle-sheet.png", "work-sheet.png", "alert-sheet.png"] {
                 let bitmap = try loadBitmap(source: source, filename: filename)
-                assertFirstFrameMatchesLastFrame(bitmap, "\(source)/\(filename)")
+                try assertFirstFrameMatchesLastFrame(bitmap, "\(source)/\(filename)")
             }
         }
     }
@@ -101,12 +101,12 @@ final class PilotMascotSpriteAssetTests: XCTestCase {
         _ message: @autoclosure () -> String,
         file: StaticString = #filePath,
         line: UInt = #line
-    ) {
+    ) throws {
         let lastFrameX = bitmap.pixelsWide - 32
         for y in 0..<32 {
             for x in 0..<32 {
-                let first = bitmap.rgbColor(atX: x, y: y)
-                let last = bitmap.rgbColor(atX: lastFrameX + x, y: y)
+                let first = try bitmap.rgbColor(atX: x, y: y)
+                let last = try bitmap.rgbColor(atX: lastFrameX + x, y: y)
                 XCTAssertEqual(first.redComponent, last.redComponent, accuracy: 0.001, "\(message()) red @ \(x),\(y)", file: file, line: line)
                 XCTAssertEqual(first.greenComponent, last.greenComponent, accuracy: 0.001, "\(message()) green @ \(x),\(y)", file: file, line: line)
                 XCTAssertEqual(first.blueComponent, last.blueComponent, accuracy: 0.001, "\(message()) blue @ \(x),\(y)", file: file, line: line)
@@ -117,11 +117,14 @@ final class PilotMascotSpriteAssetTests: XCTestCase {
 }
 
 private extension NSBitmapImageRep {
-    func alpha(atX x: Int, y: Int) -> CGFloat {
-        rgbColor(atX: x, y: y).alphaComponent * 255
+    func alpha(atX x: Int, y: Int) throws -> CGFloat {
+        try rgbColor(atX: x, y: y).alphaComponent * 255
     }
 
-    func rgbColor(atX x: Int, y: Int) -> NSColor {
-        colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) ?? .clear
+    func rgbColor(atX x: Int, y: Int) throws -> NSColor {
+        try XCTUnwrap(
+            colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+            "Missing pilot sprite color at \(x),\(y)"
+        )
     }
 }

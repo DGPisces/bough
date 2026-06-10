@@ -70,6 +70,8 @@ enum MascotSpriteCatalog {
 
     private static let sourceAliases: [String: String] = [
         "codybuddycn": "codebuddy",
+        "cursor-cli": "cursor",
+        "qoder-cli": "qoder",
         "traecn": "trae",
         "traecli": "trae",
     ]

@@ -309,18 +309,21 @@ private struct MusicArtworkTile: View {
     let artwork: MusicArtworkSnapshot?
     let size: CGFloat
     let accessibilityLabel: String
+    @State private var decodedArtwork: MusicArtworkSnapshot?
+    @State private var decodedImage: NSImage?
 
-    private var nsImage: NSImage? {
-        guard let data = artwork?.data else {
-            return nil
-        }
-        return NSImage(data: data)
+    init(artwork: MusicArtworkSnapshot?, size: CGFloat, accessibilityLabel: String) {
+        self.artwork = artwork
+        self.size = size
+        self.accessibilityLabel = accessibilityLabel
+        _decodedArtwork = State(initialValue: nil)
+        _decodedImage = State(initialValue: nil)
     }
 
     var body: some View {
         ZStack {
-            if let nsImage {
-                Image(nsImage: nsImage)
+            if let decodedImage {
+                Image(nsImage: decodedImage)
                     .resizable()
                     .scaledToFill()
             } else {
@@ -335,6 +338,11 @@ private struct MusicArtworkTile: View {
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
+        .onChange(of: artwork, initial: true) { _, newValue in
+            guard decodedArtwork != newValue else { return }
+            decodedArtwork = newValue
+            decodedImage = newValue.flatMap { NSImage(data: $0.data) }
+        }
     }
 }
 

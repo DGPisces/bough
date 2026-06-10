@@ -29,7 +29,7 @@ enum SessionTitleStore {
     }
 
     static func codexThreadName(sessionId: String) -> String? {
-        let path = NSHomeDirectory() + "/.codex/session_index.jsonl"
+        let path = ConfigInstaller.codexHome() + "/session_index.jsonl"
         guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else {
             return nil
         }
@@ -75,33 +75,10 @@ enum SessionTitleStore {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let path = "\(home)/.claude/projects/\(projectDir)/\(sessionId).jsonl"
 
-        guard let handle = FileHandle(forReadingAtPath: path) else {
-            return nil
-        }
-        defer { handle.closeFile() }
+        guard let chunks = UTF8FileChunkReader.headAndTailTexts(path: path, maxBytes: 65536) else { return nil }
 
-        let fileSize = handle.seekToEndOfFile()
-        let readSize: UInt64 = min(fileSize, 65536)
-
-        handle.seek(toFileOffset: 0)
-        let headData = handle.readData(ofLength: Int(readSize))
-
-        let tailData: Data
-        if fileSize > readSize {
-            handle.seek(toFileOffset: fileSize - readSize)
-            tailData = handle.readDataToEndOfFile()
-        } else {
-            tailData = headData
-        }
-
-        guard let head = String(data: headData, encoding: .utf8),
-              let tail = String(data: tailData, encoding: .utf8)
-        else {
-            return nil
-        }
-
-        let tailTitles = latestClaudeTitles(in: tail)
-        let headTitles = latestClaudeTitles(in: head)
+        let tailTitles = latestClaudeTitles(in: chunks.tail)
+        let headTitles = latestClaudeTitles(in: chunks.head)
 
         if let customTitle = tailTitles.custom ?? headTitles.custom {
             return ResolvedSessionTitle(title: customTitle, source: .claudeCustomTitle)

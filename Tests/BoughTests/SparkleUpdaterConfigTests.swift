@@ -9,7 +9,6 @@ import XCTest
 /// in `swift test` (SPM) resolves to the test runner's bundle, not the
 /// app bundle, and the Sparkle keys would not be present there.
 final class SparkleUpdaterConfigTests: XCTestCase {
-
     // MARK: - Info.plist key assertions (UPDATE-01, UPDATE-04)
 
     func testSUFeedURLIsPublicStableAppcast() throws {
@@ -21,9 +20,9 @@ final class SparkleUpdaterConfigTests: XCTestCase {
     }
 
     func testStableVersionMetadata() throws {
-        XCTAssertEqual(try plistExtract("CFBundleShortVersionString"), "1.0.4")
-        XCTAssertEqual(try plistExtract("CFBundleVersion"), "5")
-        XCTAssertEqual(try plistExtract("BoughReleaseLabel"), "1.0.4")
+        XCTAssertEqual(try plistExtract("CFBundleShortVersionString"), "1.0.5")
+        XCTAssertEqual(try plistExtract("CFBundleVersion"), "6")
+        XCTAssertEqual(try plistExtract("BoughReleaseLabel"), "1.0.5")
     }
 
     func testSUPublicEDKeyIsRealKey() throws {
@@ -123,6 +122,7 @@ final class SparkleUpdaterConfigTests: XCTestCase {
     func testHomebrewAppdirInstallDetectsCaskroomSymlinkForCurrentVersion() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("BoughHomebrewDetection-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
         let appdir = root.appendingPathComponent("Applications")
         let app = appdir.appendingPathComponent("Bough.app")
         let caskVersion = root.appendingPathComponent("Caskroom/bough/1.0.4")
@@ -222,10 +222,5 @@ final class SparkleUpdaterConfigTests: XCTestCase {
         return stdout
     }
 
-    /// Repo root derived from this file's location:
-    /// Tests/BoughTests/SparkleUpdaterConfigTests.swift → three pops → repo root.
-    private static let repoRoot = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent() // BoughTests/
-        .deletingLastPathComponent() // Tests/
-        .deletingLastPathComponent() // repo root
+    private static let repoRoot = TestHelpers.repoRoot(from: #filePath)
 }

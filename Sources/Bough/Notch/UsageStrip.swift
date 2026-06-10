@@ -218,7 +218,7 @@ private struct UsageStatusDot: View {
     @State private var alarmState = AlarmState()
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 0.1, paused: false)) { context in
+        TimelineView(.animation(minimumInterval: 0.1, paused: timelinePaused)) { context in
             let now = context.date
 
             // Step the alarm reducer and persist next state. The reducer
@@ -277,6 +277,16 @@ private struct UsageStatusDot: View {
                 }
             }
         }
+    }
+
+    private var timelinePaused: Bool {
+        if reduceMotion { return true }
+        if isRefreshing { return false }
+        if case .stale = availability { return false }
+        if case .loading = availability { return false }
+        if severity == .overdraft { return false }
+        if alarmState.alarmStartedAt != nil { return false }
+        return true
     }
 
     // MARK: - Rendering helpers

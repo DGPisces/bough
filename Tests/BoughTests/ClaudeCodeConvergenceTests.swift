@@ -3,32 +3,13 @@ import BoughCore
 
 @testable import Bough
 
-/// Tests for QUOTA-02 and QUOTA-03: mutual exclusion between the statusLine path and hook path.
-///
-/// D-03 decision: installClaudeHooks calls uninstallClaudeCodeStatusLine as its FIRST statement
-/// so both paths can never simultaneously target ~/.bough/claude-usage.json.
+/// Tests for Claude Code hook + statusLine convergence.
 #if DEBUG
 final class ClaudeCodeConvergenceTests: XCTestCase {
 
-    // MARK: - QUOTA-02: install atomically removes statusLine (testInstallRemovesStatusLine)
+    // MARK: - Hook + statusLine coexistence
 
-    /// Seeds a Bough-managed statusLine command, installs Claude hooks, then asserts
-    /// the statusLine is gone.
-    ///
-    /// Phase 21-01 note: this test previously seeded `/tmp/fake-bridge.sh` and relied
-    /// on the Phase 17 `Bundle.main` bug — `bundledClaudeCodeStatusLineBridgePath()`
-    /// returned `nil`, which caused `uninstallClaudeCodeStatusLine`'s user-protection
-    /// guard at ConfigInstaller.swift:2491-2495 (only removes a statusLine when it
-    /// is `nil`-proposed OR matches the proposed Bough bridge OR matches the old
-    /// Bough.app pattern) to be bypassed. With the bridge resolvable post-fix, the
-    /// guard correctly engages and refuses to yank an arbitrary user statusLine.
-    /// QUOTA-02's invariant is "Bough's hook path and Bough's statusLine path can
-    /// never simultaneously target ~/.bough/claude-usage.json" — i.e. we must
-    /// remove a **Bough-installed** statusLine when installing hooks. We therefore
-    /// seed the statusLine with the resolved bridge path so the guard recognises
-    /// it as Bough-managed and removes it. (Plan 21-02 generalises this via the
-    /// chain-safe wrapper that preserves third-party statusLines.)
-    func testInstallRemovesStatusLine() throws {
+    func testInstallKeepsStatusLine() throws {
         let paths = Self.paths()
         defer { try? FileManager.default.removeItem(at: paths.root) }
 
@@ -46,16 +27,13 @@ final class ClaudeCodeConvergenceTests: XCTestCase {
         // Run install hooks against the temp settings file.
         ConfigInstaller.testInstallClaudeCodeHooks(settingsPath: paths.settings.path)
 
-        // Assert: statusLine is gone after hooks are installed.
+        // Assert: hook install keeps statusLine installed so the unified Claude Code
+        // integration can use both telemetry paths at once.
         let after = ConfigInstaller.testCurrentClaudeCodeStatusLineCommand(settingsPath: paths.settings.path)
-        XCTAssertNil(after, "Bough-managed statusLine should be removed when hooks are installed (D-03 / QUOTA-02)")
+        XCTAssertEqual(after, bridgePath)
     }
 
-    // MARK: - QUOTA-03: explicit mutual exclusion assertion (testMutualExclusion)
-
-    /// Verifies the invariant: after installClaudeHooks runs, currentClaudeCodeStatusLineCommand()
-    /// returns nil — both paths can never co-exist.
-    func testMutualExclusion() throws {
+    func testHooksAndStatusLineCoexist() throws {
         let paths = Self.paths()
         defer { try? FileManager.default.removeItem(at: paths.root) }
 
@@ -70,12 +48,12 @@ final class ClaudeCodeConvergenceTests: XCTestCase {
             "Precondition: statusLine command should be present"
         )
 
-        // Install hooks — this must atomically remove the statusLine as its first step.
         ConfigInstaller.testInstallClaudeCodeHooks(settingsPath: paths.settings.path)
 
-        // Mutual exclusion invariant: statusLine must be nil after hooks are installed.
         let command = ConfigInstaller.testCurrentClaudeCodeStatusLineCommand(settingsPath: paths.settings.path)
-        XCTAssertNil(command, "Mutual exclusion violated: statusLine command is non-nil after installClaudeHooks (D-03 / QUOTA-03)")
+        XCTAssertEqual(command, paths.bridge.path)
+        let settings = try String(contentsOf: paths.settings, encoding: .utf8)
+        XCTAssertTrue(settings.contains("~/.bough/bough-hook.sh"))
     }
 
     // MARK: - DIAG-01: socket-absent path returns false (testHealthCheckSocketAbsent)

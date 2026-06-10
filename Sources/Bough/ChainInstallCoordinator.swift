@@ -43,6 +43,24 @@ actor ChainInstallCoordinator {
         ConfigInstaller.installClaudeCodeStatusLine(replaceExisting: replaceExisting)
     }
 
+    func installClaudeIntegration(replaceExisting: Bool) -> ConfigInstaller.ClaudeCodeStatusLineInstallResult {
+        let result = ConfigInstaller.installClaudeCodeStatusLine(replaceExisting: replaceExisting)
+        switch result {
+        case .installed, .chained:
+            guard ConfigInstaller.setEnabled(source: "claude", enabled: true) else {
+                return .failed("Could not install Claude Code hooks")
+            }
+            return result
+        case .conflict, .failed:
+            return result
+        }
+    }
+
+    func uninstallClaudeIntegration() -> Bool {
+        _ = ConfigInstaller.uninstallClaudeCodeStatusLine()
+        return ConfigInstaller.setEnabled(source: "claude", enabled: false)
+    }
+
     // MARK: - Test seam (WR-03 race-condition smoke test)
 
     /// Counter used by the race-condition smoke test to assert that two

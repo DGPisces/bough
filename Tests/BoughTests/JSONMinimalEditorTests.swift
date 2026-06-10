@@ -109,6 +109,66 @@ final class JSONMinimalEditorTests: XCTestCase {
         XCTAssertNil(JSONMinimalEditor.setTopLevelValue(in: "{ \"a\": 1,", key: "hooks", value: [:] as [String: Any]))
     }
 
+    func testReturnsNilOnTrailingGarbageAfterObject() {
+        XCTAssertNil(JSONMinimalEditor.setTopLevelValue(
+            in: #"{"model":"x"} trailing-garbage"#,
+            key: "hooks",
+            value: [:] as [String: Any]
+        ))
+        XCTAssertNil(JSONMinimalEditor.deleteTopLevelKey(
+            in: #"{"model":"x"} trailing-garbage"#,
+            key: "model"
+        ))
+    }
+
+    func testAllowsTrailingJSONCCommentsAfterObject() throws {
+        let result = try XCTUnwrap(JSONMinimalEditor.setTopLevelValue(
+            in: "{\n  \"model\": \"x\"\n}\n// comment\n",
+            key: "hooks",
+            value: ["A": 1] as [String: Any]
+        ))
+        XCTAssertTrue(result.contains("// comment"))
+    }
+
+    func testReturnsNilOnInvalidStringEscape() {
+        XCTAssertNil(JSONMinimalEditor.setTopLevelValue(
+            in: #"{"model":"bad\qescape"}"#,
+            key: "hooks",
+            value: [:] as [String: Any]
+        ))
+    }
+
+    func testReturnsNilOnMalformedNestedObject() {
+        XCTAssertNil(JSONMinimalEditor.setTopLevelValue(
+            in: #"{"model":{"name" "missing-colon"}}"#,
+            key: "hooks",
+            value: [:] as [String: Any]
+        ))
+    }
+
+    func testReturnsNilOnInvalidNumbers() {
+        XCTAssertNil(JSONMinimalEditor.setTopLevelValue(
+            in: #"{"model":01}"#,
+            key: "hooks",
+            value: [:] as [String: Any]
+        ))
+        XCTAssertNil(JSONMinimalEditor.setTopLevelValue(
+            in: #"{"model":1e}"#,
+            key: "hooks",
+            value: [:] as [String: Any]
+        ))
+    }
+
+    func testAcceptsValidSurrogatePairStringEscape() throws {
+        let result = try XCTUnwrap(JSONMinimalEditor.setTopLevelValue(
+            in: #"{"model":"\uD834\uDD1E"}"#,
+            key: "hooks",
+            value: [:] as [String: Any]
+        ))
+        let parsed = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(result.utf8)) as? [String: Any])
+        XCTAssertNotNil(parsed["hooks"])
+    }
+
     // MARK: - deleteTopLevelKey
 
     func testDeleteRemovesKeyAndItsTrailingComma() throws {
@@ -137,6 +197,40 @@ final class JSONMinimalEditorTests: XCTestCase {
         let parsed = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(result.utf8)) as? [String: Any])
         XCTAssertEqual(parsed["a"] as? Int, 1)
         XCTAssertNil(parsed["hooks"])
+    }
+
+    func testDeleteLastKeyRemovesCommaBeforeLineComment() throws {
+        let original = """
+        {
+          "theme": "dark", // user comment
+          "plugin": ["file:///Users/test/.config/opencode/plugins/bough-opencode.js"]
+        }
+        """
+
+        let result = try XCTUnwrap(JSONMinimalEditor.deleteTopLevelKey(in: original, key: "plugin"))
+        let stripped = ConfigInstaller.stripJSONComments(result)
+        let parsed = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(stripped.utf8)) as? [String: Any])
+
+        XCTAssertFalse(result.contains("\"plugin\""))
+        XCTAssertFalse(stripped.contains(",\n}"))
+        XCTAssertEqual(parsed["theme"] as? String, "dark")
+    }
+
+    func testDeleteLastKeyRemovesCommaAfterBlockComment() throws {
+        let original = """
+        {
+          "theme": "dark" /* user comment */,
+          "plugin": ["file:///Users/test/.config/opencode/plugins/bough-opencode.js"]
+        }
+        """
+
+        let result = try XCTUnwrap(JSONMinimalEditor.deleteTopLevelKey(in: original, key: "plugin"))
+        let stripped = ConfigInstaller.stripJSONComments(result)
+        let parsed = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(stripped.utf8)) as? [String: Any])
+
+        XCTAssertFalse(result.contains("\"plugin\""))
+        XCTAssertFalse(stripped.contains(",\n}"))
+        XCTAssertEqual(parsed["theme"] as? String, "dark")
     }
 
     func testDeleteOnlyKeyYieldsEmptyObject() throws {

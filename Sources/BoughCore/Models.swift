@@ -159,8 +159,8 @@ public struct HookEvent {
         }
         self.toolName = HookEvent.firstString(in: json, keys: ["tool_name", "toolName", "tool", "name"])
             ?? HookEvent.firstString(inNestedDictionary: json, containerKeys: ["tool", "payload", "data"], keys: ["name", "tool_name", "toolName"])
-        self.toolUseId = HookEvent.firstString(in: json, keys: ["tool_use_id", "toolUseId"])
-            ?? HookEvent.firstString(inNestedDictionary: json, containerKeys: ["tool", "tool_use", "toolUse", "payload", "data"], keys: ["id", "tool_use_id", "toolUseId"])
+        self.toolUseId = HookEvent.firstString(in: json, keys: ["tool_use_id", "toolUseId", "_pi_tool_call_id"])
+            ?? HookEvent.firstString(inNestedDictionary: json, containerKeys: ["tool", "tool_use", "toolUse", "payload", "data"], keys: ["id", "tool_use_id", "toolUseId", "_pi_tool_call_id"])
         self.toolInput = HookEvent.firstDictionary(in: json, keys: ["tool_input", "toolInput", "input", "arguments", "args", "params"])
             ?? HookEvent.firstDictionary(inNestedDictionary: json, containerKeys: ["tool", "payload", "data"], keys: ["input", "tool_input", "toolInput", "arguments", "args", "params"])
         self.agentId = json["agent_id"] as? String

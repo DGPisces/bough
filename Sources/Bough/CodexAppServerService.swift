@@ -42,10 +42,21 @@ final class CodexAppServerService: UsageRateLimitReading {
 
     private var isStopped = false
     private var nextGeneration: Int = 0
+    private var hasCompletedInitialization = true
+    private var pendingInitialization: PendingInitialization?
+    private var earlyInitializationResponses: [CodexRequestID: Result<Void, Swift.Error>] = [:]
+    private var isSendingInitializeRequest = false
+    private var initializationTimeoutTask: Task<Void, Never>?
     private var pendingRateLimitRead: PendingRateLimitRead?
     private var earlyRateLimitReadResponses: [CodexRequestID: Result<[String: AnyCodableLike], Swift.Error>] = [:]
     private var isSendingRateLimitReadRequest = false
     private var timeoutTask: Task<Void, Never>?
+
+    private struct PendingInitialization {
+        let generation: Int
+        let requestID: CodexRequestID
+        var continuations: [CheckedContinuation<Void, Swift.Error>]
+    }
 
     private struct PendingRateLimitRead {
         let generation: Int
@@ -82,8 +93,31 @@ final class CodexAppServerService: UsageRateLimitReading {
         do {
             try transport.start()
             transportStarted = true
-            _ = try transport.initializeHandshake(clientName: clientName, clientVersion: clientVersion)
+            isSendingInitializeRequest = true
+            let requestID = try transport.initializeHandshake(clientName: clientName, clientVersion: clientVersion)
+            isSendingInitializeRequest = false
+            hasCompletedInitialization = false
+            if let earlyResult = earlyInitializationResponses.removeValue(forKey: requestID) {
+                earlyInitializationResponses.removeAll()
+                switch earlyResult {
+                case .success:
+                    hasCompletedInitialization = true
+                case .failure(let error):
+                    isStopped = true
+                    transport.stop()
+                    throw error
+                }
+            } else {
+                let pending = PendingInitialization(
+                    generation: nextGeneration,
+                    requestID: requestID,
+                    continuations: []
+                )
+                pendingInitialization = pending
+                scheduleInitializationTimeout(for: pending)
+            }
         } catch {
+            isSendingInitializeRequest = false
             isStopped = true
             if transportStarted {
                 transport.stop()
@@ -102,10 +136,15 @@ final class CodexAppServerService: UsageRateLimitReading {
 
         isStopped = true
         nextGeneration += 1
+        initializationTimeoutTask?.cancel()
+        initializationTimeoutTask = nil
         timeoutTask?.cancel()
         timeoutTask = nil
+        earlyInitializationResponses.removeAll()
         earlyRateLimitReadResponses.removeAll()
+        isSendingInitializeRequest = false
         isSendingRateLimitReadRequest = false
+        failPendingInitialization(with: Error.serviceStopped)
         failPendingReads(with: Error.serviceStopped)
         transport.onMessage = nil
         transport.onExit = nil
@@ -114,6 +153,8 @@ final class CodexAppServerService: UsageRateLimitReading {
     }
 
     func readRateLimits() async throws -> [String: AnyCodableLike] {
+        guard !isStopped else { throw Error.serviceStopped }
+        try await waitForInitializationIfNeeded()
         guard !isStopped else { throw Error.serviceStopped }
 
         if var pending = pendingRateLimitRead {
@@ -158,8 +199,10 @@ final class CodexAppServerService: UsageRateLimitReading {
         guard !isStopped else { return }
         switch message.kind {
         case .notification:
+            guard hasCompletedInitialization else { return }
             routeNotification(message)
         case .response(let responseID):
+            if handleInitializationResponse(responseID, message: message) { return }
             guard let pending = pendingRateLimitRead else {
                 bufferEarlyRateLimitResponse(responseID, message: message)
                 return
@@ -175,6 +218,7 @@ final class CodexAppServerService: UsageRateLimitReading {
         case .error(let responseID, let code, let messageText):
             guard let responseID else { return }
             let error = Error.appServerError("code=\(code) message=\(messageText)")
+            if handleInitializationFailure(responseID, error: error) { return }
             guard let pending = pendingRateLimitRead else {
                 bufferEarlyRateLimitFailure(responseID, error: error)
                 return
@@ -186,6 +230,56 @@ final class CodexAppServerService: UsageRateLimitReading {
         default:
             break
         }
+    }
+
+    private func waitForInitializationIfNeeded() async throws {
+        guard !isStopped else { throw Error.serviceStopped }
+        guard !hasCompletedInitialization else { return }
+        guard var pending = pendingInitialization else { throw Error.serviceStopped }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Swift.Error>) in
+            pending.continuations.append(continuation)
+            pendingInitialization = pending
+        }
+    }
+
+    private func handleInitializationResponse(_ responseID: CodexRequestID, message: CodexJSONRPCMessage) -> Bool {
+        if let pending = pendingInitialization {
+            guard responseID == pending.requestID else { return false }
+            guard pending.generation == nextGeneration else {
+                pendingInitialization = nil
+                return true
+            }
+            initializationTimeoutTask?.cancel()
+            initializationTimeoutTask = nil
+            hasCompletedInitialization = true
+            pendingInitialization = nil
+            for continuation in pending.continuations {
+                continuation.resume()
+            }
+            return true
+        }
+        if isSendingInitializeRequest {
+            earlyInitializationResponses[responseID] = .success(())
+            return true
+        }
+        return false
+    }
+
+    private func handleInitializationFailure(_ responseID: CodexRequestID, error: Swift.Error) -> Bool {
+        if let pending = pendingInitialization {
+            guard responseID == pending.requestID else { return false }
+            guard pending.generation == nextGeneration else {
+                pendingInitialization = nil
+                return true
+            }
+            failInitializationAndStop(with: error)
+            return true
+        }
+        if isSendingInitializeRequest {
+            earlyInitializationResponses[responseID] = .failure(error)
+            return true
+        }
+        return false
     }
 
     private func bufferEarlyRateLimitResponse(_ responseID: CodexRequestID, message: CodexJSONRPCMessage) {
@@ -222,6 +316,16 @@ final class CodexAppServerService: UsageRateLimitReading {
         }
     }
 
+    private func failPendingInitialization(with error: Error) {
+        guard let pending = pendingInitialization else { return }
+        initializationTimeoutTask?.cancel()
+        initializationTimeoutTask = nil
+        pendingInitialization = nil
+        for continuation in pending.continuations {
+            continuation.resume(throwing: error)
+        }
+    }
+
     private func failPendingReads(with error: Error) {
         guard let pending = pendingRateLimitRead else { return }
         timeoutTask?.cancel()
@@ -229,6 +333,19 @@ final class CodexAppServerService: UsageRateLimitReading {
         pendingRateLimitRead = nil
         for continuation in pending.continuations {
             continuation.resume(throwing: error)
+        }
+    }
+
+    private func scheduleInitializationTimeout(for request: PendingInitialization) {
+        initializationTimeoutTask?.cancel()
+        initializationTimeoutTask = Task { [weak self] in
+            guard let self else { return }
+            await self.sleeper.sleep(seconds: timeoutSeconds)
+            guard !Task.isCancelled else { return }
+            guard let pending = self.pendingInitialization,
+                  pending.requestID == request.requestID,
+                  pending.generation == request.generation else { return }
+            self.failInitializationAndStop(with: Error.requestTimedOut)
         }
     }
 
@@ -245,8 +362,31 @@ final class CodexAppServerService: UsageRateLimitReading {
         }
     }
 
+    private func failInitializationAndStop(with error: Swift.Error) {
+        let serviceError = error as? Error ?? Error.appServerError("\(error)")
+        isStopped = true
+        nextGeneration += 1
+        initializationTimeoutTask?.cancel()
+        initializationTimeoutTask = nil
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        earlyInitializationResponses.removeAll()
+        earlyRateLimitReadResponses.removeAll()
+        isSendingInitializeRequest = false
+        isSendingRateLimitReadRequest = false
+        failPendingInitialization(with: serviceError)
+        failPendingReads(with: serviceError)
+        transport.onMessage = nil
+        transport.onExit = nil
+        transport.stop()
+        onExit?()
+    }
+
     private func handleTransportExit() {
         guard !isStopped else {
+            if pendingInitialization != nil {
+                failPendingInitialization(with: Error.serviceStopped)
+            }
             if hasActivePendingRead() {
                 failPendingReads(with: Error.serviceStopped)
             }
@@ -255,10 +395,15 @@ final class CodexAppServerService: UsageRateLimitReading {
 
         isStopped = true
         nextGeneration += 1
+        initializationTimeoutTask?.cancel()
+        initializationTimeoutTask = nil
         timeoutTask?.cancel()
         timeoutTask = nil
+        earlyInitializationResponses.removeAll()
         earlyRateLimitReadResponses.removeAll()
+        isSendingInitializeRequest = false
         isSendingRateLimitReadRequest = false
+        failPendingInitialization(with: Error.serviceStopped)
         failPendingReads(with: Error.serviceStopped)
         transport.onMessage = nil
         transport.onExit = nil

@@ -78,9 +78,13 @@ final class MascotRuntimeMigrationTests: XCTestCase {
             "ClawdView(",
             "LayerBackedMascotView(",
         ]
-        let urls = FileManager.default.enumerator(at: sources, includingPropertiesForKeys: nil)?
+        let urls = try XCTUnwrap(
+            FileManager.default.enumerator(at: sources, includingPropertiesForKeys: nil),
+            "Failed to enumerate mascot source root: \(sources.path)"
+        )
             .compactMap { $0 as? URL }
-            .filter { $0.pathExtension == "swift" } ?? []
+            .filter { $0.pathExtension == "swift" }
+        XCTAssertFalse(urls.isEmpty, "Mascot source scan must include Swift files.")
 
         var bypasses: [String] = []
         for url in urls {

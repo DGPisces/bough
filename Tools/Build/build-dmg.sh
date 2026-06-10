@@ -12,7 +12,6 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BUILD_DIR="$REPO_ROOT/.build"
-RELEASE_DIR="$BUILD_DIR/release"
 STAGING_DIR="$BUILD_DIR/dmg-staging"
 APP_DIR="$STAGING_DIR/Bough.app"
 CONTENTS_DIR="$APP_DIR/Contents"
@@ -188,13 +187,18 @@ elif security find-identity -v -p codesigning | grep -q "$(printf '%s' "$SIGN_ID
     # signature SwiftPM left in place. No --deep at any step — we walk the
     # tree ourselves to keep ordering explicit.
     for xpc in "$SPARKLE_B"/XPCServices/*.xpc; do
+        [ -e "$xpc" ] || continue
         codesign --force --options runtime --timestamp \
             --sign "$SIGN_IDENTITY" "$xpc"
     done
-    codesign --force --options runtime --timestamp \
-        --sign "$SIGN_IDENTITY" "$SPARKLE_B/Autoupdate"
-    codesign --force --options runtime --timestamp \
-        --sign "$SIGN_IDENTITY" "$SPARKLE_B/Updater.app"
+    if [ -e "$SPARKLE_B/Autoupdate" ]; then
+        codesign --force --options runtime --timestamp \
+            --sign "$SIGN_IDENTITY" "$SPARKLE_B/Autoupdate"
+    fi
+    if [ -d "$SPARKLE_B/Updater.app" ]; then
+        codesign --force --options runtime --timestamp \
+            --sign "$SIGN_IDENTITY" "$SPARKLE_B/Updater.app"
+    fi
     codesign --force --options runtime --timestamp \
         --sign "$SIGN_IDENTITY" "$SPARKLE_FW"
 
@@ -217,9 +221,9 @@ elif security find-identity -v -p codesigning | grep -q "$(printf '%s' "$SIGN_ID
     echo "==> Verifying nested signatures"
     codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 else
-    echo "==> Developer ID identity '$SIGN_IDENTITY' not in keychain — using ad-hoc bundle signature"
-    echo "    (install your Developer ID cert or set SIGN_IDENTITY=...)"
-    adhoc_sign_app_bundle
+    echo "ERROR: Developer ID identity '$SIGN_IDENTITY' not found in keychain" >&2
+    echo "Hint: install the certificate, correct SIGN_IDENTITY, or set SKIP_SIGN=1 SKIP_NOTARIZE=1 for local smoke" >&2
+    exit 1
 fi
 
 echo "==> Creating DMG"

@@ -151,10 +151,8 @@ final class PhysicalBuddyDefaultsCleanupTests: XCTestCase {
 
     private func sourceFile(_ relativePath: String) throws -> String {
         let url = repoRoot.appendingPathComponent(relativePath)
-        if !FileManager.default.fileExists(atPath: url.path) {
-            XCTFail("\(relativePath) must exist.")
-            return ""
-        }
+        let exists = FileManager.default.fileExists(atPath: url.path)
+        _ = try XCTUnwrap(exists ? url : nil, "\(relativePath) must exist.")
         return try String(contentsOf: url, encoding: .utf8)
     }
 
