@@ -110,6 +110,7 @@ final class UsageStoreTests: XCTestCase {
         store.startUsageChannels(claude: nil, codex: fetcher, codexFallback: nil)
 
         await store.refreshCodexOAuth(force: true)
+        await waitUntilNotRefreshing(store)
 
         XCTAssertGreaterThanOrEqual(fetcher.fetchCount, 1)
         XCTAssertEqual(store.snapshot(for: .codex).weekly.snapshot?.usedPercent, 20)
@@ -174,6 +175,7 @@ final class UsageStoreTests: XCTestCase {
         store.startUsageChannels(claude: nil, codex: FakeCodexUsageFetcher(error: UsageStoreTestError.failed), codexFallback: nil)
 
         await store.refreshCodexOAuth()
+        await waitUntilNotRefreshing(store)
 
         let snapshot = store.snapshot(for: .codex)
         XCTAssertEqual(snapshot.availability, .stale(reason: L10n.shared["usage_refresh_failed"]))
@@ -187,6 +189,7 @@ final class UsageStoreTests: XCTestCase {
         store.startUsageChannels(claude: nil, codex: FakeCodexUsageFetcher(result: ["rateLimitsByLimitId": .object([:])]), codexFallback: nil)
 
         await store.refreshCodexOAuth()
+        await waitUntilNotRefreshing(store)
 
         XCTAssertEqual(store.snapshot(for: .codex).weekly.snapshot?.usedPercent, 20)
     }
@@ -196,6 +199,7 @@ final class UsageStoreTests: XCTestCase {
         store.startUsageChannels(claude: nil, codex: FakeCodexUsageFetcher(result: ["rateLimitsByLimitId": .object([:])]), codexFallback: nil)
 
         await store.refreshCodexOAuth()
+        await waitUntilNotRefreshing(store)
 
         XCTAssertEqual(store.snapshot(for: .codex).availability, .unavailable(reason: L10n.shared["usage_refresh_failed"]))
     }
@@ -215,6 +219,7 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.fiveHour.snapshot?.usedPercent, 10)
 
         await store.refreshCodexOAuth()
+        await waitUntilNotRefreshing(store)
 
         let refreshed = store.snapshot(for: .codex)
         XCTAssertEqual(refreshed.availability, .available)
@@ -290,6 +295,7 @@ final class UsageStoreTests: XCTestCase {
         store.startUsageChannels(claude: nil, codex: fetcher, codexFallback: nil)
         await waitUntil { fetcher.fetchCount >= 1 && !store.isRefreshing }
         await store.refreshCodexOAuth()
+        await waitUntilNotRefreshing(store)
         store.applyCodexRateLimitResult(Self.codexResult(weeklyReset: 200_000, weeklyUsedPercent: 4))
 
         let today = store.snapshot(for: .codex).today
@@ -559,6 +565,7 @@ final class UsageStoreTests: XCTestCase {
 
         store.startUsageChannels(claude: fetcher, codex: nil, codexFallback: nil)
         await store.refreshClaudeOAuth()
+        await waitUntilNotRefreshing(store)
 
         let snapshot = store.snapshot(for: .claudeCode)
         XCTAssertEqual(snapshot.availability, .available)
@@ -575,6 +582,7 @@ final class UsageStoreTests: XCTestCase {
 
         store.startUsageChannels(claude: fetcher, codex: nil, codexFallback: nil)
         await store.refreshClaudeOAuth()
+        await waitUntilNotRefreshing(store)
 
         let reason = L10n.shared["usage_oauth_token_expired"]
         XCTAssertEqual(store.claudeOAuthStatus, .degraded(reason: reason, at: Date(timeIntervalSince1970: 1_000)))
@@ -589,6 +597,7 @@ final class UsageStoreTests: XCTestCase {
 
         store.startUsageChannels(claude: fetcher, codex: nil, codexFallback: nil)
         await store.refreshClaudeOAuth()
+        await waitUntilNotRefreshing(store)
 
         let reason = L10n.shared["usage_oauth_no_credentials"]
         XCTAssertEqual(store.claudeOAuthStatus, .missingCredentials(reason: reason, at: Date(timeIntervalSince1970: 1_000)))
@@ -608,6 +617,7 @@ final class UsageStoreTests: XCTestCase {
 
         store.startUsageChannels(claude: fetcher, codex: nil, codexFallback: nil)
         await store.refreshClaudeOAuth(force: true)
+        await waitUntilNotRefreshing(store)
 
         XCTAssertEqual(fetcher.resetCount, 1)
     }
@@ -621,6 +631,7 @@ final class UsageStoreTests: XCTestCase {
 
         store.startUsageChannels(claude: nil, codex: fetcher, codexFallback: fallback)
         await store.refreshCodexOAuth()
+        await waitUntilNotRefreshing(store)
 
         XCTAssertGreaterThanOrEqual(fallback.readCount, 1)
         XCTAssertEqual(store.snapshot(for: .codex).weekly.snapshot?.usedPercent, 20)
@@ -649,6 +660,7 @@ final class UsageStoreTests: XCTestCase {
 
         store.startUsageChannels(claude: nil, codex: fetcher, codexFallback: fallback)
         await store.refreshCodexOAuth()
+        await waitUntilNotRefreshing(store)
 
         XCTAssertGreaterThanOrEqual(fallback.readCount, 1)
         let reason = L10n.shared["usage_oauth_token_expired"]
@@ -662,6 +674,7 @@ final class UsageStoreTests: XCTestCase {
 
         store.startUsageChannels(claude: nil, codex: fetcher, codexFallback: nil)
         await store.refreshCodexOAuth()
+        await waitUntilNotRefreshing(store)
 
         let reason = L10n.shared["usage_oauth_no_credentials"]
         XCTAssertEqual(store.codexOAuthStatus, .missingCredentials(reason: reason, at: Date(timeIntervalSince1970: 1_000)))
@@ -924,6 +937,18 @@ private func waitUntil(
     XCTAssertTrue(condition(), "condition not met within \(timeout)s")
 }
 
+/// Waits for all in-flight OAuth refreshes to drain. `startUsageChannels`
+/// spawns an immediate startup refresh; when an explicitly awaited
+/// `refresh*OAuth` overlaps it, the older-sequence refresh bails without
+/// writing snapshot or status. The sequence guard is taken synchronously at
+/// entry (together with `enterRefresh()`), so by the time an awaited refresh
+/// bails the newer one is already counted in `isRefreshing` — waiting for
+/// quiescence therefore guarantees some refresh has written its result.
+@MainActor
+private func waitUntilNotRefreshing(_ store: UsageStore, timeout: TimeInterval = 2) async {
+    await waitUntil(timeout: timeout) { !store.isRefreshing }
+}
+
 /// Thread-safe ClaudeUsageFetching fake — `fetchStatusLinePayload` runs on a
 /// detached task off the main actor, so all state is lock-protected.
 private final class FakeClaudeUsageFetcher: ClaudeUsageFetching, @unchecked Sendable {
@@ -1122,14 +1147,5 @@ final class UsageStoreRefreshTrackingTests: XCTestCase {
         gate.signal()
         await waitUntilNotRefreshing(store)
         XCTAssertFalse(store.isRefreshing, "must drop to false after thrown error — defer fired in catch")
-    }
-
-    private func waitUntilNotRefreshing(_ store: UsageStore, timeout: TimeInterval = 2) async {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if !store.isRefreshing { return }
-            await Task.yield()
-            try? await Task.sleep(nanoseconds: 5_000_000)
-        }
     }
 }
