@@ -2121,10 +2121,13 @@ private struct SessionListView: View {
     }
 
     var body: some View {
-        // Compute once per render — groupedSessions, totalCount, needsScroll
+        // Compute once per render — groupedSessions, needsScroll
         let groups = groupedSessions
-        let totalSessionCount = groups.reduce(0) { $0 + $1.ids.count }
-        let needsScroll = onlySessionId == nil && totalSessionCount > maxVisibleSessions
+        // Always scroll the full list: card heights vary with message content,
+        // so a session-count heuristic can't guarantee the panel fits — at or
+        // below the threshold the plain layout overflowed the fixed-height
+        // window and was clipped at the bottom edge.
+        let needsScroll = onlySessionId == nil
         let showsUsageStrip = UsageStripModel.shouldShow(surface: appState.surface, onlySessionId: onlySessionId)
         let showsMusicStrip = MusicStripModel.shouldShowExpanded(
             surface: appState.surface,
@@ -2225,9 +2228,34 @@ private struct SessionListView: View {
 }
 
 /// Thin overlay scrollbar via NSScrollView — ignores system "show scrollbar" preference.
-private struct ThinScrollView<Content: View>: NSViewRepresentable {
+/// NSScrollView exposes no intrinsic height to SwiftUI, so inside the panel's fixedSize
+/// layout it would collapse to zero and hide every session; size it to the measured
+/// document height instead, capped at maxHeight.
+private struct ThinScrollView<Content: View>: View {
     let maxHeight: CGFloat
     @ViewBuilder let content: Content
+    /// Starts large so the first frame opens at maxHeight — content stays visible
+    /// (and the failure mode stays safe) until the first measurement lands.
+    @State private var contentHeight: CGFloat = .greatestFiniteMagnitude
+
+    var body: some View {
+        ThinScrollSurface(contentHeight: $contentHeight, content: content)
+            .frame(height: min(contentHeight, maxHeight))
+    }
+}
+
+private struct ThinScrollSurface<Content: View>: NSViewRepresentable {
+    @Binding var contentHeight: CGFloat
+    let content: Content
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    final class Coordinator {
+        var frameObserver: NSObjectProtocol?
+        deinit {
+            if let frameObserver { NotificationCenter.default.removeObserver(frameObserver) }
+        }
+    }
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
@@ -2241,13 +2269,29 @@ private struct ThinScrollView<Content: View>: NSViewRepresentable {
         hosting.translatesAutoresizingMaskIntoConstraints = false
         scrollView.documentView = hosting
 
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             hosting.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
             hosting.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
-            scrollView.heightAnchor.constraint(lessThanOrEqualToConstant: maxHeight),
         ])
 
+        hosting.postsFrameChangedNotifications = true
+        let height = $contentHeight
+        context.coordinator.frameObserver = NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification,
+            object: hosting,
+            queue: .main
+        ) { [weak hosting] _ in
+            Task { @MainActor in
+                guard let hosting else { return }
+                let measured = hosting.frame.height
+                // Ignore transient zero-height frames during initial layout —
+                // adopting one would re-collapse the list to nothing.
+                guard measured > 0.5, measured.isFinite else { return }
+                if abs(height.wrappedValue - measured) > 0.5 {
+                    height.wrappedValue = measured
+                }
+            }
+        }
         return scrollView
     }
 

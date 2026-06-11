@@ -2,6 +2,22 @@
 
 All notable changes to Bough are documented here.
 
+## [v1.0.6] - 2026-06-10
+
+### English
+
+Expanded session list rendering fixes.
+
+- Fixed the expanded panel showing no sessions at all when the session count exceeded "Max visible sessions": the list's scroll container reported no intrinsic height to SwiftUI and collapsed to zero.
+- Fixed the expanded session list clipping at the bottom window edge when the session count was at or below "Max visible sessions": the full list now always renders inside a scroll container sized to the measured content height and capped to the available panel height.
+
+### 简体中文
+
+展开 session 列表渲染修复。
+
+- 修复 session 数量超过「最大可见 session 数」时展开面板完全不显示 session 的问题：列表滚动容器未向 SwiftUI 提供内在高度，被压缩为零。
+- 修复 session 数量不超过「最大可见 session 数」时展开列表底部被窗口边缘裁切的问题：完整列表现在始终在滚动容器内渲染，高度按实际内容测量并以可用面板高度为上限。
+
 ## [v1.0.5] - 2026-06-09
 
 ### English
