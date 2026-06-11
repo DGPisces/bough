@@ -8,6 +8,12 @@
   <a href="README.zh-CN.md">简体中文</a>
 </p>
 
+<p align="center">
+  <a href="https://github.com/DGPisces/bough/actions/workflows/ci.yml"><img src="https://github.com/DGPisces/bough/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%2014%2B-black.svg" alt="Platform: macOS 14+">
+</p>
+
 Bough is a macOS menu bar utility that keeps AI coding agent status, usage, music, and AirDrop visible at the top of your screen.
 
 ![Bough notch panel demo](Assets/README/panel-session-music-airdrop.png)

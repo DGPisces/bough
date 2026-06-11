@@ -8,6 +8,12 @@
   <a href="README.md">English</a>
 </p>
 
+<p align="center">
+  <a href="https://github.com/DGPisces/bough/actions/workflows/ci.yml"><img src="https://github.com/DGPisces/bough/actions/workflows/ci.yml/badge.svg" alt="CI 状态"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT 许可证"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%2014%2B-black.svg" alt="平台：macOS 14+">
+</p>
+
 Bough 是一款 macOS 菜单栏工具，专门把 AI 编程助手的状态、用量、音乐和 AirDrop 这些信息常驻在屏幕顶部。
 
 ![Bough 刘海面板演示](Assets/README/panel-session-music-airdrop.png)
