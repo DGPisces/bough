@@ -47,6 +47,24 @@ enum TestHelpers {
         L10n.shared.language = language
         restoreUserDefaultsValue(savedDefaultValue, forKey: SettingsKey.appLanguage)
     }
+
+    /// Polls `predicate` on the main actor until it returns true or `timeout`
+    /// elapses, then returns the final predicate value. Replaces bare
+    /// `Task.yield()` synchronization with unstructured Tasks, which does not
+    /// guarantee the spawned task has run on a loaded machine.
+    @MainActor
+    static func waitUntil(
+        timeout: TimeInterval = 5.0,
+        intervalNanoseconds: UInt64 = 10_000_000,
+        _ predicate: () -> Bool
+    ) async throws -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if predicate() { return true }
+            try await Task.sleep(nanoseconds: intervalNanoseconds)
+        }
+        return predicate()
+    }
 }
 
 final class TestProcessStateLock {
