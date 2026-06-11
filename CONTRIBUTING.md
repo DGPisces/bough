@@ -53,7 +53,7 @@ touches your real `~/.bough`, `~/.claude`, or `~/.codex` configuration.
 
 `CHANGELOG.md` is maintained by the maintainer in release-preparation PRs —
 feature PRs should not edit it. The release process is documented in
-[docs/RELEASING.md](docs/RELEASING.md).
+[RELEASING.md](RELEASING.md).
 
 ## Security Reports
 

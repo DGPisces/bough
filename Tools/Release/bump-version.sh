@@ -9,7 +9,7 @@ set -euo pipefail
 #
 # Usage: Tools/Release/bump-version.sh <X.Y.Z> [--build N]
 # CFBundleVersion defaults to the current value + 1.
-# See docs/RELEASING.md for the full release runbook.
+# See RELEASING.md for the full release runbook.
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PLIST="$REPO_ROOT/Platform/Apple/Info.plist"
@@ -113,5 +113,5 @@ Next steps:
   1. Replace the TODO lines in CHANGELOG.md with real bilingual release notes.
   2. Open a "Prepare v$NEW_VERSION release" PR and merge it once CI is green.
   3. Tag the merge commit on main: git tag v$NEW_VERSION && git push origin v$NEW_VERSION
-  4. Approve the "release" environment run in GitHub Actions (see docs/RELEASING.md).
+  4. Approve the "release" environment run in GitHub Actions (see RELEASING.md).
 EOF
