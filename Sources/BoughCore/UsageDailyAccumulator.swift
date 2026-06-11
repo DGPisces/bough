@@ -23,9 +23,12 @@ public struct DailyBaseline: Codable, Equatable, Sendable {
     /// Wall-clock instant the baseline was captured.
     public var capturedAt: Date
     /// Reset-interval bucket (UsageResetEvaluator.resetIntervalID) of the last
-    /// weekly reset this baseline was re-locked for. Idempotency guard so the
-    /// app and helper don't both re-lock the same reset (spec §8.1). Optional →
-    /// old usage-daily.json decodes with nil; no migration.
+    /// weekly reset this baseline was re-locked for (spec §8.1). Best-effort
+    /// idempotency: persisted only in usage-daily.json — a process that boots
+    /// through the SQLite daily_state restore path loses the marker and may
+    /// re-lock the same reset once more. That duplicate is a value-level no-op
+    /// (both writers lock at the live post-reset used%), so no drift accumulates.
+    /// Optional → old usage-daily.json decodes with nil; no migration.
     public var lastHandledResetIntervalID: String?
 
     public init(

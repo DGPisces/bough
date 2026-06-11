@@ -420,4 +420,31 @@ final class UsageDailyAccumulatorTests: XCTestCase {
         XCTAssertEqual(accumulator.baseline(for: .codex), seeded,
                        "A small correction drop must NOT re-lock the baseline")
     }
+
+    // MARK: - DailyBaseline JSON persistence (reset-marker semantics)
+
+    func testDailyBaselineJSONRoundTripPreservesResetMarker() throws {
+        let baseline = DailyBaseline(
+            tool: .claudeCode, localDate: "2026-06-11",
+            weeklyUsedAtDayStart: 3, todayAllowanceOfWeek: (100.0 - 3.0) / 7.0,
+            timeZoneIdentifier: "UTC", capturedAt: Date(timeIntervalSince1970: 1_000),
+            lastHandledResetIntervalID: "1781406000"
+        )
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(DailyBaseline.self, from: try encoder.encode(baseline))
+        XCTAssertEqual(decoded.lastHandledResetIntervalID, "1781406000")
+        XCTAssertEqual(decoded, baseline)
+    }
+
+    func testDailyBaselineLegacyJSONWithoutResetMarkerDecodesNil() throws {
+        let legacy = """
+        {"tool":"claudeCode","localDate":"2026-06-11","weeklyUsedAtDayStart":10,
+         "todayAllowanceOfWeek":12.5,"timeZoneIdentifier":"UTC",
+         "capturedAt":"2026-06-11T00:00:01Z"}
+        """.data(using: .utf8)!
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(DailyBaseline.self, from: legacy)
+        XCTAssertNil(decoded.lastHandledResetIntervalID)
+    }
 }
