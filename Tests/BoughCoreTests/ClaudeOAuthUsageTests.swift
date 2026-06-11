@@ -1,26 +1,6 @@
 import XCTest
 @testable import BoughCore
 
-// Helper box for capturing mutable state in @Sendable closures (avoids
-// "mutation of captured var in @Sendable closure" when the closure type is
-// stored as OAuthHTTPTransport / keychainRead).
-private final class Counter: @unchecked Sendable {
-    private let lock = NSLock()
-    private var _value: Int = 0
-    var value: Int { lock.lock(); defer { lock.unlock() }; return _value }
-    func increment() { lock.lock(); _value += 1; lock.unlock() }
-}
-
-private final class MutableBox<T: Sendable>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var _value: T
-    init(_ value: T) { _value = value }
-    var value: T {
-        get { lock.lock(); defer { lock.unlock() }; return _value }
-        set { lock.lock(); _value = newValue; lock.unlock() }
-    }
-}
-
 final class ClaudeOAuthUsageTests: XCTestCase {
     private var tempDir: URL!
 
