@@ -22,7 +22,7 @@ Bough is a macOS menu bar utility that keeps AI coding agent status, usage, musi
 
 - Shows session state for Codex, Claude Code, Cursor, and other supported tools right in the Mac notch / menu bar.
 - Permission requests, questions, completion, busy, idle — every state at a glance. Click to jump back to the matching terminal or editor window.
-- Tracks daily usage for Codex and Claude Code. Alerts you when you're approaching the limit, and lets you know when the cooldown is over.
+- Tracks usage for Codex and Claude Code by reading each tool's official usage API directly — accurate even when the tools aren't running. Alerts you when approaching limits and when cooldowns end. (First Claude usage read shows a one-time macOS Keychain authorization — choose Always Allow.)
 - Now playing music and lyrics, right in the menu bar — no need to switch windows.
 - AirDrop drag panel for faster file reception.
 - Works whether you're developing locally, SSH'd into a remote server, or using any common terminal and editor.
