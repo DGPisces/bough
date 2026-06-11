@@ -578,7 +578,7 @@ cmd_assert_new_build() {
         return
     fi
     if [[ "$BUILD" -le "$appcast_build" ]]; then
-        die "release build $BUILD must be greater than current stable appcast build $appcast_build. Run: Tools/Release/release-flow.sh bump --tag <next-tag>"
+        die "release build $BUILD must be greater than current stable appcast build $appcast_build. Run: Tools/Release/bump-version.sh <next-version> (see RELEASING.md)"
     fi
     echo "Release build OK: $BUILD > current stable appcast build $appcast_build"
 }

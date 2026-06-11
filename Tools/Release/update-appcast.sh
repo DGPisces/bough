@@ -126,7 +126,7 @@ fi
 echo "==> Updating version ${VERSION} in $APPCAST"
 if /usr/bin/grep -qF "<sparkle:version>${BUILD}</sparkle:version>" "$APPCAST"; then
     if [[ "${BOUGH_APPCAST_REPLACE_EXISTING:-0}" != "1" ]]; then
-        echo "ERROR: build ${BUILD} (v${VERSION}) is already in $APPCAST. Bump CFBundleVersion in Platform/Apple/Info.plist, edit by hand, or set BOUGH_APPCAST_REPLACE_EXISTING=1 for a same-build asset re-sign." >&2
+        echo "ERROR: build ${BUILD} (v${VERSION}) is already in $APPCAST. Run Tools/Release/bump-version.sh to advance the version (see RELEASING.md), or set BOUGH_APPCAST_REPLACE_EXISTING=1 for a same-build asset re-sign." >&2
         exit 1
     fi
     NEW_ITEM="$NEW_ITEM" BUILD="$BUILD" /usr/bin/perl -0pi -e '
