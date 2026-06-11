@@ -12,15 +12,32 @@ final class PublicGitHubGovernanceTests: XCTestCase {
         XCTAssertEqual(codeowners, ["* @DGPisces"])
     }
 
-    func testDependabotOnlyCreatesWeeklySwiftPackageUpdates() throws {
+    func testDependabotCoversSwiftPackagesAndGitHubActionsWeekly() throws {
         let dependabot = try repoText(".github/dependabot.yml")
 
         XCTAssertTrue(dependabot.contains(#"package-ecosystem: "swift""#))
+        XCTAssertTrue(dependabot.contains(#"package-ecosystem: "github-actions""#))
         XCTAssertTrue(dependabot.contains(#"directory: "/""#))
         XCTAssertTrue(dependabot.contains(#"interval: "weekly""#))
         XCTAssertTrue(dependabot.contains("open-pull-requests-limit: 5"))
-        XCTAssertFalse(dependabot.contains("github-actions"))
         XCTAssertFalse(dependabot.localizedCaseInsensitiveContains("automerge"))
+    }
+
+    func testWorkflowActionsArePinnedToCommitShas() throws {
+        for workflow in [".github/workflows/ci.yml", ".github/workflows/release.yml"] {
+            let lines = try repoText(workflow).split(separator: "\n")
+            let usesLines = lines.filter {
+                let trimmed = $0.trimmingCharacters(in: .whitespaces)
+                return trimmed.hasPrefix("uses:") || trimmed.hasPrefix("- uses:")
+            }
+            XCTAssertFalse(usesLines.isEmpty, "\(workflow) must declare at least one action")
+            for line in usesLines {
+                XCTAssertNotNil(
+                    line.range(of: #"@[0-9a-f]{40}( |$)"#, options: .regularExpression),
+                    "\(workflow): every action must be pinned to a 40-hex commit SHA: \(line)"
+                )
+            }
+        }
     }
 
     func testPublicCIUsesHostedArmMacAndNoSecrets() throws {
@@ -32,6 +49,7 @@ final class PublicGitHubGovernanceTests: XCTestCase {
         XCTAssertTrue(ci.contains("permissions:\n  contents: read"))
         XCTAssertTrue(ci.contains("name: ci / build-and-test"))
         XCTAssertTrue(ci.contains("name: ci / unsigned-packaging-smoke"))
+        XCTAssertTrue(ci.contains("name: ci / test-macos26"))
         XCTAssertTrue(ci.contains("runs-on: macos-14"))
         XCTAssertTrue(ci.contains("runs-on: macos-26"))
         XCTAssertTrue(ci.contains("swift build"))
