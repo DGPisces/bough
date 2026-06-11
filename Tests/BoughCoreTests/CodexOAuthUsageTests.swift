@@ -89,7 +89,8 @@ final class CodexOAuthUsageTests: XCTestCase {
                 "secondary_window":{"used_percent":2,"reset_at":2600000,"limit_window_seconds":604800}}}
                 """.data(using: .utf8)!)
             },
-            now: { now }
+            now: { now },
+            gate: OAuthCooldownGate()
         )
         _ = try client.fetchRateLimitsResult()
         XCTAssertEqual(refreshCalls.value, 0)
@@ -114,7 +115,8 @@ final class CodexOAuthUsageTests: XCTestCase {
                 "secondary_window":{"used_percent":2,"reset_at":2600000,"limit_window_seconds":604800}}}
                 """.data(using: .utf8)!)
             },
-            now: { now }
+            now: { now },
+            gate: OAuthCooldownGate()
         )
         _ = try client.fetchRateLimitsResult()
         XCTAssertNotNil(sawRefresh.get())
@@ -145,7 +147,8 @@ final class CodexOAuthUsageTests: XCTestCase {
                 "secondary_window":{"used_percent":2,"reset_at":2600000,"limit_window_seconds":604800}}}
                 """.data(using: .utf8)!)
             },
-            now: { now }
+            now: { now },
+            gate: OAuthCooldownGate()
         )
         _ = try client.fetchRateLimitsResult()
         let written = try JSONSerialization.jsonObject(
@@ -174,7 +177,8 @@ final class CodexOAuthUsageTests: XCTestCase {
                 "secondary_window":{"used_percent":2,"reset_at":2600000,"limit_window_seconds":604800}}}
                 """.data(using: .utf8)!)
             },
-            now: { now }
+            now: { now },
+            gate: OAuthCooldownGate()
         )
         _ = try client.fetchRateLimitsResult()
         let mode = try XCTUnwrap(
@@ -194,7 +198,8 @@ final class CodexOAuthUsageTests: XCTestCase {
         let client = CodexOAuthUsageClient(
             codexHomeURL: codexHome,
             transport: { _ in calls.increment(); return OAuthHTTPResponse(statusCode: 401, headers: [:], body: Data()) },
-            now: { nowBox.get() }
+            now: { nowBox.get() },
+            gate: OAuthCooldownGate()
         )
         XCTAssertThrowsError(try client.fetchRateLimitsResult()) {
             XCTAssertEqual(($0 as? OAuthUsageError)?.isAuthFailure, true)
@@ -210,10 +215,83 @@ final class CodexOAuthUsageTests: XCTestCase {
         let client = CodexOAuthUsageClient(
             codexHomeURL: codexHome,
             transport: { _ in XCTFail("no request expected"); throw OAuthUsageError.network("x") },
-            now: { Date() }
+            now: { Date() },
+            gate: OAuthCooldownGate()
         )
         XCTAssertThrowsError(try client.fetchRateLimitsResult()) {
             XCTAssertEqual(($0 as? OAuthUsageError)?.isAuthFailure, true)
+        }
+    }
+
+    // Failed staleness refresh must arm a cooldown so a persistently stale
+    // last_refresh doesn't re-POST to auth.openai.com on every fetch tick —
+    // while the usage fetch itself still proceeds with the old token.
+    func testFailedRefreshArmsCooldownAndUsageFetchStillProceeds() throws {
+        let nowBox = MutableBox<Date>(Date(timeIntervalSince1970: 2_000_000))
+        let staleISO = ISO8601DateFormatter().string(from: nowBox.get().addingTimeInterval(-9 * 24 * 3600))
+        writeAuthJSON(#"{"tokens":{"access_token":"old","refresh_token":"r1"},"last_refresh":"\#(staleISO)"}"#)
+        let refreshCalls = Counter()
+        let usageCalls = Counter()
+        let client = CodexOAuthUsageClient(
+            codexHomeURL: codexHome,
+            transport: { request in
+                if request.url?.host == "auth.openai.com" {
+                    refreshCalls.increment()
+                    return OAuthHTTPResponse(statusCode: 500, headers: [:], body: Data())
+                }
+                usageCalls.increment()
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer old")
+                return OAuthHTTPResponse(statusCode: 200, headers: [:], body: """
+                {"rate_limit":{"primary_window":{"used_percent":1,"reset_at":2100000,"limit_window_seconds":18000},
+                "secondary_window":{"used_percent":2,"reset_at":2600000,"limit_window_seconds":604800}}}
+                """.data(using: .utf8)!)
+            },
+            now: { nowBox.get() },
+            gate: OAuthCooldownGate()
+        )
+        // First fetch: refresh attempted once (fails), usage GET still happens.
+        _ = try client.fetchRateLimitsResult()
+        XCTAssertEqual(refreshCalls.value, 1)
+        XCTAssertEqual(usageCalls.value, 1)
+        // Second fetch within the cooldown: NO new refresh attempt, usage GET proceeds.
+        nowBox.set(nowBox.get().addingTimeInterval(60))
+        _ = try client.fetchRateLimitsResult()
+        XCTAssertEqual(refreshCalls.value, 1)
+        XCTAssertEqual(usageCalls.value, 2)
+        // After the cooldown expires the refresh is re-attempted.
+        nowBox.set(nowBox.get().addingTimeInterval(CodexOAuthUsageClient.unauthorizedCooldown))
+        _ = try client.fetchRateLimitsResult()
+        XCTAssertEqual(refreshCalls.value, 2)
+        XCTAssertEqual(usageCalls.value, 3)
+    }
+
+    // Cooldowns live in the gate, not the client: a 429 observed by one client
+    // must block a second client sharing the same gate (production defaults
+    // share OAuthCooldownGate.shared, so client recreation keeps cooldowns).
+    func testCooldownCrossesClientInstancesSharingOneGate() {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        writeAuthJSON(#"{"tokens":{"access_token":"a","refresh_token":"r"},"last_refresh":"2026-06-11T00:00:00Z"}"#)
+        let sharedGate = OAuthCooldownGate()
+        let firstCalls = Counter()
+        let first = CodexOAuthUsageClient(
+            codexHomeURL: codexHome,
+            transport: { _ in firstCalls.increment(); return OAuthHTTPResponse(statusCode: 429, headers: [:], body: Data()) },
+            now: { now },
+            gate: sharedGate
+        )
+        XCTAssertThrowsError(try first.fetchRateLimitsResult()) {
+            guard case .rateLimited = $0 as? OAuthUsageError else { return XCTFail("\($0)") }
+        }
+        XCTAssertEqual(firstCalls.value, 1)
+
+        let second = CodexOAuthUsageClient(
+            codexHomeURL: codexHome,
+            transport: { _ in XCTFail("cooldown must block before transport"); throw OAuthUsageError.network("x") },
+            now: { now.addingTimeInterval(60) },
+            gate: sharedGate
+        )
+        XCTAssertThrowsError(try second.fetchRateLimitsResult()) {
+            guard case .cooldownActive = $0 as? OAuthUsageError else { return XCTFail("\($0)") }
         }
     }
 

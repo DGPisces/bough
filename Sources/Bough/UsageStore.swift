@@ -171,6 +171,17 @@ final class UsageStore {
     @ObservationIgnored
     private var channelsGeneration = 0
 
+    /// Per-tool monotonic refresh sequence: overlapping refreshes (timer +
+    /// panel-open + manual force) mean a slow FAILING fetch can complete after
+    /// a fast succeeding one. Each refresh records its sequence at entry and
+    /// bails after the await when a newer refresh has started, so a stale
+    /// failure never stomps a fresher snapshot/status.
+    @ObservationIgnored
+    private var claudeRefreshSequence: UInt64 = 0
+
+    @ObservationIgnored
+    private var codexRefreshSequence: UInt64 = 0
+
     @ObservationIgnored
     private var refreshActivity: UsageRefreshActivity = .active
 
@@ -504,6 +515,8 @@ final class UsageStore {
     func refreshClaudeOAuth(force: Bool = false) async {
         guard usageDisplayEnabled(tool: .claudeCode), let fetcher = claudeFetcher else { return }
         let generation = channelsGeneration
+        claudeRefreshSequence += 1
+        let mySequence = claudeRefreshSequence
         enterRefresh()
         defer { exitRefresh() }
         if force { fetcher.resetTransientGates() }
@@ -511,7 +524,9 @@ final class UsageStore {
         let result: Result<Data, Error> = await Task.detached {
             Result { try fetcher.fetchStatusLinePayload() }
         }.value
-        guard channelsGeneration == generation else { return }
+        // Bail when channels restarted OR a newer refresh has started — a
+        // stale (likely failing) result must not clobber the newer one.
+        guard channelsGeneration == generation, claudeRefreshSequence == mySequence else { return }
 
         switch result {
         case .success(let payload):
@@ -536,6 +551,8 @@ final class UsageStore {
     func refreshCodexOAuth(force: Bool = false) async {
         guard usageDisplayEnabled(tool: .codex), let fetcher = codexFetcher else { return }
         let generation = channelsGeneration
+        codexRefreshSequence += 1
+        let mySequence = codexRefreshSequence
         enterRefresh()
         defer { exitRefresh() }
         _ = force  // Codex has no transient gate to reset; cooldowns expire on their own.
@@ -557,7 +574,9 @@ final class UsageStore {
                 return .failure(error)
             }
         }.value
-        guard channelsGeneration == generation else { return }
+        // Bail when channels restarted OR a newer refresh has started — a
+        // stale (likely failing) result must not clobber the newer one.
+        guard channelsGeneration == generation, codexRefreshSequence == mySequence else { return }
 
         switch result {
         case .success(let rateLimits):

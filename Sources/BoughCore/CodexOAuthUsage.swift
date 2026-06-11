@@ -137,6 +137,7 @@ public final class CodexOAuthUsageClient: CodexUsageFetching, @unchecked Sendabl
     public static let rateLimitCooldownFloor: TimeInterval = 300
     private static let unauthorizedKey = "codex.unauthorized"
     private static let rateLimitKey = "codex.rateLimited"
+    private static let refreshFailureKey = "codex.refreshFailed"
 
     private let codexHomeURL: URL
     private let transport: OAuthHTTPTransport
@@ -154,7 +155,7 @@ public final class CodexOAuthUsageClient: CodexUsageFetching, @unchecked Sendabl
         codexHomeURL: URL = CodexOAuthUsageClient.defaultCodexHomeURL(),
         transport: @escaping OAuthHTTPTransport = OAuthLiveTransport.make(),
         now: @escaping () -> Date = Date.init,
-        gate: OAuthCooldownGate = OAuthCooldownGate()
+        gate: OAuthCooldownGate = .shared
     ) {
         self.codexHomeURL = codexHomeURL
         self.transport = transport
@@ -209,7 +210,10 @@ public final class CodexOAuthUsageClient: CodexUsageFetching, @unchecked Sendabl
     /// CodexBar-parity staleness refresh. Best-effort: any failure returns nil and
     /// the fetch proceeds with the existing token (a stale token then surfaces as
     /// 401 with its own cooldown). Pre-flight re-read + atomic write keep concurrent
-    /// app/helper refreshes benign.
+    /// app/helper refreshes benign. Failed attempts arm a 401-tier cooldown
+    /// (spec §5.1) so a persistently stale `last_refresh` does not re-POST to
+    /// auth.openai.com on every fetch tick — the cooldown gates only the refresh
+    /// attempt, never the usage fetch itself.
     private func refreshIfStale(
         _ credentials: CodexOAuthCredentials,
         authURL: URL
@@ -218,6 +222,10 @@ public final class CodexOAuthUsageClient: CodexUsageFetching, @unchecked Sendabl
               let refreshToken = credentials.refreshToken,
               let lastRefresh = credentials.lastRefresh,
               now().timeIntervalSince(lastRefresh) > Self.refreshStalenessInterval else {
+            return nil
+        }
+        // Failed-refresh cooldown: skip the attempt, proceed with the old token.
+        if gate.activeCooldown(key: Self.refreshFailureKey, now: now()) != nil {
             return nil
         }
         // Pre-flight re-read: another process may have refreshed already.
@@ -240,12 +248,17 @@ public final class CodexOAuthUsageClient: CodexUsageFetching, @unchecked Sendabl
         guard let response = try? transport(tokenRequest), response.statusCode == 200,
               let body = (try? JSONSerialization.jsonObject(with: response.body)) as? [String: Any],
               let newAccess = body["access_token"] as? String, !newAccess.isEmpty else {
+            armRefreshFailureCooldown()
             return nil
         }
 
         // Merge into the raw dict preserving unknown keys, then atomic write.
+        // Write-back failures also arm the cooldown: the refresh itself
+        // succeeded (and may have rotated the refresh token), so re-attempting
+        // it every tick would rotate tokens against an unwritable file.
         guard let rawData = try? Data(contentsOf: authURL),
               var root = (try? JSONSerialization.jsonObject(with: rawData)) as? [String: Any] else {
+            armRefreshFailureCooldown()
             return nil
         }
         var tokens = (root["tokens"] as? [String: Any]) ?? [:]
@@ -255,6 +268,7 @@ public final class CodexOAuthUsageClient: CodexUsageFetching, @unchecked Sendabl
         root["tokens"] = tokens
         root["last_refresh"] = ISO8601DateFormatter().string(from: now())
         guard let updated = try? JSONSerialization.data(withJSONObject: root, options: [.sortedKeys]) else {
+            armRefreshFailureCooldown()
             return nil
         }
         // Atomic replace resets POSIX permissions to umask defaults (0644),
@@ -262,11 +276,26 @@ public final class CodexOAuthUsageClient: CodexUsageFetching, @unchecked Sendabl
         // Capture the original mode and re-apply it (defaulting to 0600).
         let originalMode = (try? FileManager.default
             .attributesOfItem(atPath: authURL.path))?[.posixPermissions] as? NSNumber
-        try? updated.write(to: authURL, options: .atomic)
+        do {
+            try updated.write(to: authURL, options: .atomic)
+        } catch {
+            // The refreshed token is valid in memory — use it for this fetch,
+            // but arm the cooldown so we don't re-refresh (and rotate the
+            // refresh token again) on every tick against an unwritable file.
+            armRefreshFailureCooldown()
+            return CodexOAuthCredentials.parse(jsonData: updated)
+        }
         try? FileManager.default.setAttributes(
             [.posixPermissions: originalMode ?? NSNumber(value: 0o600)],
             ofItemAtPath: authURL.path
         )
         return CodexOAuthCredentials.parse(jsonData: updated)
+    }
+
+    private func armRefreshFailureCooldown() {
+        gate.setCooldown(
+            key: Self.refreshFailureKey,
+            until: now().addingTimeInterval(Self.unauthorizedCooldown)
+        )
     }
 }

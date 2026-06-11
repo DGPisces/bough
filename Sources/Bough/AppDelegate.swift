@@ -281,6 +281,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard !defaults.bool(forKey: flagKey), !Task.isCancelled else { return }
             defaults.set(true, forKey: flagKey)  // gate first (T-21-12 pattern: set the flag, then do the work)
             _ = ConfigInstaller.retireClaudeCodeStatusLineIfInstalled()
+            // Retirement can refuse (e.g. corrupt wrapper sentinel) and leave
+            // settings.json pointing at the Bough wrapper. Clear the flag so
+            // the next launch retries — retire is idempotent and cheap, so a
+            // bounded one-attempt-per-launch retry is acceptable. The refusal
+            // semantics are covered at the ConfigInstaller level
+            // (ConfigInstallerClaudeCodeTests); this task is a thin wrapper.
+            if ConfigInstaller.isBoughClaudeCodeStatusLineCommand(
+                ConfigInstaller.currentClaudeCodeStatusLineCommand()
+            ) {
+                defaults.set(false, forKey: flagKey)
+            }
         }
     }
 

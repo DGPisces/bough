@@ -101,6 +101,12 @@ private final class OAuthTransportResultBox: @unchecked Sendable {
 /// Keys are namespaced strings (e.g. "claude.rateLimited"). Thread-safe;
 /// expired entries are pruned on read.
 public final class OAuthCooldownGate: @unchecked Sendable {
+    /// The process-wide instance used by default inits. Clients/readers are
+    /// rebuilt on every coding-sessions toggle; cooldowns must survive that,
+    /// so the default gate is shared rather than per-instance. Tests inject
+    /// their own gate for isolation.
+    public static let shared = OAuthCooldownGate()
+
     private let lock = NSLock()
     private var cooldowns: [String: Date] = [:]
 

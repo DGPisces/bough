@@ -516,6 +516,33 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertNil(store.snapshot(for: .codex).weekly.snapshot)
     }
 
+    func testStaleFailureResultDoesNotClobberNewerSuccess() async {
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+        let fetcher = FakeCodexUsageFetcher(result: Self.codexResult(weeklyReset: 100_000))
+        fetcher.enqueue(.failure(UsageStoreTestError.failed))                      // refresh A (slow, fails)
+        fetcher.enqueue(.success(Self.codexResult(weeklyReset: 100_000)))          // refresh B (fast, succeeds)
+        let started = expectation(description: "refresh A fetch started")
+        started.assertForOverFulfill = false
+        let gate = DispatchSemaphore(value: 0)
+        fetcher.onFetchStart = { started.fulfill() }
+        fetcher.blockGate = gate
+
+        store.startUsageChannels(claude: nil, codex: fetcher, codexFallback: nil)  // kicks off refresh A
+        await fulfillment(of: [started], timeout: 2)
+        fetcher.blockGate = nil                                                    // refresh B must not block
+        await store.refreshCodexOAuth()                                            // refresh B applies success
+        XCTAssertEqual(store.codexOAuthStatus, .connected(at: Date(timeIntervalSince1970: 1_000)))
+
+        gate.signal()                                                              // release refresh A's failure
+        await waitUntil { !store.isRefreshing }
+
+        // A newer refresh started while A was in flight — A's failure must not
+        // stomp B's fresh snapshot/status to stale/degraded.
+        XCTAssertEqual(store.codexOAuthStatus, .connected(at: Date(timeIntervalSince1970: 1_000)))
+        XCTAssertEqual(store.snapshot(for: .codex).availability, .available)
+        XCTAssertEqual(store.snapshot(for: .codex).weekly.snapshot?.usedPercent, 20)
+    }
+
     // MARK: - Claude OAuth channel (spec §9)
 
     func testClaudeOAuthRefreshAppliesSnapshotSetsConnectedAndWritesMirror() async throws {

@@ -65,7 +65,8 @@ final class ClaudeOAuthUsageTests: XCTestCase {
                 keychainCalls.increment()
                 return .success(#"{"claudeAiOauth":{"accessToken":"kc","expiresAt":9000000000000}}"#.data(using: .utf8)!)
             },
-            now: { Date(timeIntervalSince1970: 5000) }
+            now: { Date(timeIntervalSince1970: 5000) },
+            gate: OAuthCooldownGate()
         )
         XCTAssertEqual(try reader.read().accessToken, "kc")
         XCTAssertEqual(keychainCalls.value, 1)
@@ -77,7 +78,8 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let reader = ClaudeOAuthCredentialsReader(
             fileURLs: [tempDir.appendingPathComponent("absent.json")],
             keychainRead: { keychainCalls.increment(); return .failure(.denied(status: -25293)) },
-            now: { nowBox.value }
+            now: { nowBox.value },
+            gate: OAuthCooldownGate()
         )
         XCTAssertThrowsError(try reader.read()) { error in
             XCTAssertEqual(error as? OAuthUsageError, .keychainDenied)
@@ -97,7 +99,8 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let reader = ClaudeOAuthCredentialsReader(
             fileURLs: [],
             keychainRead: { keychainCalls.increment(); return .failure(.itemNotFound) },
-            now: { Date(timeIntervalSince1970: 5000) }
+            now: { Date(timeIntervalSince1970: 5000) },
+            gate: OAuthCooldownGate()
         )
         XCTAssertThrowsError(try reader.read()) { error in
             guard case .credentialsUnavailable = error as? OAuthUsageError else {
@@ -160,7 +163,8 @@ final class ClaudeOAuthUsageTests: XCTestCase {
             credentialsReader: ClaudeOAuthCredentialsReader(fileURLs: [fresh], keychainRead: nil, now: now),
             transport: transport,
             userAgentVersion: { "9.9.9" },
-            now: now
+            now: now,
+            gate: OAuthCooldownGate()
         )
     }
 
@@ -272,6 +276,7 @@ final class ClaudeOAuthUsageTests: XCTestCase {
             },
             userAgentVersion: { "9.9.9" },
             now: { Date(timeIntervalSince1970: 10_000) },
+            gate: OAuthCooldownGate(),
             tokenMirrorWriter: { creds in
                 mirrored.value = mirrored.value + [creds.accessToken]
                 try? ClaudeOAuthTokenMirror.write(creds)

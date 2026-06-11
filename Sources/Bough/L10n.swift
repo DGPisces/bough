@@ -475,7 +475,7 @@ final class L10n: ObservableObject {
         "usage_provider_statistics_toggle": "Collect %@ statistics",
 
         // Phase 21 / D-06 + D-07: chain-safe statusLine state variants + auto-install banner.
-        "usage_claude_integration_subtitle": "Bough installs the statusLine for usage data and a hook for tool-call telemetry. Toggling off uninstalls both and restores any prior statusLine.",
+        "usage_claude_integration_subtitle": "Bough installs a hook for session monitoring; usage data comes directly from the Claude API. Toggling off uninstalls the hook.",
         "usage_claude_integration_install_failed": "Bough Claude Code integration install failed",
         "usage_claude_integration_busy": "Working…",
         "usage_claude_refresh_succeeded": "Refreshed from disk",
@@ -1139,7 +1139,7 @@ final class L10n: ObservableObject {
         "usage_provider_statistics_toggle": "统计 %@ 用量",
 
         // Phase 21 / D-06 + D-07: chain-safe statusLine state variants + auto-install banner.
-        "usage_claude_integration_subtitle": "Bough 同时安装 statusLine（用量数据）和 hook（工具调用遥测）。关闭开关会一并卸载并恢复你原有的 statusLine。",
+        "usage_claude_integration_subtitle": "Bough 安装 hook 用于会话监控；用量数据直接来自 Claude API。关闭开关会卸载该 hook。",
         "usage_claude_integration_install_failed": "Bough Claude Code 集成安装失败",
         "usage_claude_integration_busy": "处理中…",
         "usage_claude_refresh_succeeded": "已从磁盘刷新",

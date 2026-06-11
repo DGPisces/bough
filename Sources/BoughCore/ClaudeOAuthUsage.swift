@@ -74,7 +74,7 @@ public final class ClaudeOAuthCredentialsReader: @unchecked Sendable {
         fileURLs: [URL] = [ClaudeOAuthCredentialsReader.defaultCredentialsFileURL()],
         keychainRead: (() -> Result<Data, KeychainReadFailure>)?,
         now: @escaping () -> Date = Date.init,
-        gate: OAuthCooldownGate = OAuthCooldownGate()
+        gate: OAuthCooldownGate = .shared
     ) {
         self.fileURLs = fileURLs
         self.keychainRead = keychainRead
@@ -224,7 +224,7 @@ public final class ClaudeOAuthUsageClient: ClaudeUsageFetching, @unchecked Senda
         transport: @escaping OAuthHTTPTransport = OAuthLiveTransport.make(),
         userAgentVersion: @escaping () -> String = { ClaudeCLIVersionProbe.cachedVersion() },
         now: @escaping () -> Date = Date.init,
-        gate: OAuthCooldownGate = OAuthCooldownGate(),
+        gate: OAuthCooldownGate = .shared,
         tokenMirrorWriter: ((ClaudeOAuthCredentials) -> Void)? = nil
     ) {
         self.credentialsReader = credentialsReader
