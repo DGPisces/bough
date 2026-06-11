@@ -103,11 +103,10 @@ final class AirDropPanelRoutingTests: XCTestCase {
         }
         XCTAssertEqual(returningTo, .sessionList)
 
-        let didReturn = try await TestHelpers.waitUntil {
+        try await TestHelpers.waitUntil {
             state.surface == .sessionList
         }
 
-        XCTAssertTrue(didReturn)
         XCTAssertEqual(state.surface, .sessionList)
         XCTAssertEqual(state.airDropState, .idle)
     }

@@ -48,24 +48,32 @@ enum TestHelpers {
         restoreUserDefaultsValue(savedDefaultValue, forKey: SettingsKey.appLanguage)
     }
 
-    /// Polls `predicate` on the main actor until it returns true or `timeout`
-    /// elapses, then returns the final predicate value. Replaces bare
-    /// `Task.yield()` synchronization with unstructured Tasks, which does not
-    /// guarantee the spawned task has run on a loaded machine.
+    /// Polls `predicate` on the main actor until it returns true, failing the
+    /// test and throwing if `timeout` elapses first. Throwing aborts the test
+    /// immediately: continuing after a timed-out wait would act on state that
+    /// never arrived and could await a continuation that never resumes.
     @MainActor
     static func waitUntil(
         timeout: TimeInterval = 5.0,
         intervalNanoseconds: UInt64 = 10_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line,
         _ predicate: () -> Bool
-    ) async throws -> Bool {
+    ) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if predicate() { return true }
+            if predicate() { return }
             try await Task.sleep(nanoseconds: intervalNanoseconds)
         }
-        return predicate()
+        if predicate() { return }
+        XCTFail("waitUntil timed out after \(timeout)s", file: file, line: line)
+        throw WaitUntilTimeoutError()
     }
 }
+
+/// Thrown by `TestHelpers.waitUntil` on timeout so the failing test aborts
+/// instead of running follow-up actions against state that never arrived.
+struct WaitUntilTimeoutError: Error {}
 
 final class TestProcessStateLock {
     private static let lockName = "dev.dgpisces.bough.tests.process-state"
