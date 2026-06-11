@@ -26,6 +26,10 @@ struct UsageOAuthBadgeModel: Equatable {
         case .degraded(let reason, _):
             tone = .warning
             text = reason   // already localized by UsageStore.degradedReason
+        case .missingCredentials(let reason, _):
+            // Spec §9: no credentials is gray (with login guidance), not yellow.
+            tone = .off
+            text = reason   // already localized by UsageStore.degradedReason
         }
     }
 }

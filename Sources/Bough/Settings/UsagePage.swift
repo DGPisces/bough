@@ -380,7 +380,7 @@ struct UsagePage: View {
         }
     }
 
-    // OAuth channel badge color mapping (mirrors NotchPanelView.swift exact values).
+    // OAuth channel badge color mapping (mirrors UsageStrip.swift exact values).
     private func badgeColor(for tone: UsageOAuthBadgeModel.Tone) -> Color {
         switch tone {
         case .ok:      return Color(red: 0.32, green: 0.78, blue: 0.42)

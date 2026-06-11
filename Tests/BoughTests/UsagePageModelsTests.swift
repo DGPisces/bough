@@ -40,6 +40,18 @@ final class UsagePageModelsTests: XCTestCase {
         XCTAssertEqual(badge.text, "Rate limited — retrying soon")
     }
 
+    func testBadgeModelMissingCredentialsIsOffWithReasonPassthrough() {
+        // Spec §9: no credentials renders gray (off) with login guidance —
+        // not the yellow degraded warning.
+        let badge = UsageOAuthBadgeModel(
+            status: .missingCredentials(reason: "Sign in to Claude Code", at: Date()),
+            localized: bracketLocalized
+        )
+
+        XCTAssertEqual(badge.tone, .off)
+        XCTAssertEqual(badge.text, "Sign in to Claude Code")
+    }
+
     // MARK: - UsagePaceRowModel
 
     private static let paceStrings: [String: String] = [

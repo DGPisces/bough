@@ -281,10 +281,14 @@ public final class ClaudeOAuthUsageClient: ClaudeUsageFetching, @unchecked Senda
 
     private func mirrorIfNeeded(_ credentials: ClaudeOAuthCredentials) {
         guard let tokenMirrorWriter else { return }
+        // Self-heal: the monitor lifecycle deletes the mirror on disable; a
+        // missing file must be rewritten on the next poll even when the token
+        // itself has not rotated (spec §6.3).
+        let mirrorMissing = !FileManager.default.fileExists(atPath: ClaudeOAuthTokenMirror.fileURL().path)
         mirrorLock.lock()
         let changed = lastMirroredToken != credentials.accessToken
-        if changed { lastMirroredToken = credentials.accessToken }
+        if changed || mirrorMissing { lastMirroredToken = credentials.accessToken }
         mirrorLock.unlock()
-        if changed { tokenMirrorWriter(credentials) }
+        if changed || mirrorMissing { tokenMirrorWriter(credentials) }
     }
 }

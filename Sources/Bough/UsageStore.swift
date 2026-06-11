@@ -1,12 +1,15 @@
 import Foundation
 import BoughCore
 
-/// Health of one direct-OAuth usage channel (Claude / Codex). `degraded`
-/// carries a user-facing localized reason for the Settings badge.
+/// Health of one direct-OAuth usage channel (Claude / Codex). `degraded` and
+/// `missingCredentials` carry a user-facing localized reason for the Settings
+/// badge; missing credentials is its own case so the badge can show gray with
+/// login guidance instead of a yellow degraded warning (spec §9).
 enum UsageOAuthChannelStatus: Equatable {
     case unknown
     case connected(at: Date)
     case degraded(reason: String, at: Date)
+    case missingCredentials(reason: String, at: Date)
 }
 
 @MainActor
@@ -524,7 +527,7 @@ final class UsageStore {
             }
         case .failure(let error):
             let reason = Self.degradedReason(for: error, localized: localized)
-            claudeOAuthStatusStorage = .degraded(reason: reason, at: now())
+            claudeOAuthStatusStorage = failureStatus(for: error, reason: reason)
             markClaudeCodeUnavailable(reason: reason)
         }
         bumpSnapshotRevision()
@@ -568,7 +571,7 @@ final class UsageStore {
             }
         case .failure(let error):
             let reason = Self.degradedReason(for: error, localized: localized)
-            codexOAuthStatusStorage = .degraded(reason: reason, at: now())
+            codexOAuthStatusStorage = failureStatus(for: error, reason: reason)
             markCodexUnavailable(reason: reason)
         }
         bumpSnapshotRevision()
@@ -593,6 +596,15 @@ final class UsageStore {
     /// while the background monitor owns continuity writes (helper-owned mode).
     static func shouldMirrorClaudeToken(defaults: UserDefaults = .standard) -> Bool {
         UsageContinuityWriteMode(defaults: defaults) == .helperOwned
+    }
+
+    /// Spec §9: missing credentials gets its own status so the badge renders
+    /// gray with login guidance; every other failure degrades to yellow.
+    private func failureStatus(for error: Error, reason: String) -> UsageOAuthChannelStatus {
+        if case .credentialsUnavailable = error as? OAuthUsageError {
+            return .missingCredentials(reason: reason, at: now())
+        }
+        return .degraded(reason: reason, at: now())
     }
 
     /// Maps a usage refresh failure onto a localized, user-facing reason for

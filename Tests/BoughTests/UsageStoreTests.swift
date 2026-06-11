@@ -554,6 +554,20 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertEqual(store.snapshot(for: .claudeCode).availability, .unavailable(reason: reason))
     }
 
+    func testClaudeOAuthNoCredentialsSetsMissingCredentialsStatus() async {
+        // Spec §9: no credentials is its own (gray) status, not degraded.
+        let fetcher = FakeClaudeUsageFetcher(
+            result: .failure(OAuthUsageError.credentialsUnavailable(reason: "no sources")))
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+
+        store.startUsageChannels(claude: fetcher, codex: nil, codexFallback: nil)
+        await store.refreshClaudeOAuth()
+
+        let reason = L10n.shared["usage_oauth_no_credentials"]
+        XCTAssertEqual(store.claudeOAuthStatus, .missingCredentials(reason: reason, at: Date(timeIntervalSince1970: 1_000)))
+        XCTAssertEqual(store.snapshot(for: .claudeCode).availability, .unavailable(reason: reason))
+    }
+
     func testForceClaudeRefreshResetsTransientGates() async {
         let fetcher = FakeClaudeUsageFetcher(result: .success(Self.claudePayload()))
         let paths = Self.temporaryClaudePaths()
@@ -612,6 +626,19 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(fallback.readCount, 1)
         let reason = L10n.shared["usage_oauth_token_expired"]
         XCTAssertEqual(store.codexOAuthStatus, .degraded(reason: reason, at: Date(timeIntervalSince1970: 1_000)))
+    }
+
+    func testCodexNoCredentialsSetsMissingCredentialsStatus() async {
+        // Spec §9: no credentials is its own (gray) status, not degraded.
+        let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
+        let fetcher = FakeCodexUsageFetcher(error: OAuthUsageError.credentialsUnavailable(reason: "no auth.json"))
+
+        store.startUsageChannels(claude: nil, codex: fetcher, codexFallback: nil)
+        await store.refreshCodexOAuth()
+
+        let reason = L10n.shared["usage_oauth_no_credentials"]
+        XCTAssertEqual(store.codexOAuthStatus, .missingCredentials(reason: reason, at: Date(timeIntervalSince1970: 1_000)))
+        XCTAssertEqual(store.snapshot(for: .codex).availability, .unavailable(reason: reason))
     }
 
     // MARK: - Sample arbitration (spec §9)

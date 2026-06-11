@@ -252,4 +252,40 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         ClaudeOAuthTokenMirror.delete()
         XCTAssertFalse(FileManager.default.fileExists(atPath: mirrorURL.path))
     }
+
+    func testMirrorRewrittenWhenFileMissingEvenIfTokenUnchanged() throws {
+        // mirrorIfNeeded 通过 $HOME 解析镜像路径——三次 fetch 都要重定向。
+        setenv("HOME", tempDir.path, 1)
+        defer { setenv("HOME", NSHomeDirectory(), 1) }
+        let fresh = writeCredentials(
+            #"{"claudeAiOauth":{"accessToken":"tok","expiresAt":9000000000000}}"#, to: "creds.json")
+        let mirrored = MutableBox<[String]>([])
+        let client = ClaudeOAuthUsageClient(
+            credentialsReader: ClaudeOAuthCredentialsReader(
+                fileURLs: [fresh], keychainRead: nil,
+                now: { Date(timeIntervalSince1970: 10_000) }),
+            transport: { _ in
+                OAuthHTTPResponse(statusCode: 200, headers: [:], body: """
+                {"five_hour":{"utilization":10,"resets_at":1781205600},
+                 "seven_day":{"utilization":40,"resets_at":1781406000}}
+                """.data(using: .utf8)!)
+            },
+            userAgentVersion: { "9.9.9" },
+            now: { Date(timeIntervalSince1970: 10_000) },
+            tokenMirrorWriter: { creds in
+                mirrored.value = mirrored.value + [creds.accessToken]
+                try? ClaudeOAuthTokenMirror.write(creds)
+            }
+        )
+        _ = try client.fetchStatusLinePayload()
+        XCTAssertEqual(mirrored.value, ["tok"])
+        // 镜像文件存在且 token 未变 → 不重写。
+        _ = try client.fetchStatusLinePayload()
+        XCTAssertEqual(mirrored.value.count, 1)
+        // 模拟监控关闭删除镜像：下一次轮询必须自愈重写。
+        ClaudeOAuthTokenMirror.delete()
+        _ = try client.fetchStatusLinePayload()
+        XCTAssertEqual(mirrored.value, ["tok", "tok"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ClaudeOAuthTokenMirror.fileURL().path))
+    }
 }
