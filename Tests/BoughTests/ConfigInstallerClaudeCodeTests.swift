@@ -210,46 +210,6 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
         }
     }
 
-    func testPathDriftRepairsOnlyExactOldBoughBridgePath() throws {
-        let paths = paths()
-        try Self.writeJSON(
-            #"{"statusLine":{"command":"/tmp/Old/Bough.app/Contents/Resources/bough-statusline-bridge.sh"}}"#,
-            to: paths.settings
-        )
-
-        XCTAssertTrue(ConfigInstaller.testVerifyClaudeCodeStatusLinePathDrift(
-            settingsPath: paths.settings.path,
-            proposedBridgePath: paths.bridge.path
-        ))
-        XCTAssertEqual(ConfigInstaller.testCurrentClaudeCodeStatusLineCommand(settingsPath: paths.settings.path), paths.bridge.path)
-    }
-
-    func testPathDriftRepairsNestedBundleBoughBridgePath() throws {
-        let paths = paths()
-        try Self.writeJSON(
-            #"{"statusLine":{"command":"/tmp/Old/Bough.app/Contents/Resources/Bough_Bough.bundle/Resources/bough-statusline-bridge.sh"}}"#,
-            to: paths.settings
-        )
-
-        XCTAssertTrue(ConfigInstaller.testVerifyClaudeCodeStatusLinePathDrift(
-            settingsPath: paths.settings.path,
-            proposedBridgePath: paths.bridge.path
-        ))
-        XCTAssertEqual(ConfigInstaller.testCurrentClaudeCodeStatusLineCommand(settingsPath: paths.settings.path), paths.bridge.path)
-    }
-
-    func testPathDriftDoesNotRewriteUserComposition() throws {
-        let paths = paths()
-        let composed = "bash -c 'tee >(cat >/tmp/old) | /tmp/Old/Bough.app/Contents/Resources/bough-statusline-bridge.sh'"
-        try Self.writeJSON(#"{"statusLine":{"command":"\#(composed)"}}"#, to: paths.settings)
-
-        XCTAssertFalse(ConfigInstaller.testVerifyClaudeCodeStatusLinePathDrift(
-            settingsPath: paths.settings.path,
-            proposedBridgePath: paths.bridge.path
-        ))
-        XCTAssertEqual(ConfigInstaller.testCurrentClaudeCodeStatusLineCommand(settingsPath: paths.settings.path), composed)
-    }
-
     func testUninstallRestoresPreExistingStatusLineFromBackup() throws {
         let paths = paths()
         try Self.writeJSON(#"{"statusLine":{"command":"/usr/local/bin/user-status"},"theme":"dark"}"#, to: paths.settings)
@@ -856,34 +816,6 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
         XCTAssertEqual(
             block["type"] as? String, "command",
             "Wrapper-aware uninstall must restore the prev statusLine WITH `\"type\": \"command\"` (Regression)"
-        )
-    }
-
-    /// Plan-check WR-2 fold-in: `verifyClaudeCodeStatusLinePathDrift` is a
-    /// second consumer of `ClaudeCodeStatusLineInstallResult.installed`. It
-    /// must continue to repair the old Bough-app-bundled path drift after
-    /// the enum gained `.chained`. The drift repair path uses
-    /// `replaceExisting: true` which (per D-02) must NOT auto-promote to
-    /// `.chained`; it must produce `.installed` so `verifyClaudeCodeStatusLinePathDrift`
-    /// can still match its `if case .installed` and return true.
-    func testVerifyPathDriftStillReturnsTrueAfterChainedEnumAddition() throws {
-        let paths = paths()
-        try Self.writeJSON(
-            #"{"statusLine":{"command":"/tmp/Old/Bough.app/Contents/Resources/bough-statusline-bridge.sh"}}"#,
-            to: paths.settings
-        )
-
-        XCTAssertTrue(
-            ConfigInstaller.testVerifyClaudeCodeStatusLinePathDrift(
-                settingsPath: paths.settings.path,
-                proposedBridgePath: paths.bridge.path
-            ),
-            "Path-drift repair must continue to return true after .chained joins the enum (WR-2)"
-        )
-        XCTAssertEqual(
-            ConfigInstaller.testCurrentClaudeCodeStatusLineCommand(settingsPath: paths.settings.path),
-            paths.bridge.path,
-            "Drift repair must point settings.json at the proposed bridge, not the wrapper"
         )
     }
 

@@ -3,62 +3,63 @@ import BoughCore
 
 // MARK: - Usage Page Models
 
-private let maxClaudeStatusLineConnectivityProbeBytes = 2 * 1024 * 1024
-
 struct UsagePageActions {
     var refresh: () -> Void
     var enableCodexHooks: () -> Bool = { ConfigInstaller.setEnabled(source: "codex", enabled: true) }
 }
 
-// MARK: - Claude Code statusLine UI state (D-07)
+/// Data-source row badge for one direct-OAuth usage channel (spec §9).
+/// `degraded` reasons arrive pre-localized via `UsageStore.degradedReason`.
+struct UsageOAuthBadgeModel: Equatable {
+    enum Tone: Equatable { case ok, warning, off }
+    let tone: Tone
+    let text: String
 
-/// Phase 21 / D-07: four-way classification of the Settings → Hooks → Claude Code 集成
-/// section, driven by the on-disk `statusLine.command` and the chain-wrapper sentinel.
-/// Pure value type — the classifier is a pure function (`classifyClaudeCodeStatusLineUIState`)
-/// so it can be unit-tested without spinning up SwiftUI.
-enum ClaudeCodeStatusLineUIState: Equatable {
-    /// settings.json points at the Bough bridge directly (no third-party tool present).
-    case installedBoughOnly
-    /// settings.json points at the Bough wrapper; sentinel decoded — chained with `prevCmdBasename`.
-    case installedChained(prevCmdBasename: String)
-    /// settings.json carries a non-Bough statusLine command (starship / ccusage / etc.).
-    /// Install button promotes this to chain-safe coexistence.
-    case otherToolActive(prevCmdBasename: String)
-    /// settings.json missing or has no statusLine key — clean slate.
-    case notInstalledEmpty
+    init(status: UsageOAuthChannelStatus, localized: (String) -> String) {
+        switch status {
+        case .unknown:
+            tone = .off
+            text = localized("usage_oauth_badge_unknown")
+        case .connected:
+            tone = .ok
+            text = localized("usage_oauth_badge_connected")
+        case .degraded(let reason, _):
+            tone = .warning
+            text = reason   // already localized by UsageStore.degradedReason
+        }
+    }
 }
 
-/// WR-1 fold-in: classifier extracted as pure function so unit tests can cover every
-/// branch (installed / chained / conflict / empty) without instantiating a SwiftUI view.
-/// `currentCommand` is the raw string from settings.json (`nil` if file absent or no key);
-/// `proposedBridgePath` is `Bundle.module`-resolved bridge (`nil` if bundle lookup failed);
-/// `wrapperPath` is the wrapper-install path constant; `wrapperPrevCmd` is the wrapper's
-/// decoded sentinel (`nil` when not chained or sentinel corrupt).
-func classifyClaudeCodeStatusLineUIState(
-    currentCommand: String?,
-    proposedBridgePath: String?,
-    wrapperPath: String,
-    wrapperPrevCmd: String?
-) -> ClaudeCodeStatusLineUIState {
-    guard let current = currentCommand, !current.isEmpty else {
-        return .notInstalledEmpty
-    }
-    if let proposed = proposedBridgePath, current == proposed {
-        return .installedBoughOnly
-    }
-    if current == wrapperPath {
-        // We are chained. Decoded sentinel gives the true prev_cmd; if the sentinel is
-        // corrupt, fall back to the wrapper basename rather than spoofing a fake basename
-        // (T-21-13 mitigation — UI never claims a prev that uninstall would not restore).
-        let basename: String
-        if let prev = wrapperPrevCmd {
-            basename = (prev as NSString).lastPathComponent
-        } else {
-            basename = (wrapperPath as NSString).lastPathComponent
+/// Caption line under a usage window row: pace stage plus either the projected
+/// exhaustion ETA or a lasts-to-reset note (spec §8.3). `text` is nil when the
+/// slot has no live window or the pace cannot be computed (e.g. past reset).
+struct UsagePaceRowModel: Equatable {
+    let text: String?
+
+    init(slot: UsageWindowSlot, now: Date, localized: (String) -> String) {
+        guard case .available(let window) = slot,
+              let pace = UsagePaceCalculator.pace(for: window, now: now) else {
+            text = nil
+            return
         }
-        return .installedChained(prevCmdBasename: basename)
+        let stageText: String
+        switch pace.stage {
+        case .onTrack:
+            stageText = localized("usage_pace_on_track")
+        case .slightlyAhead, .ahead, .farAhead:
+            stageText = String(format: localized("usage_pace_ahead_fmt"), Int(pace.deltaPercent.rounded()))
+        case .slightlyBehind, .behind, .farBehind:
+            stageText = String(format: localized("usage_pace_behind_fmt"), Int(abs(pace.deltaPercent).rounded()))
+        }
+        let tailText: String
+        if let eta = pace.etaAt {
+            tailText = String(format: localized("usage_pace_eta_fmt"),
+                              DurationFormat.format(until: eta, now: now, .compact))
+        } else {
+            tailText = localized("usage_pace_lasts")
+        }
+        text = "\(stageText) · \(tailText)"
     }
-    return .otherToolActive(prevCmdBasename: (current as NSString).lastPathComponent)
 }
 
 struct UsageDetailsRow: Equatable {
@@ -190,155 +191,6 @@ struct CodexCLIOutdatedNoticeModel: Equatable {
     var showsOutdatedBadge: Bool { isOutdated }
 }
 
-struct ClaudeCodeHookConnectivityModel: Equatable {
-    let hookInstalled: Bool
-    let socketReachable: Bool
-
-    enum ConnectivityState: Equatable {
-        case connected
-        case warning
-        case absent
-    }
-
-    var state: ConnectivityState {
-        if !hookInstalled { return .absent }
-        return socketReachable ? .connected : .warning
-    }
-
-    /// Always shown when Claude Code is the selected tool.
-    var showsBadge: Bool { true }
-}
-
-// MARK: - StatusLine connectivity (Regression guard)
-//
-// Rate-limit data for Claude Code flows in via the statusLine bridge —
-// `~/.bough/claude-usage.json` is written by `bough-statusline-bridge.sh`
-// on each Claude Code turn. The data-source row's "Connected" badge in the
-// Usage page must reflect whether that data pipeline is alive, not whether
-// the hook entry exists in `~/.claude/settings.json` (the round-4 binding,
-// which lit the green dot even when the statusLine wrapper had never run).
-//
-// State semantics:
-//   .connected — Bough's statusLine is installed and claude-usage.json exists,
-//                parses cleanly, and contains at least one recognized
-//                rate_limits window. Quota staleness is shown in the usage
-//                rows; the badge only describes pipeline readability.
-//   .warning   — Bough's statusLine is installed and the file exists, but the
-//                payload shape is not readable.
-//   .absent    — file missing entirely or unreadable. Wrapper not installed
-//                or never ran.
-//
-// `ClaudeCodeHookConnectivityModel` (above) intentionally stays in place
-// for any future surface that wants raw hook-state semantics; this model
-// is the data-source-row's specific binding.
-struct ClaudeCodeStatusLineConnectivityModel: Equatable {
-    /// `~/.bough/claude-usage.json` exists.
-    let fileExists: Bool
-    /// File parsed as JSON AND contained at least one recognized rate-limit
-    /// window (five_hour OR seven_day used_percentage).
-    let payloadValid: Bool
-    /// File mtime is within `freshnessWindow`. Kept for diagnostics; the badge
-    /// no longer treats an idle Claude Code session as disconnected.
-    let isFresh: Bool?
-
-    enum ConnectivityState: Equatable {
-        case connected
-        case warning
-        case absent
-    }
-
-    var state: ConnectivityState {
-        guard fileExists else { return .absent }
-        return payloadValid ? .connected : .warning
-    }
-
-    var showsBadge: Bool { true }
-}
-
-/// Reads `~/.bough/claude-usage.json` synchronously and classifies the
-/// data-source connectivity. The expected file is a small JSON statusLine
-/// payload; oversized files are treated as invalid so Settings does not block
-/// on an accidental large file during render.
-///
-/// - Parameters:
-///   - path: Override the default `~/.bough/claude-usage.json` path. Tests
-///     pass a temporary directory.
-///   - freshnessWindow: Used only to populate diagnostic `isFresh`. Idle
-///     Claude Code sessions must not read as disconnected just because the
-///     last statusLine payload is older than the window.
-///   - now: Clock source for testability. Default `Date()`.
-@MainActor
-func evaluateClaudeCodeStatusLineConnectivity(
-    path: String = NSHomeDirectory() + "/.bough/claude-usage.json",
-    freshnessWindow: TimeInterval = 600,
-    now: Date = Date(),
-    statusLineInstalled: Bool? = nil
-) -> ClaudeCodeStatusLineConnectivityModel {
-    let fm = FileManager.default
-    // Regression guard: precondition gate. The data-source row
-    // must report `.absent` whenever Bough's statusLine wrapper / bridge is
-    // not installed, regardless of any leftover ~/.bough/claude-usage.json.
-    // Without this, a stale file inside the 10-minute freshness window
-    // would keep the green dot lit immediately after uninstall. Callers
-    // (tests) can inject `statusLineInstalled:` to exercise this branch
-    // deterministically; the default reads ConfigInstaller live.
-    let installed: Bool = statusLineInstalled ?? {
-        ConfigInstaller.isBoughClaudeCodeStatusLineCommand(
-            ConfigInstaller.currentClaudeCodeStatusLineCommand()
-        )
-    }()
-    guard installed else {
-        return ClaudeCodeStatusLineConnectivityModel(
-            fileExists: false, payloadValid: false, isFresh: nil
-        )
-    }
-    guard fm.fileExists(atPath: path) else {
-        return ClaudeCodeStatusLineConnectivityModel(
-            fileExists: false, payloadValid: false, isFresh: nil
-        )
-    }
-    let url = URL(fileURLWithPath: path)
-    let attributes = try? fm.attributesOfItem(atPath: path)
-    if let fileSize = attributes?[.size] as? NSNumber,
-       fileSize.int64Value > Int64(maxClaudeStatusLineConnectivityProbeBytes) {
-        return ClaudeCodeStatusLineConnectivityModel(
-            fileExists: true, payloadValid: false, isFresh: nil
-        )
-    }
-    let data = (try? Data(contentsOf: url)) ?? Data()
-    let mtime = (attributes?[.modificationDate] as? Date) ?? nil
-    let isFresh = mtime.map { now.timeIntervalSince($0) <= freshnessWindow } ?? false
-
-    // Probe just the rate_limits shape — we accept the same key variants the
-    // Claude bridge emits (real Anthropic statusline payloads use snake_case;
-    // accept camelCase variants defensively to match UsageModels.parse).
-    guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-          let rateLimits = json["rate_limits"] as? [String: Any]
-    else {
-        return ClaudeCodeStatusLineConnectivityModel(
-            fileExists: true, payloadValid: false, isFresh: isFresh
-        )
-    }
-    let fiveHourKeys = ["five_hour", "fiveHour", "primary"]
-    let sevenDayKeys = ["seven_day", "sevenDay", "weekly", "secondary"]
-    func hasUsedPct(in window: [String: Any]) -> Bool {
-        // Accept snake_case or camelCase; numeric or string-encoded.
-        return window["used_percentage"] != nil
-            || window["usedPercentage"] != nil
-            || window["used_pct"] != nil
-    }
-    let fiveHourValid = fiveHourKeys.contains { key in
-        (rateLimits[key] as? [String: Any]).map(hasUsedPct(in:)) ?? false
-    }
-    let sevenDayValid = sevenDayKeys.contains { key in
-        (rateLimits[key] as? [String: Any]).map(hasUsedPct(in:)) ?? false
-    }
-    let payloadValid = fiveHourValid || sevenDayValid
-    return ClaudeCodeStatusLineConnectivityModel(
-        fileExists: true, payloadValid: payloadValid, isFresh: isFresh
-    )
-}
-
 struct UsageDetailsModel {
     let status: String
     let lastRefresh: String
@@ -359,6 +211,10 @@ struct UsageDetailsModel {
     /// flagged this process as the first-launch baseline source (TODAY-11 /
     /// D-13 / D-14). Never persisted.
     let isFirstLaunchBaseline: Bool
+    /// Pace caption under the 5h row (spec §8.3). nil when no live window.
+    let fiveHourPaceText: String?
+    /// Pace caption under the weekly row. nil when no live window.
+    let weeklyPaceText: String?
 
     init(snapshot: UsageSnapshot, isFirstLaunchBaseline: Bool = false, now: Date = Date()) {
         status = Self.statusText(for: snapshot.availability)
@@ -367,6 +223,8 @@ struct UsageDetailsModel {
             UsageDetailsRow(title: L10n.shared["usage_5h"], value: Self.valueText(for: snapshot.fiveHour, now: now, format: .compact)),
             UsageDetailsRow(title: L10n.shared["usage_week"], value: Self.valueText(for: snapshot.weekly, now: now, format: .fullDHM)),
         ]
+        fiveHourPaceText = UsagePaceRowModel(slot: snapshot.fiveHour, now: now, localized: { L10n.shared[$0] }).text
+        weeklyPaceText = UsagePaceRowModel(slot: snapshot.weekly, now: now, localized: { L10n.shared[$0] }).text
         if let today = snapshot.today,
            today.pct.isFinite,
            today.todayAllowanceOfWeek.isFinite {

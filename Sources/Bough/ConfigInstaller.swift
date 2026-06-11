@@ -630,19 +630,6 @@ struct ConfigInstaller {
     }
 
     @discardableResult
-    static func verifyClaudeCodeStatusLinePathDrift() -> Bool {
-        guard let bundledBridgePath = bundledClaudeCodeStatusLineBridgePath() else { return false }
-        guard installStableClaudeCodeStatusLineBridge(from: bundledBridgePath, to: claudeCodeStatusLineStableBridgePath, fm: .default) else {
-            return false
-        }
-        return verifyClaudeCodeStatusLinePathDrift(
-            fm: FileManager.default,
-            settingsPath: claudeSettingsPath,
-            proposedBridgePath: claudeCodeStatusLineStableBridgePath
-        )
-    }
-
-    @discardableResult
     static func uninstallClaudeCodeStatusLine() -> Bool {
         let ok = uninstallClaudeCodeStatusLine(
             fm: FileManager.default,
@@ -752,18 +739,6 @@ struct ConfigInstaller {
             fm: FileManager.default,
             settingsPath: settingsPath,
             proposedBridgePath: stableBridgePath
-        )
-    }
-
-    @discardableResult
-    static func testVerifyClaudeCodeStatusLinePathDrift(
-        settingsPath: String,
-        proposedBridgePath: String
-    ) -> Bool {
-        verifyClaudeCodeStatusLinePathDrift(
-            fm: FileManager.default,
-            settingsPath: settingsPath,
-            proposedBridgePath: proposedBridgePath
         )
     }
 
@@ -2204,27 +2179,6 @@ struct ConfigInstaller {
               let statusLine = root["statusLine"] as? [String: Any]
         else { return nil }
         return statusLine["command"] as? String
-    }
-
-    private static func verifyClaudeCodeStatusLinePathDrift(
-        fm: FileManager,
-        settingsPath: String,
-        proposedBridgePath: String
-    ) -> Bool {
-        guard let current = currentClaudeCodeStatusLineCommand(fm: fm, settingsPath: settingsPath),
-              current != proposedBridgePath,
-              isOldBoughStatusLineBridgePath(current)
-        else { return false }
-
-        if case .installed = installClaudeCodeStatusLine(
-            replaceExisting: true,
-            fm: fm,
-            settingsPath: settingsPath,
-            proposedBridgePath: proposedBridgePath
-        ) {
-            return true
-        }
-        return false
     }
 
     private static func uninstallClaudeCodeStatusLine(

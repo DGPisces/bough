@@ -10,15 +10,6 @@ struct UsagePage: View {
     private var codexHooksDisabledNoticeDismissed = false
     @State private var thresholdNotificationsEnabled = false
     @State private var codexHooksDisabled = ConfigInstaller.codexHooksFeatureDisabled()
-    @State private var claudeStatusLineConnectivity = ClaudeCodeStatusLineConnectivityModel(
-        fileExists: false,
-        payloadValid: false,
-        isFresh: nil
-    )
-    /// Inline feedback row under the refresh button. nil suppresses the row.
-    /// Currently cleared on refresh/tool change; the OAuth channel badge work
-    /// (later task) will repopulate it with channel status.
-    @State private var refreshFeedback: String?
     /// Dismissal state for the Codex CLI outdated banner. Not @AppStorage because the key
     /// depends on the detected version at runtime (D-12). Synced from UserDefaults on appear.
     @State private var codexCLIOutdatedDismissed = false
@@ -72,10 +63,6 @@ struct UsagePage: View {
             },
             localized: { l10n[$0] }
         )
-        let claudeConnectivity = selectedDisplayTool == .claudeCode
-            ? claudeStatusLineConnectivity
-            : nil
-
         Form {
             if codexNotice.showsBanner {
                 Section {
@@ -162,32 +149,30 @@ struct UsagePage: View {
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
                         }
-                        // QUOTA-04: three-state hook connectivity indicator for Claude Code.
-                        if selectedDisplayTool == .claudeCode, let claudeConnectivity {
-                            Circle()
-                                .fill(connectivityColor(for: claudeConnectivity.state))
-                                .frame(width: 8, height: 8)
-                            Text(connectivityBadgeKey(for: claudeConnectivity.state))
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                        }
+                        // Direct-OAuth channel badge for the selected tool (spec §9).
+                        let badge = UsageOAuthBadgeModel(
+                            status: selectedDisplayTool == .codex
+                                ? usageStore.codexOAuthStatus
+                                : usageStore.claudeOAuthStatus,
+                            localized: { l10n[$0] }
+                        )
+                        Circle()
+                            .fill(badgeColor(for: badge.tone))
+                            .frame(width: 8, height: 8)
+                        Text(badge.text)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
                         Spacer()
                         Button(l10n["refresh"]) {
                             // Unified refresh: both providers route through the
                             // page action, which forces a direct-OAuth refresh
                             // of every enabled channel.
-                            refreshFeedback = nil
                             pageActions.refresh()
                         }
                         .id(SettingsTargetID.usageRefresh)
                         .settingsControlHighlight(
                             isHighlighted: highlightedTargetID == .usageRefresh
                         )
-                    }
-                    if let refreshFeedback {
-                        Text(refreshFeedback)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
                 } else {
                     Text(l10n["usage_provider_disabled_empty"])
@@ -275,33 +260,12 @@ struct UsagePage: View {
             #endif
         }
         .formStyle(.grouped)
-        .onReceive(NotificationCenter.default.publisher(
-            for: SettingsNotification.claudeCodeStatusLineDidChange
-        )) { _ in
-            refreshClaudeCodeStatusLineConnectivity()
-        }
-        .onChange(of: selectedDisplayTool) { _, newTool in
-            refreshFeedback = nil
-            if newTool == .claudeCode {
-                refreshClaudeCodeStatusLineConnectivity()
-            }
-        }
         .onAppear {
             appState.setUsageRefreshActivity(.active)
             usageMonitorStatus = usageMonitorService.refreshStatus()
             refreshNotificationPermissionState()
             thresholdNotificationsEnabled = usageStore.thresholdNotificationsMasterEnabled()
             codexHooksDisabled = ConfigInstaller.codexHooksFeatureDisabled()
-            refreshClaudeCodeStatusLineConnectivity()
-            // Regression guard: the path-drift notice and the
-            // chain-auto-install banner both lived in the deleted Section's
-            // `statusLineNotice` slot. The drift repair itself still runs
-            // (verifyClaudeCodeStatusLinePathDrift is called from
-            // AppDelegate at launch), and the pendingClaudeCodeChainBanner
-            // UserDefault is now orphaned but harmless. The notification
-            // listener above keeps the data-source row in sync after the
-            // first-launch install completes.
-            _ = ConfigInstaller.verifyClaudeCodeStatusLinePathDrift()
             // Detect Codex CLI version off the main thread (subprocess spawn).
             // On completion, update @State so body re-renders reactively (WR-01, WR-03).
             // Sync CLI-outdated dismissal AFTER version is known so the key is stable
@@ -407,10 +371,6 @@ struct UsagePage: View {
         }
     }
 
-    private func refreshClaudeCodeStatusLineConnectivity() {
-        claudeStatusLineConnectivity = evaluateClaudeCodeStatusLineConnectivity()
-    }
-
     private func label(for tool: UsageTool) -> String {
         switch tool {
         case .codex:
@@ -420,21 +380,12 @@ struct UsagePage: View {
         }
     }
 
-    // QUOTA-04: connectivity indicator color mapping (mirrors NotchPanelView.swift exact values).
-    private func connectivityColor(for state: ClaudeCodeStatusLineConnectivityModel.ConnectivityState) -> Color {
-        switch state {
-        case .connected: return Color(red: 0.32, green: 0.78, blue: 0.42)
-        case .warning:   return Color(red: 0.91, green: 0.612, blue: 0.227)
-        case .absent:    return .white.opacity(0.35)
-        }
-    }
-
-    // QUOTA-04: badge text key for each connectivity state.
-    private func connectivityBadgeKey(for state: ClaudeCodeStatusLineConnectivityModel.ConnectivityState) -> String {
-        switch state {
-        case .connected: return l10n["usage_claude_code_hook_connected_badge"]
-        case .warning:   return l10n["usage_claude_code_hook_warning_badge"]
-        case .absent:    return l10n["usage_claude_code_hook_absent_badge"]
+    // OAuth channel badge color mapping (mirrors NotchPanelView.swift exact values).
+    private func badgeColor(for tone: UsageOAuthBadgeModel.Tone) -> Color {
+        switch tone {
+        case .ok:      return Color(red: 0.32, green: 0.78, blue: 0.42)
+        case .warning: return Color(red: 0.91, green: 0.612, blue: 0.227)
+        case .off:     return .white.opacity(0.35)
         }
     }
 }
@@ -507,6 +458,18 @@ private struct UsageDetailsSection: View {
         Section(l10n["usage"]) {
             ForEach(model.rows, id: \.title) { row in
                 LabeledContent(row.title, value: row.value)
+            }
+            // Spec §8.3: pace captions under the window rows. Same 11pt
+            // secondary typography as the Today subtree below.
+            if let fiveHourPace = model.fiveHourPaceText {
+                Text("\(l10n["usage_pace_5h_row"]): \(fiveHourPace)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            if let weeklyPace = model.weeklyPaceText {
+                Text("\(l10n["usage_pace_week_row"]): \(weeklyPace)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
             LabeledContent(l10n["last_refresh"], value: model.lastRefresh)
             // TODAY-16: Today row + two-line subtree. The subtree literals are

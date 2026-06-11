@@ -149,17 +149,19 @@ final class L10nTests: XCTestCase {
             "usage_codex_cli_outdated_upgrade_now", "usage_codex_cli_outdated_dismiss",
             "usage_provider_disabled_empty", "usage_provider_controls_section",
             "usage_provider_display_toggle", "usage_provider_statistics_toggle",
-            "usage_claude_hook-not-installed", "usage_claude_hook-installed-not-triggered",
             "usage_claude_payload-missing-rate-limits", "usage_claude_parse-failure",
             "usage_claude_stale",
             // Direct-OAuth usage channel failures (spec §9)
             "usage_oauth_no_credentials", "usage_oauth_token_expired",
             "usage_oauth_keychain_denied", "usage_oauth_rate_limited",
             "usage_oauth_unauthorized",
+            // Direct-OAuth channel badge + pace rows (spec §8.3 / §9)
+            "usage_oauth_badge_connected", "usage_oauth_badge_unknown",
+            "usage_pace_on_track", "usage_pace_ahead_fmt", "usage_pace_behind_fmt",
+            "usage_pace_lasts", "usage_pace_eta_fmt",
+            "usage_pace_5h_row", "usage_pace_week_row",
             // Claude Code hook convergence (QUOTA-04, QUOTA-05 — plan 17-05)
-            "usage_claude_code_hook_connected_badge", "usage_claude_code_hook_warning_badge",
-            "usage_claude_code_hook_absent_badge", "usage_claude_code_hook_retry",
-            "usage_claude_code_hook_section",
+            "usage_claude_code_hook_retry", "usage_claude_code_hook_section",
             "usage_claude_integration_subtitle", "usage_claude_integration_install_failed", "usage_claude_refresh_succeeded", "usage_claude_refresh_failed",
             "usage_monitor_section", "usage_monitor_status",
             "usage_monitor_state_installed", "usage_monitor_state_running", "usage_monitor_state_stopped",

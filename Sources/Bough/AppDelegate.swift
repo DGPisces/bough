@@ -396,9 +396,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if !repaired.isEmpty {
                 Self.log.info("Auto-repaired hooks for: \(repaired.joined(separator: ", "))")
             }
-            // PERSIST-04: repair stale bundle-container paths in ~/.claude/settings.json after update.
-            guard CodingSessionsSettings.isEnabled() else { return }
-            ConfigInstaller.verifyClaudeCodeStatusLinePathDrift()
         }
     }
 
