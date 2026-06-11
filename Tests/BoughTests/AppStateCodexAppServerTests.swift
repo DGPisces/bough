@@ -109,7 +109,9 @@ final class AppStateCodexAppServerTests: XCTestCase {
         XCTAssertEqual(snapshot.status, .waitingApproval)
     }
 
-    func testUsageNotificationRoutesToUsageStore() async throws {
+    func testWatcherDoesNotWireRateLimitsHandler() async throws {
+        // Usage decoupling (spec §9): the OAuth channels own usage refresh;
+        // the app-server watcher manages ONLY the session-monitoring client.
         let state = AppState()
         let transport = FakeCodexAppServerTransport()
         state.codexAppServerTransportFactory = { _ in transport }
@@ -118,42 +120,13 @@ final class AppStateCodexAppServerTests: XCTestCase {
         await Task.yield()
 
         let service = try XCTUnwrap(state.codexAppServerService)
-        XCTAssertNotNil(service.onRateLimitsUpdated)
-        let notificationExpectation = expectation(description: "usage notification callback receives route")
-        var observedMessage = false
-        let priorRateLimitHandler = service.onRateLimitsUpdated
-        service.onRateLimitsUpdated = { message in
-            observedMessage = true
-            priorRateLimitHandler?(message)
-            notificationExpectation.fulfill()
-        }
-
-        let message = try parse(
-            #"{"method":"account/rateLimits/updated","params":{"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":10,"windowDurationMins":300,"resetsAt":2000000000},"secondary":{"usedPercent":20,"windowDurationMins":10080,"resetsAt":2000000000},"planType":"prolite"}}}}"#
-        )
-        XCTAssertNotNil(CodexRateLimitParser.parse(message: message, receivedAt: Date()))
-
-        transport.deliver(message)
-        await Task.yield()
-        await Task.yield()
-        await fulfillment(of: [notificationExpectation], timeout: 1)
-        await Task.yield()
-        for _ in 0..<10 {
-            if observedMessage { break }
-            await Task.yield()
-        }
-
-        XCTAssertTrue(observedMessage)
-
-        let snapshot = state.usageStore.snapshot(for: .codex)
-        XCTAssertEqual(snapshot.fiveHour.availableOrStaleSnapshot?.usedPercent, 10)
-        XCTAssertEqual(snapshot.weekly.availableOrStaleSnapshot?.usedPercent, 20)
-        XCTAssertEqual(snapshot.availability, .available)
+        XCTAssertNil(service.onRateLimitsUpdated)
+        XCTAssertNotNil(service.onThreadNotification)
 
         state.stopCodexAppServerClientForTesting()
     }
 
-    func testServiceExitRemovesCodexAppServerSessionsAndStopsUsageLoop() async throws {
+    func testServiceExitRemovesCodexAppServerSessions() async throws {
         let state = AppState()
         var codexSession = SessionSnapshot(startTime: Date())
         codexSession.source = AppState.codexAppBundleId
@@ -181,12 +154,10 @@ final class AppStateCodexAppServerTests: XCTestCase {
         XCTAssertNil(state.codexAppServerService)
         XCTAssertNil(state.sessions["codexapp:thread-1"])
         XCTAssertNotNil(state.sessions["other:thread"])
-        XCTAssertEqual(state.usageStore.snapshot(for: .codex).availability, .unavailable(reason: "Codex app-server unavailable"))
         XCTAssertEqual(callbackCount, 1)
 
         state.stopCodexAppServerClientForTesting()
         XCTAssertNil(state.codexAppServerService)
-        XCTAssertEqual(state.usageStore.snapshot(for: .codex).availability, .unavailable(reason: "Codex app-server unavailable"))
         XCTAssertNotNil(state.sessions["other:thread"])
     }
 
@@ -390,22 +361,22 @@ final class AppStateCodexAppServerTests: XCTestCase {
         XCTAssertEqual(state.activeSessionId, "local:1")
     }
 
-    func testMissingExecutableStartsUsageRefreshLoopWithNilReader() {
+    func testMissingExecutableDoesNotStartService() {
+        // Usage decoupling: a missing app-server binary no longer touches the
+        // usage snapshots — the OAuth channels keep refreshing independently.
         let state = AppState()
         state.codexAppServerExecutablePath = "/tmp/\(UUID().uuidString)"
         state.startCodexAppServerClientIfPossibleForTesting()
 
         XCTAssertNil(state.codexAppServerService)
-        XCTAssertEqual(state.usageStore.snapshot(for: .codex).availability, .unavailable(reason: "Codex app-server unavailable"))
     }
 
-    func testWatcherMarksCodexUnavailableWhenCodexIsNotRunningAtStartup() {
+    func testWatcherWithoutRunningCodexDoesNotStartService() {
         let state = AppState()
         state.codexAppServerRunningApplicationProvider = { false }
         state.startCodexAppServerWatcher()
 
         XCTAssertNil(state.codexAppServerService)
-        XCTAssertEqual(state.usageStore.snapshot(for: .codex).availability, .unavailable(reason: "Codex app-server unavailable"))
 
         state.stopCodexAppServerWatcher()
     }
@@ -423,9 +394,6 @@ final class AppStateCodexAppServerTests: XCTestCase {
         XCTAssertNil(state.usageStore.snapshots[.codex])
     }
 
-    private func parse(_ json: String) throws -> CodexJSONRPCMessage {
-        try XCTUnwrap(CodexAppServerClient.parseMessage(Data(json.utf8)))
-    }
 }
 
 private final class FakeCodexAppServerTransport: CodexAppServerTransport {
@@ -457,15 +425,4 @@ private final class FakeCodexAppServerTransport: CodexAppServerTransport {
     }
     func deliver(_ message: CodexJSONRPCMessage) { onMessage?(message) }
     func exit(status: Int32) { onExit?(status) }
-}
-
-private extension UsageWindowSlot {
-    var availableOrStaleSnapshot: UsageWindowSnapshot? {
-        switch self {
-        case .available(let snapshot), .stale(let snapshot, _):
-            return snapshot
-        default:
-            return nil
-        }
-    }
 }

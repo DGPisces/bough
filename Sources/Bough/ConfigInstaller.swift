@@ -262,26 +262,6 @@ struct ConfigInstaller {
         case chained(prevCmd: String, wrapperPath: String)
     }
 
-    /// Phase 21 / D-06 first-launch auto-install gate outcome.
-    /// `.proceed` triggers the chain-aware install; any other case shortcircuits.
-    /// Order matters and is asserted by the gate tests — `.skipFlagSet` precedes
-    /// `.skipNoSettings` so a flagged machine never re-stats the disk.
-    ///
-    /// `.deferTransient` is a NON-terminal skip (WR-01): the caller MUST NOT set
-    /// the one-shot UserDefaults flag from this branch, so the gate retries on
-    /// next launch. It is reserved for genuinely retryable failures inside Bough
-    /// itself (e.g. Bundle.appModule.url(...) returns nil during a re-install
-    /// while Finder is indexing). All other `.skip*` cases are terminal and the
-    /// caller sets the flag to honor the one-shot guarantee (T-21-12).
-    enum AutoInstallGateDecision: Equatable {
-        case skipFlagSet
-        case skipNoSettings
-        case skipBoughBridge
-        case skipBoughWrapper
-        case deferTransient(reason: String)
-        case proceed
-    }
-
     // Legacy paths for migration cleanup (#32)
     private static let legacyBridgePath = NSHomeDirectory() + "/.claude/hooks/bough-bridge"
     private static let legacyHookScriptPath = NSHomeDirectory() + "/.claude/hooks/bough-hook.sh"
@@ -615,10 +595,10 @@ struct ConfigInstaller {
         return isBoughStatusLineBridgePath(command)
     }
 
-    static func boughClaudeCodeStatusLineIsInstalled(settingsPath: String, fm: FileManager = .default) -> Bool {
-        isBoughClaudeCodeStatusLineCommand(currentClaudeCodeStatusLineCommand(settingsPath: settingsPath, fm: fm))
-    }
-
+    // Retained for migration tests: retirement reuses the uninstall/restore half.
+    // No production caller installs the statusLine anymore (spec §7) — the
+    // install→uninstall round-trip tests validate the restore logic that
+    // `retireClaudeCodeStatusLineIfInstalled` depends on.
     @discardableResult
     static func installClaudeCodeStatusLine(replaceExisting: Bool = false) -> ClaudeCodeStatusLineInstallResult {
         guard let bundledBridgePath = bundledClaudeCodeStatusLineBridgePath() else {
@@ -650,19 +630,6 @@ struct ConfigInstaller {
     }
 
     @discardableResult
-    static func verifyClaudeCodeStatusLinePathDrift() -> Bool {
-        guard let bundledBridgePath = bundledClaudeCodeStatusLineBridgePath() else { return false }
-        guard installStableClaudeCodeStatusLineBridge(from: bundledBridgePath, to: claudeCodeStatusLineStableBridgePath, fm: .default) else {
-            return false
-        }
-        return verifyClaudeCodeStatusLinePathDrift(
-            fm: FileManager.default,
-            settingsPath: claudeSettingsPath,
-            proposedBridgePath: claudeCodeStatusLineStableBridgePath
-        )
-    }
-
-    @discardableResult
     static func uninstallClaudeCodeStatusLine() -> Bool {
         let ok = uninstallClaudeCodeStatusLine(
             fm: FileManager.default,
@@ -683,73 +650,56 @@ struct ConfigInstaller {
         return ok
     }
 
-    /// Phase 21 / D-06: evaluates the first-launch chain auto-install gate.
-    /// Public surface called by AppDelegate.applicationDidFinishLaunching with the
-    /// UserDefaults flag value already loaded. Pure function — no side effects;
-    /// `hasAttemptedFlag` is INPUT, the caller is responsible for setting the flag
-    /// to true BEFORE invoking install (T-21-12 mitigation: write gate first, then
-    /// do the work). Returns `.proceed` only when all four conditions hold; any
-    /// failure shortcircuits to the corresponding `.skip*` decision so the caller
-    /// can log why.
-    static func evaluateChainAutoInstallGate(hasAttemptedFlag: Bool) -> AutoInstallGateDecision {
-        evaluateChainAutoInstallGate(
-            hasAttemptedFlag: hasAttemptedFlag,
-            bridgePathResolver: bundledClaudeCodeStatusLineBridgePath
-        )
-    }
-
-    /// Internal seam (also reached by the `testEvaluateChainAutoInstallGate_ProductionEntry`
-    /// path) so tests can simulate the bundle-resolve failure deterministically without
-    /// touching Bundle.appModule. Injecting the resolver keeps the production behaviour
-    /// identical when called with the default closure.
-    static func evaluateChainAutoInstallGate(
-        hasAttemptedFlag: Bool,
-        bridgePathResolver: () -> String?
-    ) -> AutoInstallGateDecision {
-        guard let proposed = bridgePathResolver() else {
-            // WR-01: Bough's own bundled bridge could not be resolved. This is a
-            // BOUGH-internal failure (transient FS race during a re-install, code-sign
-            // cache hiccup, etc.) — NOT evidence that the user is not a Claude Code
-            // user. Returning `.deferTransient` signals the caller that this is a
-            // retryable skip: the one-shot UserDefaults flag must NOT be set, so the
-            // next launch re-evaluates the gate and (when the bundle is back) installs
-            // for real. Previously this returned `.skipNoSettings`, which the AppDelegate
-            // converts into a permanent skip by setting the flag.
-            return .deferTransient(reason: "bundled Claude Code statusLine bridge could not be resolved")
-        }
-        return evaluateChainAutoInstallGate(
+    /// One-time upgrade migration (spec §7): if settings.json's statusLine points
+    /// at Bough's bridge/wrapper, uninstall it (restoring the user's prev_cmd via
+    /// the chain sentinel) and remove the bridge scripts from ~/.bough. Idempotent;
+    /// never touches a non-Bough statusLine.
+    @discardableResult
+    static func retireClaudeCodeStatusLineIfInstalled() -> Bool {
+        retireClaudeCodeStatusLineIfInstalled(
             fm: FileManager.default,
             settingsPath: claudeSettingsPath,
-            wrapperPath: claudeCodeStatusLineWrapperPath,
-            proposedBridgePath: proposed,
-            hasAttemptedFlag: hasAttemptedFlag
+            stableBridgePath: claudeCodeStatusLineStableBridgePath,
+            wrapperPath: claudeCodeStatusLineWrapperPath
         )
     }
 
-    /// Internal seam — pure evaluator that the AppDelegate gate and test seam both call.
-    /// Order of checks matters (and is asserted by the test cases):
-    ///   1. hasAttemptedFlag  → `.skipFlagSet`         (one-shot guarantee, T-21-12)
-    ///   2. !settingsExists   → `.skipNoSettings`      (only fire for real Claude Code users)
-    ///   3. cmd == bridgePath → `.skipBoughBridge`     (already installed directly)
-    ///   4. cmd ends with     → `.skipBoughWrapper`    (already chained — wrapper present)
-    ///   5. (default)         → `.proceed`
-    static func evaluateChainAutoInstallGate(
+    /// Parameterized seam (mirrors the uninstall seams above) so tests can drive
+    /// the retirement against temp fixtures. The zero-arg entry delegates here
+    /// with live defaults.
+    @discardableResult
+    static func retireClaudeCodeStatusLineIfInstalled(
         fm: FileManager,
         settingsPath: String,
-        wrapperPath: String,
-        proposedBridgePath: String,
-        hasAttemptedFlag: Bool
-    ) -> AutoInstallGateDecision {
-        if hasAttemptedFlag { return .skipFlagSet }
-        guard fm.fileExists(atPath: settingsPath) else { return .skipNoSettings }
+        stableBridgePath: String,
+        wrapperPath: String
+    ) -> Bool {
+        var uninstalled = false
         let current = currentClaudeCodeStatusLineCommand(fm: fm, settingsPath: settingsPath)
-        if current == proposedBridgePath
-            || current == claudeCodeStatusLineStableBridgePath
-            || current.map(isBoughStatusLineBridgePath) == true {
-            return .skipBoughBridge
+        let pointsAtBough = isBoughClaudeCodeStatusLineCommand(current)
+            || current == stableBridgePath
+            || current == wrapperPath
+        if pointsAtBough {
+            uninstalled = uninstallClaudeCodeStatusLine(
+                fm: fm,
+                settingsPath: settingsPath,
+                proposedBridgePath: stableBridgePath,
+                wrapperPath: wrapperPath
+            )
         }
-        if let current, current == wrapperPath { return .skipBoughWrapper }
-        return .proceed
+        // Only remove the scripts when settings.json no longer points at a Bough
+        // command. If uninstall refused (e.g. corrupt wrapper sentinel — the wrapper
+        // has no valid `# RESTORE:` line so the prev_cmd cannot be recovered),
+        // settings.json still references the wrapper; deleting it here would leave
+        // the user's statusLine pointing at a nonexistent file.
+        let afterCurrent = currentClaudeCodeStatusLineCommand(fm: fm, settingsPath: settingsPath)
+        let stillPointsAtBough = isBoughClaudeCodeStatusLineCommand(afterCurrent)
+            || afterCurrent == stableBridgePath
+            || afterCurrent == wrapperPath
+        guard !stillPointsAtBough else { return false }
+        try? fm.removeItem(atPath: stableBridgePath)
+        try? fm.removeItem(atPath: wrapperPath)
+        return uninstalled
     }
 
     static func testCurrentClaudeCodeStatusLineCommand(settingsPath: String) -> String? {
@@ -789,18 +739,6 @@ struct ConfigInstaller {
             fm: FileManager.default,
             settingsPath: settingsPath,
             proposedBridgePath: stableBridgePath
-        )
-    }
-
-    @discardableResult
-    static func testVerifyClaudeCodeStatusLinePathDrift(
-        settingsPath: String,
-        proposedBridgePath: String
-    ) -> Bool {
-        verifyClaudeCodeStatusLinePathDrift(
-            fm: FileManager.default,
-            settingsPath: settingsPath,
-            proposedBridgePath: proposedBridgePath
         )
     }
 
@@ -846,26 +784,6 @@ struct ConfigInstaller {
             settingsPath: settingsPath,
             proposedBridgePath: proposedBridgePath,
             wrapperPath: wrapperPath
-        )
-    }
-
-    /// Phase 21 / D-06 first-launch auto-install gate decision (test seam).
-    /// Mirrors the four-step gate logic but evaluates as a pure function so unit
-    /// tests can exhaustively cover every branch without touching ~/.claude or
-    /// UserDefaults. The decision enum lives at type scope (not inside `#if DEBUG`)
-    /// because the production AppDelegate caller also consumes it.
-    static func testEvaluateChainAutoInstallGate(
-        settingsPath: String,
-        wrapperPath: String,
-        proposedBridgePath: String,
-        hasAttemptedFlag: Bool
-    ) -> AutoInstallGateDecision {
-        evaluateChainAutoInstallGate(
-            fm: FileManager.default,
-            settingsPath: settingsPath,
-            wrapperPath: wrapperPath,
-            proposedBridgePath: proposedBridgePath,
-            hasAttemptedFlag: hasAttemptedFlag
         )
     }
 
@@ -2261,27 +2179,6 @@ struct ConfigInstaller {
               let statusLine = root["statusLine"] as? [String: Any]
         else { return nil }
         return statusLine["command"] as? String
-    }
-
-    private static func verifyClaudeCodeStatusLinePathDrift(
-        fm: FileManager,
-        settingsPath: String,
-        proposedBridgePath: String
-    ) -> Bool {
-        guard let current = currentClaudeCodeStatusLineCommand(fm: fm, settingsPath: settingsPath),
-              current != proposedBridgePath,
-              isOldBoughStatusLineBridgePath(current)
-        else { return false }
-
-        if case .installed = installClaudeCodeStatusLine(
-            replaceExisting: true,
-            fm: fm,
-            settingsPath: settingsPath,
-            proposedBridgePath: proposedBridgePath
-        ) {
-            return true
-        }
-        return false
     }
 
     private static func uninstallClaudeCodeStatusLine(

@@ -86,7 +86,17 @@ do {
         codexRateLimitReader: CodexAppServerRateLimitMonitorReader(
             executableURL: URL(fileURLWithPath: arguments.codexExecutablePath),
             timeoutSeconds: arguments.codexTimeoutSeconds
-        )
+        ),
+        claudeOAuthFetcher: ClaudeOAuthUsageClient(
+            credentialsReader: ClaudeOAuthCredentialsReader(
+                fileURLs: [
+                    ClaudeOAuthTokenMirror.fileURL(),
+                    URL(fileURLWithPath: NSHomeDirectory() + "/.claude/.credentials.json"),
+                ],
+                keychainRead: nil   // helper MUST never touch the Keychain (spec §6.2)
+            )
+        ),
+        codexOAuthFetcher: CodexOAuthUsageClient()
     )
 
     if arguments.runOnce {

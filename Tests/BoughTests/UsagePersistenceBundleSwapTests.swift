@@ -76,7 +76,6 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
         let store = UsageStore(
             defaults: defaults,
             scheduler: RecordingScheduler(),
-            monitorClaudeCode: false,
             now: { now },
             continuityStore: continuity,
             continuityWriteMode: .appOwned
@@ -126,7 +125,6 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
         let store = UsageStore(
             defaults: defaults,
             scheduler: RecordingScheduler(),
-            monitorClaudeCode: false,
             now: { now },
             continuityStore: appContinuity,
             continuityWriteMode: .helperOwned
@@ -186,7 +184,6 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
         let store = UsageStore(
             defaults: defaults,
             scheduler: RecordingScheduler(),
-            monitorClaudeCode: false,
             now: { now },
             continuityStore: continuity,
             continuityWriteMode: .appOwned
@@ -233,7 +230,6 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
         let store = UsageStore(
             defaults: defaults,
             scheduler: RecordingScheduler(),
-            monitorClaudeCode: false,
             now: { now },
             continuityStore: appContinuity,
             continuityWriteMode: .helperOwned
@@ -262,7 +258,6 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
         let store = UsageStore(
             defaults: defaults,
             scheduler: RecordingScheduler(),
-            monitorClaudeCode: false,
             now: { now },
             continuityStore: continuity,
             continuityWriteMode: .appOwned
@@ -296,7 +291,6 @@ final class UsagePersistenceBundleSwapTests: XCTestCase {
         let store = UsageStore(
             defaults: defaults,
             scheduler: RecordingScheduler(),
-            monitorClaudeCode: false,
             now: { now },
             continuityStore: continuity,
             continuityWriteMode: .appOwned

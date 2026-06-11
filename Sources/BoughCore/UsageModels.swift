@@ -118,8 +118,9 @@ public struct TodayBasis: Equatable, Sendable {
     public let localDate: String
     /// `weekly.usedPercent` at the moment of baseline capture (locked at midnight).
     public let weeklyUsedAtDayStart: Double
-    /// `weekly.usedPercent` at the most recent tick (post-reset value in the
-    /// cross-reset-within-today case, TODAY-09).
+    /// `weekly.usedPercent` at the most recent tick (post-reset value when the
+    /// weekly reset fired today, TODAY-09 — the baseline is re-locked at the
+    /// reset, so the delta from baseline stays today's usage).
     public let weeklyUsedNow: Double
     /// Allowance for today as a percentage of the weekly window — locked at the
     /// local-midnight snapshot.
@@ -127,9 +128,9 @@ public struct TodayBasis: Equatable, Sendable {
     /// Whole-day count from local-day-start(now) to local-day-start(resetsAt),
     /// clamped to `>= 1.0` (bounded sentinel, not a fallback).
     public let daysRemainingUntilWeeklyReset: Double
-    /// True when today's weekly reset has already fired today (pre-reset segment
-    /// was burned, post-reset is being accumulated against the locked allowance).
-    /// Drives the cross-reset segment math in `UsageForecastCalculator.forecast`.
+    /// True when today's weekly reset has already fired today. Display /
+    /// telemetry only (spec §8.1) — the accumulator re-locks the baseline at
+    /// the reset, so the calculator no longer does cross-reset segment math.
     public let weeklyResetAlreadyFiredToday: Bool
     /// Transient Phase 23 reset provenance for the accepted sample that produced
     /// this Today value. Not persisted to `usage-daily.json`.
@@ -260,6 +261,52 @@ public extension UsageSnapshot {
     }
 }
 
+/// Shared weekly-reset detector (spec §8.1/§8.2). Used by both the calculator
+/// (provenance annotation) and the accumulator (allowance re-lock).
+public enum UsageResetEvaluator {
+    public static let resetBucketSeconds: TimeInterval = 300
+    public static let defaultTolerancePercent: Double = 2.0
+
+    /// 5-minute bucket normalization (CodexBar parity) so server-side
+    /// `resets_at` jitter cannot fake a moved boundary.
+    public static func normalizedResetBucket(_ date: Date) -> Date {
+        let bucket = (date.timeIntervalSince1970 / resetBucketSeconds).rounded(.down) * resetBucketSeconds
+        return Date(timeIntervalSince1970: bucket)
+    }
+
+    /// Stable ID for one reset interval; used for re-lock idempotency.
+    public static func resetIntervalID(for resetsAt: Date) -> String {
+        String(Int(normalizedResetBucket(resetsAt).timeIntervalSince1970))
+    }
+
+    public static func evaluate(
+        weekly: UsageWindowSnapshot,
+        priorWeekly: UsageWindowSnapshot?,
+        now: Date,
+        tolerancePercent: Double = UsageResetEvaluator.defaultTolerancePercent
+    ) -> (provenance: UsageResetProvenance, metadata: UsageResetSampleMetadata?) {
+        guard let priorWeekly else { return (.ordinaryProgress, nil) }
+        let drop = priorWeekly.usedPercent - weekly.usedPercent
+        guard drop > 0 else { return (.ordinaryProgress, nil) }
+
+        let metadata = UsageResetSampleMetadata(
+            priorUsedPercent: priorWeekly.usedPercent,
+            currentUsedPercent: weekly.usedPercent,
+            priorResetsAt: priorWeekly.resetsAt,
+            currentResetsAt: weekly.resetsAt,
+            dropPercent: drop,
+            tolerancePercent: tolerancePercent
+        )
+        let boundaryMovedForward =
+            normalizedResetBucket(weekly.resetsAt) > normalizedResetBucket(priorWeekly.resetsAt)
+        guard drop > tolerancePercent, boundaryMovedForward else {
+            return (.correctionIgnored, metadata)
+        }
+        if priorWeekly.resetsAt <= now { return (.explicitReset, metadata) }
+        return (.implicitReset, metadata)
+    }
+}
+
 /// Pure computation of the A3' daily-allowance Today value (D-09).
 ///
 /// The accumulator (plan 05-01) owns baseline lifecycle (cross-midnight, TZ
@@ -271,9 +318,9 @@ public extension UsageSnapshot {
 ///   (carried on `baseline.todayAllowanceOfWeek`).
 /// - TODAY-06: `pct = 100` at day-start, decreasing to 0 at exhaustion and
 ///   negative for overdraft — no clamp on the upper or lower bound.
-/// - TODAY-09: when `weekly.resetsAt` already fired today, `today_used`
-///   absorbs the pre-reset segment via `(100 - baseline.weeklyUsedAtDayStart)`
-///   plus the post-reset `weekly.usedPercent` (D-05).
+/// - TODAY-09 / spec §8.1: when the weekly reset fires today, the accumulator
+///   re-locks the baseline against the NEW week budget, so `today_used` is
+///   always the delta from the (possibly re-locked) baseline.
 /// - TODAY-12: `pct` can be negative, e.g. `-40%`, with no clamp.
 /// - TODAY-13: severity remap follows D-05's `healthy / caution / depleted /
 ///   overdraft` thresholds; `.unknown` is reserved for the `forecast == nil`
@@ -363,7 +410,7 @@ public enum UsageForecastCalculator {
             )
         }
 
-        let resetEvaluation = Self.resetEvaluation(
+        let resetEvaluation = UsageResetEvaluator.evaluate(
             weekly: weekly,
             priorWeekly: priorWeekly,
             now: now
@@ -371,18 +418,10 @@ public enum UsageForecastCalculator {
         let weeklyResetAlreadyFired = resetEvaluation.provenance == .explicitReset
             || resetEvaluation.provenance == .implicitReset
 
-        let todayUsed: Double
-        if weeklyResetAlreadyFired {
-            // Pre-reset segment burned everything from baseline.weeklyUsedAtDayStart
-            // up to 100; post-reset segment has burned weekly.usedPercent so far.
-            // (TODAY-09 / D-05). Clamp to >= 0 below as a bounded sentinel.
-            todayUsed = max(0, (100.0 - baseline.weeklyUsedAtDayStart) + weekly.usedPercent)
-        } else {
-            // Same-week-window path: today_used is the delta from baseline.
-            // Clamp negative values to 0 (bounded sentinel — happens when a
-            // tick produces a slight usedPercent drop due to provider rounding).
-            todayUsed = max(0, weekly.usedPercent - baseline.weeklyUsedAtDayStart)
-        }
+        // Post-reset segment math is gone: the accumulator re-locks the baseline at
+        // the reset (spec §8.1), so the delta from baseline IS today's usage.
+        // weeklyResetAlreadyFired is kept on the basis purely as display/telemetry.
+        let todayUsed = max(0, weekly.usedPercent - baseline.weeklyUsedAtDayStart)
 
         let todayAllowance = baseline.todayAllowanceOfWeek
         // Defensive: if the persisted allowance is zero (shouldn't happen — the
@@ -443,42 +482,6 @@ public enum UsageForecastCalculator {
     ) -> Double {
         let remaining = max(0.0, 100.0 - weekly.usedPercent)
         return remaining / daysRemaining
-    }
-
-    private static func resetEvaluation(
-        weekly: UsageWindowSnapshot,
-        priorWeekly: UsageWindowSnapshot?,
-        now: Date,
-        tolerancePercent: Double = 2.0
-    ) -> (provenance: UsageResetProvenance, metadata: UsageResetSampleMetadata?) {
-        guard let priorWeekly else {
-            return (.ordinaryProgress, nil)
-        }
-
-        let drop = priorWeekly.usedPercent - weekly.usedPercent
-        guard drop > 0 else {
-            return (.ordinaryProgress, nil)
-        }
-
-        let metadata = UsageResetSampleMetadata(
-            priorUsedPercent: priorWeekly.usedPercent,
-            currentUsedPercent: weekly.usedPercent,
-            priorResetsAt: priorWeekly.resetsAt,
-            currentResetsAt: weekly.resetsAt,
-            dropPercent: drop,
-            tolerancePercent: tolerancePercent
-        )
-
-        let resetBoundaryMovedForward = weekly.resetsAt > priorWeekly.resetsAt
-        guard drop > tolerancePercent, resetBoundaryMovedForward else {
-            return (.correctionIgnored, metadata)
-        }
-
-        if priorWeekly.resetsAt <= now {
-            return (.explicitReset, metadata)
-        }
-
-        return (.implicitReset, metadata)
     }
 
     /// Mirror of `UsageDailyAccumulator.daysRemainingUntilWeeklyReset` (same

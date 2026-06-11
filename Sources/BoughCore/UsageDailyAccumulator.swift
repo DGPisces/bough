@@ -22,6 +22,14 @@ public struct DailyBaseline: Codable, Equatable, Sendable {
     public var timeZoneIdentifier: String
     /// Wall-clock instant the baseline was captured.
     public var capturedAt: Date
+    /// Reset-interval bucket (UsageResetEvaluator.resetIntervalID) of the last
+    /// weekly reset this baseline was re-locked for (spec §8.1). Best-effort
+    /// idempotency: persisted only in usage-daily.json — a process that boots
+    /// through the SQLite daily_state restore path loses the marker and may
+    /// re-lock the same reset once more. That duplicate is a value-level no-op
+    /// (both writers lock at the live post-reset used%), so no drift accumulates.
+    /// Optional → old usage-daily.json decodes with nil; no migration.
+    public var lastHandledResetIntervalID: String?
 
     public init(
         tool: UsageTool,
@@ -29,7 +37,8 @@ public struct DailyBaseline: Codable, Equatable, Sendable {
         weeklyUsedAtDayStart: Double,
         todayAllowanceOfWeek: Double,
         timeZoneIdentifier: String,
-        capturedAt: Date
+        capturedAt: Date,
+        lastHandledResetIntervalID: String? = nil
     ) {
         self.tool = tool
         self.localDate = localDate
@@ -37,6 +46,7 @@ public struct DailyBaseline: Codable, Equatable, Sendable {
         self.todayAllowanceOfWeek = todayAllowanceOfWeek
         self.timeZoneIdentifier = timeZoneIdentifier
         self.capturedAt = capturedAt
+        self.lastHandledResetIntervalID = lastHandledResetIntervalID
     }
 }
 
@@ -74,9 +84,10 @@ public struct AtomicJSONStorage: Sendable {
 /// - TODAY-07: per-tool baseline persisted across app restart.
 /// - TODAY-08: cross-midnight rollover seeds a new baseline from the current
 ///   `weekly.usedPercent` and recomputes `todayAllowanceOfWeek`.
-/// - TODAY-09: a mid-day weekly reset is left to plan 05-02's calculator to handle
-///   via pre/post-reset segment math; the accumulator keeps the baseline keyed by
-///   `localDate` and does NOT reseed on the reset alone (D-05).
+/// - TODAY-09 / spec §8.1: a mid-day weekly reset (provenance-confirmed via
+///   `UsageResetEvaluator`) RE-LOCKS the existing baseline against the new week
+///   budget; the accumulator keeps the baseline keyed by `localDate` and does
+///   NOT reseed on the reset alone (D-05).
 /// - TODAY-10: a mid-day timezone change invalidates the existing baseline
 ///   (different `timeZoneIdentifier`) and seeds a fresh one for the new local date.
 /// - TODAY-11 / D-13 / D-14: first launch with no on-disk baseline for today's
@@ -122,7 +133,8 @@ public final class UsageDailyAccumulator {
         tool: UsageTool,
         now: Date,
         calendar: Calendar,
-        timeZone: TimeZone
+        timeZone: TimeZone,
+        priorWeekly: UsageWindowSnapshot? = nil
     ) {
         let currentLocalDate = Self.formattedYYYYMMDD(now, calendar: calendar, timeZone: timeZone)
         let existing = baselines[tool]
@@ -133,9 +145,9 @@ public final class UsageDailyAccumulator {
             // TODAY-10: different timeZoneIdentifier (mid-day TZ change) triggers a reseed
             //           keyed to the new local date.
             // TODAY-09 note: a weekly reset alone does NOT cause a reseed — the accumulator
-            //                stays keyed by localDate; the calculator handles pre/post-reset
-            //                segment math (D-05). We comment this case explicitly so future
-            //                readers do not introduce a usedPercent-drop-based reseed.
+            //                stays keyed by localDate. A provenance-confirmed reset instead
+            //                RE-LOCKS the existing baseline (spec §8.1, else-if below), so a
+            //                bare usedPercent drop must never drive a reseed.
             needsReseed = (existing.localDate != currentLocalDate)
                 || (existing.timeZoneIdentifier != timeZone.identifier)
         } else {
@@ -164,6 +176,25 @@ public final class UsageDailyAccumulator {
             baselines[tool] = fresh
             isFirstLaunchBaseline[tool] = isFirstLaunchSeed
             persist()
+        } else if let existing {
+            // Spec §8.1: a detected weekly reset re-locks today's allowance against
+            // the NEW week budget so the post-reset Today does not inherit the
+            // pre-reset (possibly tiny) allowance and report phantom overdraft.
+            let evaluation = UsageResetEvaluator.evaluate(weekly: weekly, priorWeekly: priorWeekly, now: now)
+            let resetFired = evaluation.provenance == .explicitReset || evaluation.provenance == .implicitReset
+            let intervalID = UsageResetEvaluator.resetIntervalID(for: weekly.resetsAt)
+            if resetFired, existing.lastHandledResetIntervalID != intervalID {
+                let daysRemaining = Self.daysRemainingUntilWeeklyReset(
+                    weekly: weekly, now: now, calendar: calendar, timeZone: timeZone)
+                let remainingBudget = max(0.0, 100.0 - weekly.usedPercent)
+                var relocked = existing
+                relocked.weeklyUsedAtDayStart = weekly.usedPercent
+                relocked.todayAllowanceOfWeek = remainingBudget / daysRemaining
+                relocked.capturedAt = now
+                relocked.lastHandledResetIntervalID = intervalID
+                baselines[tool] = relocked
+                persist()
+            }
         }
         // else: baseline is still valid for the current (tool, localDate, timeZone) —
         // preserve it unchanged and avoid an unnecessary disk write.

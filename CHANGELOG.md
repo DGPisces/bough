@@ -2,6 +2,38 @@
 
 All notable changes to Bough are documented here.
 
+## [Unreleased]
+
+### English
+
+OAuth usage channels: direct API reads for Claude Code and Codex, statusLine retirement, and pace forecasting.
+
+**Changed:**
+
+- Usage now reads Claude Code and Codex rate limits directly from the official OAuth usage APIs. Data stays accurate and timely even when the CLIs / desktop apps are not running, and the Today baseline locks within minutes of midnight.
+- The Claude Code statusLine wrapper is retired: on first launch after upgrade Bough silently restores your previous statusLine configuration. `~/.bough/claude-usage.json` is now written by Bough itself for the background monitor.
+- Today re-locks the daily allowance when a weekly reset (on-time or early) is detected — no more phantom overdraft right after a reset. Usage details gained pace rows (ahead/behind linear pace, projected run-out).
+
+**Notes:**
+
+- First Claude usage fetch may show a one-time macOS Keychain prompt for "Claude Code-credentials" — choose "Always Allow". Denying falls back to an explanatory unavailable state; everything else keeps working.
+- With the background monitor enabled, Bough mirrors the Claude access token (never the refresh token) to `~/.bough/claude-oauth-credentials.json` (0600) so sampling continues while the app is closed; the file is deleted when the monitor is disabled or uninstalled.
+
+### 简体中文
+
+OAuth 用量通道：直接读取 Claude Code 和 Codex 的 API、退役 statusLine wrapper 及节奏预测。
+
+**变更：**
+
+- 用量现在直接通过官方 OAuth 用量 API 读取 Claude Code 和 Codex 的配额限制。即使 CLI / 桌面应用未运行，数据也能保持准确及时；当日基准在午夜后数分钟内锁定。
+- Claude Code statusLine wrapper 已退役：升级后首次启动时，Bough 会静默恢复你此前的 statusLine 配置。`~/.bough/claude-usage.json` 现在由 Bough 自身写入，供后台监控使用。
+- 检测到每周配额重置（准时或提前）时，当日配额会重新锁定，彻底消除重置后的幻影透支。用量详情新增节奏行（超前/落后线性进度、预计耗尽时间）。
+
+**说明：**
+
+- 首次获取 Claude 用量时，可能会出现一次性的 macOS Keychain 提示，请求访问"Claude Code-credentials"——请选择"始终允许"。拒绝后会回退到说明性的不可用状态，其他功能不受影响。
+- 启用后台监控后，Bough 会将 Claude access token（不包括 refresh token）镜像到 `~/.bough/claude-oauth-credentials.json`（权限 0600），以便应用关闭时仍能持续采样；禁用监控或卸载应用时，该文件会被删除。
+
 ## [v1.0.6] - 2026-06-10
 
 ### English

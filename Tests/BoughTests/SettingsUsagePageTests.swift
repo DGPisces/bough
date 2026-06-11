@@ -329,22 +329,20 @@ final class SettingsUsagePageTests: XCTestCase {
         XCTAssertEqual(SettingsKey.codexHooksDisabledNoticeDismissed, "codexHooksDisabledNoticeDismissed")
     }
 
-    func testUsagePageRefreshHandlesBothProviders() throws {
-        // Regression guard: the data-source refresh button is now
-        // actionable for BOTH providers. Codex routes through `pageActions.refresh`
-        // (the server reader). Claude Code re-reads ~/.bough/claude-usage.json
-        // from disk via `refreshClaudeCodeUsageFromDisk` and bumps the mutation
-        // tick so the connectivity probe re-runs. Without per-provider routing
-        // the button silently no-oped for Claude Code users.
+    func testUsagePageRefreshIsUnifiedAcrossProviders() throws {
+        // Regression guard: the data-source refresh button routes BOTH
+        // providers through the unified page action (direct-OAuth refresh of
+        // every enabled channel). The legacy per-provider disk re-read for
+        // Claude Code is gone with the statusline consumption path.
         let usagePage = try usagePageSource()
 
-        XCTAssertTrue(
+        XCTAssertFalse(
             usagePage.contains("refreshClaudeCodeUsageFromDisk"),
-            "Claude Code refresh must call refreshClaudeCodeUsageFromDisk so the @Published snapshot updates and the connectivity probe re-runs."
+            "Claude Code refresh must not re-read the statusline disk file — OAuth channels own usage refresh now."
         )
         XCTAssertTrue(
             usagePage.contains("pageActions.refresh()"),
-            "Codex refresh must still route through pageActions.refresh() (the server reader path)."
+            "Both providers must route through pageActions.refresh() (the unified OAuth refresh path)."
         )
     }
 

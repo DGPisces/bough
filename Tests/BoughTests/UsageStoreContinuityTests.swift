@@ -44,7 +44,6 @@ final class UsageStoreContinuityTests: XCTestCase {
         let first = UsageStore(
             defaults: defaults,
             scheduler: RecordingContinuityScheduler(),
-            monitorClaudeCode: false,
             now: { current },
             continuityStore: continuity
         )
@@ -55,7 +54,6 @@ final class UsageStoreContinuityTests: XCTestCase {
         let restored = UsageStore(
             defaults: defaults,
             scheduler: RecordingContinuityScheduler(),
-            monitorClaudeCode: false,
             now: { current },
             continuityStore: reopenedContinuity
         )
@@ -88,7 +86,6 @@ final class UsageStoreContinuityTests: XCTestCase {
         let store = UsageStore(
             defaults: defaults,
             scheduler: RecordingContinuityScheduler(),
-            monitorClaudeCode: false,
             now: { Date(timeIntervalSince1970: 1_100) },
             continuityStore: continuity
         )
@@ -104,7 +101,6 @@ final class UsageStoreContinuityTests: XCTestCase {
         let store = UsageStore(
             defaults: defaults,
             scheduler: RecordingContinuityScheduler(),
-            monitorClaudeCode: false,
             now: { Date(timeIntervalSince1970: 1_000) },
             continuityStore: continuity
         )
@@ -123,7 +119,6 @@ final class UsageStoreContinuityTests: XCTestCase {
         let store = UsageStore(
             defaults: defaults,
             scheduler: RecordingContinuityScheduler(),
-            monitorClaudeCode: false,
             now: { Date(timeIntervalSince1970: 1_000) },
             continuityStore: continuity,
             continuityWriteMode: .helperOwned
@@ -141,7 +136,6 @@ final class UsageStoreContinuityTests: XCTestCase {
         let store = UsageStore(
             defaults: defaults,
             scheduler: RecordingContinuityScheduler(),
-            monitorClaudeCode: false,
             now: { Date(timeIntervalSince1970: 1_000) },
             continuityStore: continuity,
             continuityWriteMode: .appOwned
@@ -158,7 +152,6 @@ final class UsageStoreContinuityTests: XCTestCase {
         let store = UsageStore(
             defaults: defaults,
             scheduler: RecordingContinuityScheduler(),
-            monitorClaudeCode: false,
             now: { current },
             continuityStore: continuity,
             continuityWriteMode: .appOwned
@@ -180,7 +173,6 @@ final class UsageStoreContinuityTests: XCTestCase {
         let store = UsageStore(
             defaults: defaults,
             scheduler: RecordingContinuityScheduler(),
-            monitorClaudeCode: false,
             now: { current },
             continuityStore: continuity,
             continuityWriteMode: .appOwned
@@ -209,7 +201,6 @@ final class UsageStoreContinuityTests: XCTestCase {
         let store = UsageStore(
             defaults: defaults,
             scheduler: RecordingContinuityScheduler(),
-            monitorClaudeCode: false,
             now: { current },
             continuityStore: continuity,
             continuityWriteMode: .helperOwned
@@ -229,7 +220,6 @@ final class UsageStoreContinuityTests: XCTestCase {
             let writer = UsageStore(
                 defaults: defaults,
                 scheduler: RecordingContinuityScheduler(),
-                monitorClaudeCode: false,
                 now: { Date(timeIntervalSince1970: 1_000) },
                 continuityStore: continuity,
                 continuityWriteMode: .appOwned
@@ -241,7 +231,6 @@ final class UsageStoreContinuityTests: XCTestCase {
         let reader = UsageStore(
             defaults: defaults,
             scheduler: RecordingContinuityScheduler(),
-            monitorClaudeCode: false,
             now: { Date(timeIntervalSince1970: 1_100) },
             continuityStore: reopenedContinuity,
             continuityWriteMode: .helperOwned

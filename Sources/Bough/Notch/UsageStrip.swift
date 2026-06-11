@@ -182,6 +182,9 @@ struct UsageStrip: View {
             )
             .padding(.horizontal, 6)
             .padding(.top, 6)
+            .onAppear {
+                appState.refreshUsageForPanelOpen()
+            }
         }
     }
 

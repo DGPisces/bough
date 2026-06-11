@@ -292,15 +292,14 @@ final class TodayValueCalculatorTests: XCTestCase {
         XCTAssertEqual(severityForPct(-0.001), .overdraft)
     }
 
-    // MARK: - Cross-reset within today (TODAY-09)
+    // MARK: - Cross-reset within today (TODAY-09 / spec §8.1)
 
-    func testCrossResetWithinToday_PrePlusPostSegmentMath() {
-        // Baseline captured this morning with weekly.usedPercent = 80 and
-        // resetsAt = today-12:00 UTC. After the reset fires, weekly.usedPercent
-        // drops to 4 (post-reset usage so far). The calculator must compute
-        // today_used = (100 - baseline.weeklyUsedAtDayStart) + post-reset used
-        //            = 20 + 4 = 24
-        // With allowance = 20, pct = ((20 - 24) / 20) * 100 = -20 → overdraft.
+    func testCrossResetWithinToday_DeltaFromBaselineNoSegmentMath() {
+        // Spec §8.1: the calculator no longer does cross-reset segment math —
+        // the accumulator re-locks the baseline at the reset. Exercising the
+        // calculator alone with a stale pre-reset baseline (80) and post-reset
+        // weekly used = 4 yields today_used = max(0, 4 - 80) = 0 → pct = 100.
+        // The provenance annotation is kept for display/telemetry.
         let postResetTick = date(2026, 5, 14, 13)
         let nextWeekReset = date(2026, 5, 21, 12)
         let b = baseline(
@@ -323,14 +322,14 @@ final class TodayValueCalculatorTests: XCTestCase {
         )
 
         XCTAssertNotNil(result)
-        XCTAssertEqual(result?.pct ?? 999, -20.0, accuracy: 0.001,
-                       "TODAY-09: today_used = (100 - weeklyUsedAtDayStart) + post-reset usedPercent")
+        XCTAssertEqual(result?.pct ?? 999, 100.0, accuracy: 0.001,
+                       "spec §8.1: today_used = max(0, used - baseline); no pre-reset segment carry-forward")
         XCTAssertEqual(result?.basis.weeklyResetAlreadyFiredToday, true)
         XCTAssertEqual(result?.basis.resetProvenance, .explicitReset)
-        XCTAssertEqual(result?.severity, .overdraft)
+        XCTAssertEqual(result?.severity, .healthy)
     }
 
-    func testImplicitResetUsesCarryForwardMathWhenDropExceedsToleranceAndBoundaryMovesForward() {
+    func testImplicitResetAnnotatedWhenDropExceedsToleranceAndBoundaryMovesForward() {
         let now = date(2026, 5, 14, 13)
         let originalReset = date(2026, 5, 16, 12)
         let nextReset = date(2026, 5, 21, 12)
@@ -352,7 +351,9 @@ final class TodayValueCalculatorTests: XCTestCase {
             timeZone: utc
         )
 
-        XCTAssertEqual(result?.pct ?? 999, -15.0, accuracy: 0.001)
+        // Spec §8.1: no carry-forward math — today_used = max(0, 5 - 82) = 0
+        // → pct = 100. Provenance still classifies the early reset as implicit.
+        XCTAssertEqual(result?.pct ?? 999, 100.0, accuracy: 0.001)
         XCTAssertEqual(result?.basis.weeklyResetAlreadyFiredToday, true)
         XCTAssertEqual(result?.basis.resetProvenance, .implicitReset)
         XCTAssertEqual(result?.basis.resetMetadata?.dropPercent ?? 0, 81.0, accuracy: 0.001)
@@ -635,6 +636,70 @@ final class TodayValueCalculatorTests: XCTestCase {
         let result = UsageForecastCalculator.forecast(
             weekly: weekly(usedPercent: 35, resetsAt: resetsAt),
             baseline: staleBaseline,
+            now: now,
+            calendar: cal,
+            timeZone: utc
+        )
+
+        XCTAssertEqual(result?.pct ?? -1, 100.0, accuracy: 0.001)
+        XCTAssertEqual(result?.severity, .healthy)
+    }
+
+    // MARK: - Reset bucket normalization (spec §8.2)
+
+    func testResetBucketNormalizationAbsorbsJitter() {
+        // 1_781_406_000 is divisible by 300, so `base` is bucket-aligned:
+        // +299s stays inside the same 5-minute bucket, +301s crosses it.
+        let base = Date(timeIntervalSince1970: 1_781_406_000)
+
+        XCTAssertEqual(
+            UsageResetEvaluator.normalizedResetBucket(base.addingTimeInterval(299)),
+            UsageResetEvaluator.normalizedResetBucket(base)
+        )
+        XCTAssertNotEqual(
+            UsageResetEvaluator.normalizedResetBucket(base.addingTimeInterval(301)),
+            UsageResetEvaluator.normalizedResetBucket(base)
+        )
+    }
+
+    func testJitteredResetBoundaryDoesNotTriggerImplicitReset() {
+        // Server-side resets_at jitter inside one 5-minute bucket must not
+        // register as a moved boundary even with a large usedPercent drop.
+        let bucketAlignedReset = Date(timeIntervalSince1970: 1_781_406_000)
+        let now = bucketAlignedReset.addingTimeInterval(-3600)
+        let priorWeekly = weekly(usedPercent: 50, resetsAt: bucketAlignedReset)
+        let currentWeekly = weekly(usedPercent: 10, resetsAt: bucketAlignedReset.addingTimeInterval(90))
+
+        let evaluation = UsageResetEvaluator.evaluate(
+            weekly: currentWeekly,
+            priorWeekly: priorWeekly,
+            now: now
+        )
+
+        XCTAssertEqual(evaluation.provenance, .correctionIgnored)
+    }
+
+    // MARK: - Re-locked baseline (spec §8.1)
+
+    func testForecastAfterRelockedBaselineStartsAtFull() {
+        // After the accumulator re-locks at a reset (weeklyUsedAtDayStart = 3,
+        // allowance recomputed against the new week), the very next forecast
+        // reports a full allowance — no phantom overdraft.
+        let now = date(2026, 5, 14, 13)
+        let resetsAt = date(2026, 5, 21, 12)
+        let relocked = DailyBaseline(
+            tool: .codex,
+            localDate: "2026-05-14",
+            weeklyUsedAtDayStart: 3,
+            todayAllowanceOfWeek: (100.0 - 3.0) / 7.0,
+            timeZoneIdentifier: utc.identifier,
+            capturedAt: now,
+            lastHandledResetIntervalID: "x"
+        )
+
+        let result = UsageForecastCalculator.forecast(
+            weekly: weekly(usedPercent: 3, resetsAt: resetsAt),
+            baseline: relocked,
             now: now,
             calendar: cal,
             timeZone: utc

@@ -25,7 +25,7 @@ final class TaskCodexAppServerSleeper: CodexAppServerSleeping {
 extension CodexAppServerClient: CodexAppServerTransport {}
 
 @MainActor
-final class CodexAppServerService: UsageRateLimitReading {
+final class CodexAppServerService {
     enum Error: Swift.Error {
         case serviceStopped
         case requestTimedOut

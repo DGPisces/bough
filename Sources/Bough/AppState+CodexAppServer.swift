@@ -50,11 +50,11 @@ extension AppState {
 
         codexAppServerObservers = observers
 
-        // Catch up with whatever state we booted into.
+        // Catch up with whatever state we booted into. Usage refresh is
+        // decoupled from the app-server (OAuth channels own it); the watcher
+        // manages only the session-monitoring client.
         if codexAppServerRunningApplicationProvider() {
             startCodexAppServerClientIfPossible()
-        } else {
-            usageStore.startCodexRefreshLoop(using: nil)
         }
     }
 
@@ -76,28 +76,18 @@ extension AppState {
         }
         guard codexAppServerService == nil else { return }
         let executableURL = URL(fileURLWithPath: codexAppServerExecutablePath)
-        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
-            usageStore.startCodexRefreshLoop(using: nil)
-            return
-        }
+        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else { return }
 
         let client = codexAppServerTransportFactory(executableURL)
         let service = CodexAppServerService(transport: client)
         service.onThreadNotification = { [weak self] message in
             Task { @MainActor in self?.handleCodexAppServerMessage(message) }
         }
-        service.onRateLimitsUpdated = { [weak self] message in
-            Task { @MainActor in
-                guard let self, self.codingSessionsEnabledProvider() else { return }
-                self.usageStore.applyCodexRateLimitMessage(message)
-            }
-        }
         service.onExit = { [weak self, weak service] in
             Task { @MainActor [weak self, weak service] in
                 guard let self, let service else { return }
                 guard self.codexAppServerService === service else { return }
                 self.codexAppServerService = nil
-                self.usageStore.stopCodexRefreshLoop()
                 self.removeCodexAppServerSessions()
             }
         }
@@ -107,23 +97,19 @@ extension AppState {
                 clientVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
             )
             codexAppServerService = service
-            usageStore.startCodexRefreshLoop(using: service)
         } catch {
             service.stop()
-            usageStore.startCodexRefreshLoop(using: nil)
             return
         }
     }
 
     private func stopCodexAppServerClient() {
         guard let service = codexAppServerService else {
-            usageStore.stopCodexRefreshLoop()
             removeCodexAppServerSessions()
             return
         }
         service.stop()
         codexAppServerService = nil
-        usageStore.stopCodexRefreshLoop()
         removeCodexAppServerSessions()
     }
 

@@ -6,17 +6,12 @@ import BoughCore
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     nonisolated private static let log = Logger(subsystem: "com.dgpisces.bough", category: "AppDelegate")
-    /// Phase 21 / D-06: dedicated category for first-launch chain auto-install gate decisions
-    /// and outcomes. Filter `Console.app` with `category:ClaudeCodeChainAutoInstall` to see
-    /// whether the gate fired, was skipped, or surfaced a failure.
-    nonisolated private static let chainAutoInstallLog =
-        Logger(subsystem: "com.dgpisces.bough", category: "ClaudeCodeChainAutoInstall")
 
     var panelController: PanelWindowController?
     private var hookServer: HookServer?
     private var hookRecoveryTimer: Timer?
     private var hookInstallTask: Task<Void, Never>?
-    private var chainAutoInstallTask: Task<Void, Never>?
+    private var statusLineRetirementTask: Task<Void, Never>?
     private var codingSessionsPreferenceObserver: NSObjectProtocol?
     private var workspaceActivationObserver: NSObjectProtocol?
     private var lastHookCheck: Date = .distantPast
@@ -168,8 +163,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         stopHookRecovery()
         hookInstallTask?.cancel()
         hookInstallTask = nil
-        chainAutoInstallTask?.cancel()
-        chainAutoInstallTask = nil
+        statusLineRetirementTask?.cancel()
+        statusLineRetirementTask = nil
         teardownGlobalShortcut()
         if CodingSessionsSettings.isEnabled() {
             appState.saveSessions()
@@ -219,9 +214,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         startHookInstallTask()
-        startChainAutoInstallTask()
+        startStatusLineRetirementTask()
         appState.startSessionDiscovery()
         appState.startCodexAppServerWatcher()
+        // Direct-OAuth usage channels run independently of the app-server
+        // watcher. startCodingRuntime covers both the launch path and the
+        // coding-sessions re-enable path; the disable path stops the channels
+        // via suspendCodingSessionsForDisabledMode →
+        // pauseCodingSessionCollectionForDisabledMode → stopUsageChannels.
+        appState.startUsageChannels()
         RemoteManager.shared.startup()
         startHookRecovery()
     }
@@ -229,8 +230,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func stopCodingRuntimeForDisabledMode() {
         hookInstallTask?.cancel()
         hookInstallTask = nil
-        chainAutoInstallTask?.cancel()
-        chainAutoInstallTask = nil
+        statusLineRetirementTask?.cancel()
+        statusLineRetirementTask = nil
         stopHookRecovery()
         RemoteManager.shared.shutdown()
         hookServer?.stop(removeSocketAfterDelay: false)
@@ -269,71 +270,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func startChainAutoInstallTask() {
-        chainAutoInstallTask?.cancel()
-        chainAutoInstallTask = Task.detached(priority: .userInitiated) {
-            guard CodingSessionsSettings.isEnabled(), !Task.isCancelled else { return }
+    /// Spec §7: one-time upgrade migration that retires the legacy statusLine
+    /// bridge/wrapper. Replaces the former first-launch chain auto-install task
+    /// — usage now arrives via OAuth, so the statusline channel is removed.
+    private func startStatusLineRetirementTask() {
+        statusLineRetirementTask?.cancel()
+        statusLineRetirementTask = Task.detached(priority: .utility) {
             let defaults = UserDefaults.standard
-            let flagKey = SettingsKey.hasAttemptedClaudeCodeChainAutoInstall
-            let attempted = defaults.bool(forKey: flagKey)
-            let decision = ConfigInstaller.evaluateChainAutoInstallGate(hasAttemptedFlag: attempted)
-            switch decision {
-            case .skipFlagSet:
-                return
-            case .skipNoSettings:
-                Self.chainAutoInstallLog.info("D-06 gate skipped: ~/.claude/settings.json absent (not a Claude Code user)")
-                defaults.set(true, forKey: flagKey)
-                return
-            case .skipBoughBridge:
-                Self.chainAutoInstallLog.info("D-06 gate skipped: Bough bridge already installed directly")
-                defaults.set(true, forKey: flagKey)
-                return
-            case .skipBoughWrapper:
-                Self.chainAutoInstallLog.info("D-06 gate skipped: Bough chain wrapper already installed")
-                defaults.set(true, forKey: flagKey)
-                return
-            case .deferTransient(let reason):
-                Self.chainAutoInstallLog.info(
-                    "D-06 gate deferred (transient, will retry next launch): \(reason, privacy: .public)"
-                )
-                return
-            case .proceed:
-                break
-            }
-
-            guard CodingSessionsSettings.isEnabled(), !Task.isCancelled else { return }
-            defaults.set(true, forKey: flagKey)
-            let result = await ChainInstallCoordinator.shared.install(replaceExisting: false)
-            guard CodingSessionsSettings.isEnabled(), !Task.isCancelled else { return }
-            switch result {
-            case .installed:
-                Self.chainAutoInstallLog.info("D-06 chain auto-install installed Bough bridge directly")
-                defaults.set(true, forKey: SettingsKey.pendingClaudeCodeChainBanner)
-                await MainActor.run {
-                    NotificationCenter.default.post(
-                        name: SettingsNotification.claudeCodeChainAutoInstallSucceeded,
-                        object: nil
-                    )
-                }
-            case .chained(let prevCmd, _):
-                Self.chainAutoInstallLog.info(
-                    "D-06 chain auto-install succeeded (chained with \(prevCmd, privacy: .private(mask: .hash)))"
-                )
-                defaults.set(true, forKey: SettingsKey.pendingClaudeCodeChainBanner)
-                await MainActor.run {
-                    NotificationCenter.default.post(
-                        name: SettingsNotification.claudeCodeChainAutoInstallSucceeded,
-                        object: nil
-                    )
-                }
-            case .failed(let reason):
-                Self.chainAutoInstallLog.warning(
-                    "D-06 chain auto-install failed: \(reason, privacy: .private) — user can retry via Settings"
-                )
-            case .conflict(let existing, _):
-                Self.chainAutoInstallLog.warning(
-                    "D-06 chain auto-install returned unexpected .conflict for existing=\(existing, privacy: .private(mask: .hash))"
-                )
+            let flagKey = SettingsKey.hasRetiredClaudeCodeStatusLine
+            guard !defaults.bool(forKey: flagKey), !Task.isCancelled else { return }
+            defaults.set(true, forKey: flagKey)  // gate first (T-21-12 pattern: set the flag, then do the work)
+            _ = ConfigInstaller.retireClaudeCodeStatusLineIfInstalled()
+            // Retirement can refuse (e.g. corrupt wrapper sentinel) and leave
+            // settings.json pointing at the Bough wrapper. Clear the flag so
+            // the next launch retries — retire is idempotent and cheap, so a
+            // bounded one-attempt-per-launch retry is acceptable. The refusal
+            // semantics are covered at the ConfigInstaller level
+            // (ConfigInstallerClaudeCodeTests); this task is a thin wrapper.
+            if ConfigInstaller.isBoughClaudeCodeStatusLineCommand(
+                ConfigInstaller.currentClaudeCodeStatusLineCommand()
+            ) {
+                defaults.set(false, forKey: flagKey)
             }
         }
     }
@@ -450,9 +407,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if !repaired.isEmpty {
                 Self.log.info("Auto-repaired hooks for: \(repaired.joined(separator: ", "))")
             }
-            // PERSIST-04: repair stale bundle-container paths in ~/.claude/settings.json after update.
-            guard CodingSessionsSettings.isEnabled() else { return }
-            ConfigInstaller.verifyClaudeCodeStatusLinePathDrift()
         }
     }
 

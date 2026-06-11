@@ -189,16 +189,26 @@ final class CodexAppServerServiceTests: XCTestCase {
         XCTAssertEqual(transport.sentRequests.map(\.method), [])
 
         transport.deliver(responseId: .int(0), result: [:])
-        for _ in 0..<10 {
-            if !transport.sentRequests.isEmpty { break }
+        // Deadline-based wait instead of a fixed yield count: under machine
+        // load ten bare yields can elapse before the cooperative pool runs
+        // the awaiting task, flaking this test (same class of fix as commit
+        // 6c22513 "Make timing-sensitive tests deterministic").
+        let requestDeadline = Date().addingTimeInterval(5)
+        while transport.sentRequests.isEmpty && Date() < requestDeadline {
             await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
         }
-        sleeper.complete()
         XCTAssertEqual(transport.sentRequests.map(\.method), ["account/rateLimits/read"])
 
         transport.deliver(responseId: .int(1), result: ["ok": .bool(true)])
         let result = try await task.value
         XCTAssertEqual(result["ok"]?.asBool, true)
+        // Release the parked timeout sleep only AFTER the read resolved:
+        // completing earlier turns the request-timeout sleep into an immediate
+        // return that races the response delivery on the main actor and flakes
+        // this test as requestTimedOut under load. A late wake is harmless —
+        // the timeout task re-checks cancellation and the pending request.
+        sleeper.complete()
         service.stop()
     }
 

@@ -35,6 +35,9 @@ public final class UsageMonitorRunner {
     private let statusPath: String
     private let commandPath: String
     private let codexRateLimitReader: CodexRateLimitMonitorReading?
+    private let claudeOAuthFetcher: ClaudeUsageFetching?
+    private let codexOAuthFetcher: CodexUsageFetching?
+    private let claudeMirrorFreshness: TimeInterval
     private let now: () -> Date
     private let calendar: Calendar
     private let timeZone: TimeZone
@@ -47,6 +50,11 @@ public final class UsageMonitorRunner {
         statusPath: String? = nil,
         commandPath: String? = nil,
         codexRateLimitReader: CodexRateLimitMonitorReading? = CodexAppServerRateLimitMonitorReader(),
+        claudeOAuthFetcher: ClaudeUsageFetching? = nil,
+        codexOAuthFetcher: CodexUsageFetching? = nil,
+        /// Mirror freshness window (spec §6.2): payload younger than this means the
+        /// app is actively polling — use the file and skip the network round trip.
+        claudeMirrorFreshness: TimeInterval = 420,
         now: @escaping () -> Date = Date.init,
         calendar: Calendar = Calendar(identifier: .gregorian),
         timeZone: TimeZone = .current,
@@ -58,6 +66,9 @@ public final class UsageMonitorRunner {
         self.statusPath = statusPath ?? Self.defaultStatusPath()
         self.commandPath = commandPath ?? Self.defaultCommandPath()
         self.codexRateLimitReader = codexRateLimitReader
+        self.claudeOAuthFetcher = claudeOAuthFetcher
+        self.codexOAuthFetcher = codexOAuthFetcher
+        self.claudeMirrorFreshness = claudeMirrorFreshness
         self.now = now
         self.calendar = calendar
         self.timeZone = timeZone
@@ -111,6 +122,20 @@ public final class UsageMonitorRunner {
             return outcome
         }
 
+        if let codexOAuthFetcher {
+            do {
+                let result = try codexOAuthFetcher.fetchRateLimitsResult()
+                return acceptCodexRateLimitResult(result, receivedAt: now())
+            } catch let error as OAuthUsageError where error.isAuthFailure {
+                // Auth-class failure → fall through to the CLI spawn below so codex
+                // can self-heal its credentials (spec §5.3).
+            } catch {
+                let outcome = UsageMonitorRunOutcome.failed(reason: "Codex usage source read failed")
+                writeStatus(for: outcome, heartbeatAt: now())
+                return outcome
+            }
+        }
+
         guard let codexRateLimitReader else {
             let outcome = UsageMonitorRunOutcome.unavailable(reason: "Codex usage source unavailable")
             writeStatus(for: outcome, heartbeatAt: now())
@@ -149,22 +174,28 @@ public final class UsageMonitorRunner {
             return outcome
         }
 
-        guard fileManager.fileExists(atPath: claudeUsageFilePath) else {
-            let outcome = UsageMonitorRunOutcome.unavailable(reason: "Claude usage source unavailable")
-            writeStatus(for: outcome, heartbeatAt: now())
-            return outcome
+        // 1. App-written mirror, fresh → consume the file (no API traffic).
+        if let mtime = (try? fileManager.attributesOfItem(atPath: claudeUsageFilePath))?[.modificationDate] as? Date,
+           now().timeIntervalSince(mtime) < claudeMirrorFreshness,
+           let data = try? Data(contentsOf: URL(fileURLWithPath: claudeUsageFilePath)) {
+            return acceptClaudePayload(data, receivedAt: mtime)
         }
 
-        do {
-            let data = try Data(contentsOf: URL(fileURLWithPath: claudeUsageFilePath))
-            let fileMtime = try fileManager
-                .attributesOfItem(atPath: claudeUsageFilePath)[.modificationDate] as? Date
-            return acceptClaudePayload(data, receivedAt: fileMtime ?? now())
-        } catch {
-            let outcome = UsageMonitorRunOutcome.failed(reason: "Claude usage source read failed")
-            writeStatus(for: outcome, heartbeatAt: now())
-            return outcome
+        // 2. Mirror stale (app quit) → direct OAuth with file-only credentials.
+        if let claudeOAuthFetcher {
+            do {
+                let payload = try claudeOAuthFetcher.fetchStatusLinePayload()
+                return acceptClaudePayload(payload, receivedAt: now())
+            } catch {
+                let outcome = UsageMonitorRunOutcome.unavailable(reason: "Claude usage source unavailable")
+                writeStatus(for: outcome, heartbeatAt: now())
+                return outcome
+            }
         }
+
+        let outcome = UsageMonitorRunOutcome.unavailable(reason: "Claude usage source unavailable")
+        writeStatus(for: outcome, heartbeatAt: now())
+        return outcome
     }
 
     @discardableResult
@@ -212,7 +243,8 @@ public final class UsageMonitorRunner {
                 tool: parsed.tool,
                 now: acceptedAt,
                 calendar: calendar,
-                timeZone: timeZone
+                timeZone: timeZone,
+                priorWeekly: priorWeekly
             )
             return UsageForecastCalculator.forecast(
                 weekly: weekly,

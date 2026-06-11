@@ -1,10 +1,15 @@
-import Darwin
 import Foundation
 import BoughCore
 
-@MainActor
-protocol UsageRateLimitReading: AnyObject {
-    func readRateLimits() async throws -> [String: AnyCodableLike]
+/// Health of one direct-OAuth usage channel (Claude / Codex). `degraded` and
+/// `missingCredentials` carry a user-facing localized reason for the Settings
+/// badge; missing credentials is its own case so the badge can show gray with
+/// login guidance instead of a yellow degraded warning (spec §9).
+enum UsageOAuthChannelStatus: Equatable {
+    case unknown
+    case connected(at: Date)
+    case degraded(reason: String, at: Date)
+    case missingCredentials(reason: String, at: Date)
 }
 
 @MainActor
@@ -51,16 +56,11 @@ enum UsageContinuityWriteMode: Equatable {
 final class UsageStore {
     private enum Constants {
         static let forecastUnavailableReason = "Usage data is stale"
-        static let activeRefreshInterval: TimeInterval = 60
+        static let activeRefreshInterval: TimeInterval = 120
         static let idleRefreshInterval: TimeInterval = 300
         static let sampleFreshnessInterval: TimeInterval = UsageMonitorRunner.sampleFreshnessInterval
-        static let appServerUnavailableReason = "Codex app-server unavailable"
-        static let usageUnavailableReason = "Codex usage unavailable"
         static let refreshFailedKey = "usage_refresh_failed"
         static let defaultClaudeUsageFilePath = NSHomeDirectory() + "/.bough/claude-usage.json"
-        static let defaultClaudeSettingsFilePath = NSHomeDirectory() + "/.claude/settings.json"
-        static let claudeHookNotInstalledKey = "usage_claude_hook-not-installed"
-        static let claudeHookInstalledNotTriggeredKey = "usage_claude_hook-installed-not-triggered"
         static let claudePayloadMissingRateLimitsKey = "usage_claude_payload-missing-rate-limits"
         static let claudeParseFailureKey = "usage_claude_parse-failure"
         static let claudeStaleKey = "usage_claude_stale"
@@ -89,9 +89,6 @@ final class UsageStore {
     private let claudeUsageFilePath: String
 
     @ObservationIgnored
-    private let claudeSettingsFilePath: String
-
-    @ObservationIgnored
     private let usageMonitorCommandPath: String?
 
     @ObservationIgnored
@@ -102,11 +99,11 @@ final class UsageStore {
         didSet { bumpSnapshotRevision() }
     }
 
-    /// True iff at least one Codex rate-limit refresh is currently in
-    /// flight. Computed from a monotonic counter so overlapping refreshes
-    /// (manual triggered while loop refresh is mid-flight) don't race.
-    /// Wrapped via `enterRefresh()` / `defer { exitRefresh() }` at every
-    /// `refreshCodex` entry point so cancellation, errors, and
+    /// True iff at least one OAuth usage refresh is currently in flight.
+    /// Computed from a monotonic counter so overlapping refreshes (manual
+    /// triggered while a loop refresh is mid-flight) don't race. Wrapped via
+    /// `enterRefresh()` / `defer { exitRefresh() }` at every
+    /// `refreshClaudeOAuth` / `refreshCodexOAuth` entry point so errors and
     /// generation-mismatch early-returns all decrement correctly.
     var isRefreshing: Bool {
         _ = snapshotRevision  // observation hook — re-read when revision bumps
@@ -146,32 +143,57 @@ final class UsageStore {
 
     private var snapshotRevision = 0
 
-    @ObservationIgnored
-    private weak var codexReader: UsageRateLimitReading?
+    // MARK: - Unified OAuth channels (spec §9)
 
     @ObservationIgnored
-    private var refreshGeneration = 0
+    private var claudeFetcher: ClaudeUsageFetching?
 
     @ObservationIgnored
-    private var loopRefreshTask: Task<Void, Never>?
+    private var codexFetcher: CodexUsageFetching?
+
+    /// Spec §5.3: spawn-once `codex app-server` reader used ONLY when the
+    /// Codex OAuth fetch fails with an auth-class error (the CLI can
+    /// self-heal its credentials). Network errors do NOT fall back.
+    @ObservationIgnored
+    private var codexFallbackReader: CodexRateLimitMonitorReading?
 
     @ObservationIgnored
-    private var inFlightCodexRefreshTask: Task<Void, Never>?
+    private var claudeOAuthStatusStorage: UsageOAuthChannelStatus = .unknown
 
     @ObservationIgnored
-    private weak var inFlightCodexRefreshReader: UsageRateLimitReading?
+    private var codexOAuthStatusStorage: UsageOAuthChannelStatus = .unknown
 
     @ObservationIgnored
-    private var inFlightCodexRefreshGeneration: Int?
+    private var lastPanelRefreshAt: Date?
+
+    /// Bumped by start/stop so refreshes still in flight across a
+    /// `stopUsageChannels()` (or a restart) never apply their stale result.
+    @ObservationIgnored
+    private var channelsGeneration = 0
+
+    /// Per-tool monotonic refresh sequence: overlapping refreshes (timer +
+    /// panel-open + manual force) mean a slow FAILING fetch can complete after
+    /// a fast succeeding one. Each refresh records its sequence at entry and
+    /// bails after the await when a newer refresh has started, so a stale
+    /// failure never stomps a fresher snapshot/status.
+    @ObservationIgnored
+    private var claudeRefreshSequence: UInt64 = 0
 
     @ObservationIgnored
-    private var inFlightCodexRefreshToken: UUID?
+    private var codexRefreshSequence: UInt64 = 0
 
     @ObservationIgnored
-    private var codexRefreshActivity: UsageRefreshActivity = .active
+    private var refreshActivity: UsageRefreshActivity = .active
 
-    @ObservationIgnored
-    private var claudeUsageWatcher: DispatchSourceFileSystemObject?
+    var claudeOAuthStatus: UsageOAuthChannelStatus {
+        _ = snapshotRevision
+        return claudeOAuthStatusStorage
+    }
+
+    var codexOAuthStatus: UsageOAuthChannelStatus {
+        _ = snapshotRevision
+        return codexOAuthStatusStorage
+    }
 
     /// Owns the per-tool daily-allowance baseline (Phase 5 plan 01 — D-16).
     /// Single owner across the store lifetime; recordTick fires on every snapshot
@@ -208,9 +230,7 @@ final class UsageStore {
     init(
         defaults: UserDefaults = .standard,
         scheduler: UsageRefreshScheduling,
-        monitorClaudeCode: Bool = true,
         claudeUsageFilePath: String = Constants.defaultClaudeUsageFilePath,
-        claudeSettingsFilePath: String = Constants.defaultClaudeSettingsFilePath,
         usageMonitorCommandPath: String? = nil,
         now: @escaping () -> Date = Date.init,
         continuityStore: UsageContinuityStore? = nil,
@@ -220,7 +240,6 @@ final class UsageStore {
         self.defaults = defaults
         self.scheduler = scheduler
         self.claudeUsageFilePath = claudeUsageFilePath
-        self.claudeSettingsFilePath = claudeSettingsFilePath
         self.usageMonitorCommandPath = usageMonitorCommandPath ?? (defaults === UserDefaults.standard ? UsageMonitorRunner.defaultCommandPath() : nil)
         self.now = now
         self.continuityStore = continuityStore
@@ -242,10 +261,10 @@ final class UsageStore {
             return
         }
 
-        startCodingSessionCollection(monitorClaudeCode: monitorClaudeCode)
+        startCodingSessionCollection()
     }
 
-    private func startCodingSessionCollection(monitorClaudeCode: Bool) {
+    private func startCodingSessionCollection() {
         writeUsageMonitorCommand()
 
         if snapshots[.claudeCode] == nil {
@@ -266,11 +285,6 @@ final class UsageStore {
         }
 
         restoreContinuityStateIfAvailable()
-
-        if monitorClaudeCode && defaults === UserDefaults.standard {
-            refreshClaudeCodeUsageFromDisk()
-            startClaudeCodeUsageWatcher()
-        }
     }
 
     convenience init(
@@ -439,35 +453,49 @@ final class UsageStore {
     }
     #endif
 
-    func startCodexRefreshLoop(using reader: UsageRateLimitReading?) {
-        scheduler.stop()
-        cancelLoopRefreshTask()
-        refreshGeneration += 1
-        let generation = refreshGeneration
+    /// Installs the OAuth fetchers and starts the unified refresh loop
+    /// (spec §9). Idempotent — restarting replaces the fetchers and bumps the
+    /// generation so refreshes still in flight from a previous start no-op.
+    func startUsageChannels(
+        claude: ClaudeUsageFetching?,
+        codex: CodexUsageFetching?,
+        codexFallback: CodexRateLimitMonitorReading?
+    ) {
+        claudeFetcher = claude
+        codexFetcher = codex
+        codexFallbackReader = codexFallback
+        channelsGeneration += 1
+        scheduleChannelRefreshLoop()
 
-        guard let reader else {
-            codexReader = nil
-            markCodexUnavailable(reason: Constants.appServerUnavailableReason)
-            return
+        evaluateStaleness()
+        Task { @MainActor in
+            await self.refreshAllOAuth()
         }
-
-        codexReader = reader
-        scheduleCodexRefreshLoop(using: reader, generation: generation)
-
-        startLoopRefresh(using: reader, generation: generation)
     }
 
-    func setCodexRefreshActivity(_ activity: UsageRefreshActivity) {
-        guard codexRefreshActivity != activity else { return }
-        codexRefreshActivity = activity
-        guard let reader = codexReader else { return }
-        scheduleCodexRefreshLoop(using: reader, generation: refreshGeneration)
+    func stopUsageChannels() {
+        scheduler.stop()
+        channelsGeneration += 1
+        claudeFetcher = nil
+        codexFetcher = nil
+        codexFallbackReader = nil
     }
 
-    private func scheduleCodexRefreshLoop(using reader: UsageRateLimitReading, generation: Int) {
-        scheduler.start(every: refreshInterval(for: codexRefreshActivity)) { [weak self] in
-            guard let self else { return }
-            self.startLoopRefresh(using: reader, generation: generation)
+    func setRefreshActivity(_ activity: UsageRefreshActivity) {
+        guard refreshActivity != activity else { return }
+        refreshActivity = activity
+        guard claudeFetcher != nil || codexFetcher != nil else { return }
+        scheduleChannelRefreshLoop()
+    }
+
+    private func scheduleChannelRefreshLoop() {
+        let generation = channelsGeneration
+        scheduler.start(every: refreshInterval(for: refreshActivity)) { [weak self] in
+            guard let self, self.channelsGeneration == generation else { return }
+            self.evaluateStaleness()
+            Task { @MainActor in
+                await self.refreshAllOAuth()
+            }
         }
     }
 
@@ -478,87 +506,182 @@ final class UsageStore {
         }
     }
 
-    func stopCodexRefreshLoop() {
-        scheduler.stop()
-        cancelLoopRefreshTask()
-        refreshGeneration += 1
-        codexReader = nil
-        markCodexUnavailable(reason: Constants.appServerUnavailableReason)
+    func refreshAllOAuth(force: Bool = false) async {
+        async let claude: Void = refreshClaudeOAuth(force: force)
+        async let codex: Void = refreshCodexOAuth(force: force)
+        _ = await (claude, codex)
+    }
+
+    func refreshClaudeOAuth(force: Bool = false) async {
+        guard usageDisplayEnabled(tool: .claudeCode), let fetcher = claudeFetcher else { return }
+        let generation = channelsGeneration
+        claudeRefreshSequence += 1
+        let mySequence = claudeRefreshSequence
+        enterRefresh()
+        defer { exitRefresh() }
+        if force { fetcher.resetTransientGates() }
+
+        let result: Result<Data, Error> = await Task.detached {
+            Result { try fetcher.fetchStatusLinePayload() }
+        }.value
+        // Bail when channels restarted OR a newer refresh has started — a
+        // stale (likely failing) result must not clobber the newer one.
+        guard channelsGeneration == generation, claudeRefreshSequence == mySequence else { return }
+
+        switch result {
+        case .success(let payload):
+            let receivedAt = now()
+            if applyClaudeCodePayload(payload, receivedAt: receivedAt) {
+                claudeOAuthStatusStorage = .connected(at: receivedAt)
+                writeClaudeUsageMirror(payload)
+            } else {
+                claudeOAuthStatusStorage = .degraded(
+                    reason: localized(Constants.claudeParseFailureKey),
+                    at: receivedAt
+                )
+            }
+        case .failure(let error):
+            let reason = Self.degradedReason(for: error, localized: localized)
+            claudeOAuthStatusStorage = failureStatus(for: error, reason: reason)
+            markClaudeCodeUnavailable(reason: reason)
+        }
+        bumpSnapshotRevision()
+    }
+
+    func refreshCodexOAuth(force: Bool = false) async {
+        guard usageDisplayEnabled(tool: .codex), let fetcher = codexFetcher else { return }
+        let generation = channelsGeneration
+        codexRefreshSequence += 1
+        let mySequence = codexRefreshSequence
+        enterRefresh()
+        defer { exitRefresh() }
+        _ = force  // Codex has no transient gate to reset; cooldowns expire on their own.
+
+        let fallback = codexFallbackReader
+        let result: Result<[String: AnyCodableLike], Error> = await Task.detached {
+            do {
+                return .success(try fetcher.fetchRateLimitsResult())
+            } catch let authError as OAuthUsageError where authError.isAuthFailure {
+                // Spec §5.3: auth-class failures only — spawn the CLI once so it
+                // can self-heal its credentials; network errors do NOT fall back.
+                guard let fallback else { return .failure(authError) }
+                do {
+                    return .success(try fallback.readRateLimits())
+                } catch {
+                    return .failure(authError)  // surface the original OAuth error
+                }
+            } catch {
+                return .failure(error)
+            }
+        }.value
+        // Bail when channels restarted OR a newer refresh has started — a
+        // stale (likely failing) result must not clobber the newer one.
+        guard channelsGeneration == generation, codexRefreshSequence == mySequence else { return }
+
+        switch result {
+        case .success(let rateLimits):
+            let receivedAt = now()
+            if applyCodexRateLimitResult(rateLimits) {
+                codexOAuthStatusStorage = .connected(at: receivedAt)
+            } else {
+                let reason = localized(Constants.refreshFailedKey)
+                codexOAuthStatusStorage = .degraded(reason: reason, at: receivedAt)
+                markCodexUnavailable(reason: reason)
+            }
+        case .failure(let error):
+            let reason = Self.degradedReason(for: error, localized: localized)
+            codexOAuthStatusStorage = failureStatus(for: error, reason: reason)
+            markCodexUnavailable(reason: reason)
+        }
+        bumpSnapshotRevision()
+    }
+
+    /// Notch-panel open hook: refresh both channels at most once per
+    /// `minInterval` so toggling the panel doesn't hammer the endpoints
+    /// (the clients' internal cooldowns are the second line of defense).
+    func refreshForPanelOpenIfNeeded(minInterval: TimeInterval = 30) {
+        let currentDate = now()
+        if let last = lastPanelRefreshAt, currentDate.timeIntervalSince(last) < minInterval {
+            return
+        }
+        lastPanelRefreshAt = currentDate
+        evaluateStaleness()
+        Task { @MainActor in
+            await self.refreshAllOAuth()
+        }
+    }
+
+    /// Spec §6.1: the app mirrors the Claude access token for the helper only
+    /// while the background monitor owns continuity writes (helper-owned mode).
+    static func shouldMirrorClaudeToken(defaults: UserDefaults = .standard) -> Bool {
+        UsageContinuityWriteMode(defaults: defaults) == .helperOwned
+    }
+
+    /// Spec §9: missing credentials gets its own status so the badge renders
+    /// gray with login guidance; every other failure degrades to yellow.
+    private func failureStatus(for error: Error, reason: String) -> UsageOAuthChannelStatus {
+        if case .credentialsUnavailable = error as? OAuthUsageError {
+            return .missingCredentials(reason: reason, at: now())
+        }
+        return .degraded(reason: reason, at: now())
+    }
+
+    /// Maps a usage refresh failure onto a localized, user-facing reason for
+    /// the channel badge and the stale/unavailable snapshot annotation.
+    static func degradedReason(for error: Error, localized: (String) -> String) -> String {
+        switch error as? OAuthUsageError {
+        case .credentialsUnavailable:
+            return localized("usage_oauth_no_credentials")
+        case .tokenExpired:
+            return localized("usage_oauth_token_expired")
+        case .keychainDenied:
+            return localized("usage_oauth_keychain_denied")
+        case .rateLimited, .cooldownActive:
+            return localized("usage_oauth_rate_limited")
+        case .unauthorized:
+            return localized("usage_oauth_unauthorized")
+        default:
+            return localized("usage_refresh_failed")
+        }
+    }
+
+    /// Best-effort mirror of the latest statusline-shaped payload to
+    /// ~/.bough/claude-usage.json so existing on-disk consumers (helper,
+    /// diagnostics) keep working after the statusline hook removal.
+    private func writeClaudeUsageMirror(_ payload: Data) {
+        let url = URL(fileURLWithPath: claudeUsageFilePath)
+        do {
+            try ensureUsageFileDirectory(for: url)
+            try payload.write(to: url, options: .atomic)
+            protectUsageFileIfPrivate(url)
+        } catch {
+            // Mirror is advisory; the in-memory snapshot is already applied.
+        }
     }
 
     func pauseCodingSessionCollectionForDisabledMode() {
-        scheduler.stop()
-        cancelLoopRefreshTask()
-        refreshGeneration += 1
-        codexReader = nil
-        stopClaudeCodeUsageWatcher()
+        stopUsageChannels()
         snapshots.removeValue(forKey: .codex)
         snapshots.removeValue(forKey: .claudeCode)
         writeUsageMonitorCommand(enabledTools: [])
         bumpSnapshotRevision()
     }
 
-    func resumeCodingSessionCollectionForEnabledMode(monitorClaudeCode: Bool = true) {
-        startCodingSessionCollection(monitorClaudeCode: monitorClaudeCode)
-    }
-
-    @discardableResult
-    func refreshClaudeCodeUsageFromDisk(markRefreshAttempt: Bool = false) -> Bool {
-        let url = URL(fileURLWithPath: claudeUsageFilePath)
-        guard FileManager.default.fileExists(atPath: claudeUsageFilePath) else {
-            let reason = claudeStatusLineHookIsInstalled()
-                ? localized(Constants.claudeHookInstalledNotTriggeredKey)
-                : localized(Constants.claudeHookNotInstalledKey)
-            markClaudeCodeUnavailable(reason: reason)
-            return false
-        }
-
-        do {
-            let data = try Data(contentsOf: url)
-            let fileMtime = try FileManager.default
-                .attributesOfItem(atPath: claudeUsageFilePath)[.modificationDate] as? Date
-            return applyClaudeCodePayload(data, receivedAt: fileMtime ?? now())
-        } catch {
-            markClaudeCodeUnavailable(reason: localized(Constants.claudeParseFailureKey))
-            return false
-        }
-    }
-
-    func startClaudeCodeUsageWatcher() {
-        claudeUsageWatcher?.cancel()
-        claudeUsageWatcher = nil
-
-        let directory = (claudeUsageFilePath as NSString).deletingLastPathComponent
-        try? ensureUsageFileDirectory(for: URL(fileURLWithPath: claudeUsageFilePath))
-
-        let fd = open(directory, O_EVTONLY)
-        guard fd >= 0 else { return }
-
-        let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd,
-            eventMask: [.write, .rename, .delete],
-            queue: .main
-        )
-        source.setEventHandler { [weak self] in
-            Task { @MainActor in
-                _ = self?.refreshClaudeCodeUsageFromDisk()
-            }
-        }
-        source.setCancelHandler {
-            close(fd)
-        }
-        claudeUsageWatcher = source
-        source.resume()
-    }
-
-    func stopClaudeCodeUsageWatcher() {
-        claudeUsageWatcher?.cancel()
-        claudeUsageWatcher = nil
+    func resumeCodingSessionCollectionForEnabledMode() {
+        startCodingSessionCollection()
     }
 
     @discardableResult
     func applyClaudeCodePayload(_ data: Data, receivedAt: Date? = nil) -> Bool {
         let currentDate = receivedAt ?? now()
+        // Sample arbitration (spec §9): never let an older sample (e.g. the
+        // SQLite restore at launch) clobber a newer live one. Strictly-older
+        // only — equal timestamps keep the existing re-apply semantics.
+        if let existing = snapshots[.claudeCode],
+           existing.fiveHour.hasData || existing.weekly.hasData,
+           let last = existing.lastRefresh, currentDate < last {
+            return false
+        }
         switch claudePayloadRateLimitStatus(data) {
         case .present:
             break
@@ -586,7 +709,8 @@ final class UsageStore {
                 tool: .claudeCode,
                 now: currentDate,
                 calendar: calendar,
-                timeZone: timeZone
+                timeZone: timeZone,
+                priorWeekly: priorWeekly
             )
             return UsageForecastCalculator.forecast(
                 weekly: weekly,
@@ -615,117 +739,6 @@ final class UsageStore {
         return true
     }
 
-    func refreshCodex(using reader: UsageRateLimitReading?) async {
-        guard let reader else {
-            markCodexUnavailable(reason: Constants.appServerUnavailableReason)
-            return
-        }
-
-        let activeReader = codexReader
-        let generation = activeReader == nil ? nil : refreshGeneration
-        await refreshCodex(using: reader, expectedGeneration: generation, expectedReader: activeReader)
-    }
-
-    private func startLoopRefresh(using reader: UsageRateLimitReading, generation: Int) {
-        if inFlightCodexRefreshTask != nil,
-           inFlightCodexRefreshReader === reader,
-           inFlightCodexRefreshGeneration == generation {
-            return
-        }
-
-        loopRefreshTask?.cancel()
-
-        let task = Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.refreshCodex(using: reader, expectedGeneration: generation, expectedReader: reader)
-
-            guard !Task.isCancelled else { return }
-            if self.refreshGeneration == generation {
-                self.loopRefreshTask = nil
-            }
-        }
-
-        loopRefreshTask = task
-    }
-
-    private func cancelLoopRefreshTask() {
-        loopRefreshTask?.cancel()
-        loopRefreshTask = nil
-        inFlightCodexRefreshTask?.cancel()
-        inFlightCodexRefreshTask = nil
-        inFlightCodexRefreshReader = nil
-        inFlightCodexRefreshGeneration = nil
-        inFlightCodexRefreshToken = nil
-    }
-
-    private func refreshCodex(
-        using reader: UsageRateLimitReading?,
-        expectedGeneration: Int?,
-        expectedReader: UsageRateLimitReading?
-    ) async {
-        guard let reader else {
-            markCodexUnavailable(reason: Constants.appServerUnavailableReason)
-            return
-        }
-
-        if let task = inFlightCodexRefreshTask,
-           inFlightCodexRefreshReader === reader,
-           inFlightCodexRefreshGeneration == expectedGeneration {
-            await task.value
-            return
-        }
-
-        let token = UUID()
-        let task = Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.performCodexRefresh(
-                using: reader,
-                expectedGeneration: expectedGeneration,
-                expectedReader: expectedReader
-            )
-        }
-        inFlightCodexRefreshTask = task
-        inFlightCodexRefreshReader = reader
-        inFlightCodexRefreshGeneration = expectedGeneration
-        inFlightCodexRefreshToken = token
-
-        await task.value
-
-        if inFlightCodexRefreshToken == token {
-            inFlightCodexRefreshTask = nil
-            inFlightCodexRefreshReader = nil
-            inFlightCodexRefreshGeneration = nil
-            inFlightCodexRefreshToken = nil
-        }
-    }
-
-    private func performCodexRefresh(
-        using reader: UsageRateLimitReading,
-        expectedGeneration: Int?,
-        expectedReader: UsageRateLimitReading?
-    ) async {
-        enterRefresh()
-        defer { exitRefresh() }
-
-        if Task.isCancelled { return }
-
-        do {
-            let result = try await reader.readRateLimits()
-            if Task.isCancelled { return }
-            if let expectedReader, codexReader !== expectedReader { return }
-            guard expectedGeneration == nil || expectedGeneration == refreshGeneration else { return }
-            let didApplyResult = applyCodexRateLimitResult(result)
-            if !didApplyResult {
-                markCodexUnavailable(reason: localized(Constants.refreshFailedKey))
-            }
-        } catch {
-            if Task.isCancelled { return }
-            if let expectedReader, codexReader !== expectedReader { return }
-            guard expectedGeneration == nil || expectedGeneration == refreshGeneration else { return }
-            markCodexUnavailable(reason: localized(Constants.refreshFailedKey))
-        }
-    }
-
     @discardableResult
     func applyCodexRateLimitResult(_ result: [String: AnyCodableLike]) -> Bool {
         let response = CodexJSONRPCMessage(raw: ["result": .object(result)], kind: .response(id: .string("usage")))
@@ -735,6 +748,14 @@ final class UsageStore {
     @discardableResult
     func applyCodexRateLimitMessage(_ message: CodexJSONRPCMessage) -> Bool {
         let currentDate = now()
+        // Sample arbitration (spec §9): never let an older sample (e.g. the
+        // SQLite restore at launch) clobber a newer live one. Strictly-older
+        // only — equal timestamps keep the existing re-apply semantics.
+        if let existing = snapshots[.codex],
+           existing.fiveHour.hasData || existing.weekly.hasData,
+           let last = existing.lastRefresh, currentDate < last {
+            return false
+        }
         guard let parsed = CodexRateLimitParser.parse(message: message, receivedAt: currentDate) else {
             return false
         }
@@ -776,7 +797,8 @@ final class UsageStore {
                 tool: parsed.tool,
                 now: currentDate,
                 calendar: calendar,
-                timeZone: timeZone
+                timeZone: timeZone,
+                priorWeekly: priorWeekly
             )
             return UsageForecastCalculator.forecast(
                 weekly: weekly,
@@ -1027,10 +1049,6 @@ final class UsageStore {
             return .invalid
         }
         return root["rate_limits"]?.asObject == nil ? .missing : .present
-    }
-
-    private func claudeStatusLineHookIsInstalled() -> Bool {
-        ConfigInstaller.boughClaudeCodeStatusLineIsInstalled(settingsPath: claudeSettingsFilePath)
     }
 
     private func localized(_ key: String) -> String {
