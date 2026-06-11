@@ -405,6 +405,25 @@ final class NotchPanelViewTests: XCTestCase {
         XCTAssertFalse(wideBranch.contains(".padding(.leading, 6)"))
     }
 
+    func testSessionListAlwaysScrollsFullListAndThinScrollViewSelfSizes() throws {
+        let source = try sourceFile("Sources/Bough/NotchPanelView.swift")
+        let sessionList = try XCTUnwrap(source.slice(from: "private struct SessionListView: View", to: "/// Thin overlay scrollbar"))
+        let thinScroll = try XCTUnwrap(source.slice(from: "/// Thin overlay scrollbar", to: "private struct SessionIdentityLine: View"))
+
+        XCTAssertTrue(
+            sessionList.contains("let needsScroll = onlySessionId == nil"),
+            "Card heights vary with message content, so a session-count heuristic either clips the plain layout at the window edge or hides everything; the full list must always use the capped scroll container."
+        )
+        XCTAssertFalse(sessionList.contains("totalSessionCount > maxVisibleSessions"))
+
+        XCTAssertTrue(
+            thinScroll.contains(".frame(height: min(contentHeight, maxHeight))"),
+            "NSScrollView exposes no intrinsic height to SwiftUI, so without explicit sizing the panel's fixedSize layout collapses the session list to zero height."
+        )
+        XCTAssertTrue(thinScroll.contains("NSView.frameDidChangeNotification"))
+        XCTAssertFalse(thinScroll.contains("heightAnchor.constraint(lessThanOrEqualToConstant"))
+    }
+
     func testUsageStripLayoutKeepsStripOutsideScrollableSessionContent() {
         let scrollable = UsageStripLayout(showsStrip: true, needsScroll: true)
         let plain = UsageStripLayout(showsStrip: true, needsScroll: false)
