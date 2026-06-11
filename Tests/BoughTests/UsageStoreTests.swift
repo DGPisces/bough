@@ -229,6 +229,18 @@ final class UsageStoreTests: XCTestCase {
     }
 
     func testCodexAcceptedSamplesCarryForwardExplicitReset() throws {
+        // Isolate ~/.bough/usage-daily.json: the live accumulator persists the
+        // re-lock idempotency marker (spec §8.1), so a leaked baseline from a
+        // previous run would suppress the re-lock this test asserts.
+        let tempHome = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempHome, withIntermediateDirectories: true)
+        let originalHome = ProcessInfo.processInfo.environment["HOME"]
+        setenv("HOME", tempHome.path, 1)
+        defer {
+            if let originalHome { setenv("HOME", originalHome, 1) } else { unsetenv("HOME") }
+            try? FileManager.default.removeItem(at: tempHome)
+        }
+
         var current = Date(timeIntervalSince1970: 1_000)
         let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { current })
 
@@ -240,12 +252,27 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertEqual(today?.basis.resetProvenance, .explicitReset)
         XCTAssertEqual(today?.basis.weeklyResetAlreadyFiredToday, true)
         let basis = try XCTUnwrap(today?.basis)
-        let todayUsed = (100.0 - basis.weeklyUsedAtDayStart) + basis.weeklyUsedNow
+        // Spec §8.1: the accumulator re-locks the baseline at the explicit reset,
+        // so the basis starts at the post-reset usedPercent and Today is full —
+        // no pre-reset segment carry-forward into today_used.
+        XCTAssertEqual(basis.weeklyUsedAtDayStart, 5, accuracy: 0.001)
+        let todayUsed = max(0, basis.weeklyUsedNow - basis.weeklyUsedAtDayStart)
         let expectedPct = ((basis.todayAllowanceOfWeek - todayUsed) / basis.todayAllowanceOfWeek) * 100.0
         XCTAssertEqual(today?.pct ?? 999, expectedPct, accuracy: 0.001)
+        XCTAssertEqual(today?.pct ?? 999, 100.0, accuracy: 0.001)
     }
 
-    func testCodexAcceptedSamplesCarryForwardImplicitReset() {
+    func testCodexAcceptedSamplesCarryForwardImplicitReset() throws {
+        // Isolate ~/.bough/usage-daily.json (see explicit-reset test above).
+        let tempHome = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempHome, withIntermediateDirectories: true)
+        let originalHome = ProcessInfo.processInfo.environment["HOME"]
+        setenv("HOME", tempHome.path, 1)
+        defer {
+            if let originalHome { setenv("HOME", originalHome, 1) } else { unsetenv("HOME") }
+            try? FileManager.default.removeItem(at: tempHome)
+        }
+
         let store = UsageStore(defaults: defaults, scheduler: RecordingUsageRefreshScheduler(), now: { Date(timeIntervalSince1970: 1_000) })
 
         store.applyCodexRateLimitResult(Self.codexResult(weeklyReset: 100_000, weeklyUsedPercent: 82))
@@ -254,6 +281,10 @@ final class UsageStoreTests: XCTestCase {
         let today = store.snapshot(for: .codex).today
         XCTAssertEqual(today?.basis.resetProvenance, .implicitReset)
         XCTAssertEqual(today?.basis.weeklyResetAlreadyFiredToday, true)
+        // Spec §8.1: the implicit reset re-locks the baseline at the post-reset
+        // usedPercent (4), so Today starts the new week at full allowance.
+        XCTAssertEqual(today?.basis.weeklyUsedAtDayStart ?? -1, 4, accuracy: 0.001)
+        XCTAssertEqual(today?.pct ?? 999, 100.0, accuracy: 0.001)
     }
 
     func testFailedRefreshPreservedStaleSampleDoesNotTriggerResetCarryForward() async {

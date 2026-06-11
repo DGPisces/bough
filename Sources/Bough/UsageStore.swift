@@ -586,7 +586,8 @@ final class UsageStore {
                 tool: .claudeCode,
                 now: currentDate,
                 calendar: calendar,
-                timeZone: timeZone
+                timeZone: timeZone,
+                priorWeekly: priorWeekly
             )
             return UsageForecastCalculator.forecast(
                 weekly: weekly,
@@ -776,7 +777,8 @@ final class UsageStore {
                 tool: parsed.tool,
                 now: currentDate,
                 calendar: calendar,
-                timeZone: timeZone
+                timeZone: timeZone,
+                priorWeekly: priorWeekly
             )
             return UsageForecastCalculator.forecast(
                 weekly: weekly,

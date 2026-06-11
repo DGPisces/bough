@@ -212,7 +212,8 @@ public final class UsageMonitorRunner {
                 tool: parsed.tool,
                 now: acceptedAt,
                 calendar: calendar,
-                timeZone: timeZone
+                timeZone: timeZone,
+                priorWeekly: priorWeekly
             )
             return UsageForecastCalculator.forecast(
                 weekly: weekly,

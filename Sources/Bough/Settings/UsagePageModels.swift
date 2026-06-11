@@ -374,12 +374,9 @@ struct UsageDetailsModel {
             todayPctText = "\(Int(today.pct.rounded()))%"
             // `today_used` derived from the calculator's basis so the two
             // numbers never drift (Phase 5 spec contract for TODAY-16).
-            let todayUsed: Double = {
-                if today.basis.weeklyResetAlreadyFiredToday {
-                    return max(0, (100.0 - today.basis.weeklyUsedAtDayStart) + today.basis.weeklyUsedNow)
-                }
-                return max(0, today.basis.weeklyUsedNow - today.basis.weeklyUsedAtDayStart)
-            }()
+            // Baseline is re-locked at a weekly reset (spec §8.1), so the delta from
+            // baseline IS today's usage — no cross-reset segment math.
+            let todayUsed = max(0, today.basis.weeklyUsedNow - today.basis.weeklyUsedAtDayStart)
             todayAllowanceLineText = String(format: "今日额度 %.1f%% 周占比", today.todayAllowanceOfWeek)
             todayUsedLineText = String(format: "已用 %.1f%% 周占比", todayUsed)
             todayResetExplanationText = Self.todayResetExplanation(for: today.basis.resetProvenance)

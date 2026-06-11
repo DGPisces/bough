@@ -142,9 +142,9 @@ final class UsageDailyAccumulatorTests: XCTestCase {
     }
 
     func testWeeklyResetMidDayKeepsBaseline() {
-        // TODAY-09: when the weekly reset fires inside the local day, the
-        // accumulator keeps the baseline stable. The calculator handles the
-        // pre/post-reset segment math (covered in TodayValueCalculatorTests).
+        // TODAY-09 / spec §8.1: a usedPercent drop WITHOUT priorWeekly evidence
+        // must not touch the baseline — re-lock only fires on a provenance-
+        // confirmed reset (priorWeekly passed; see the re-lock tests below).
         let (storage, _) = makeInMemoryStorage()
         let accumulator = UsageDailyAccumulator(store: storage)
         let beforeReset = date(2026, 5, 14, 10, 0, timeZone: utc)
@@ -355,5 +355,69 @@ final class UsageDailyAccumulatorTests: XCTestCase {
                        "Same-day same-TZ second tick must NOT write (baseline unchanged)")
         // Content invariant: dict still has exactly one entry, unchanged.
         XCTAssertEqual(backing.dict.count, 1)
+    }
+
+    // MARK: - Weekly-reset re-lock (spec §8.1)
+
+    func testExplicitWeeklyResetRelocksAllowance() {
+        let (storage, _) = makeInMemoryStorage()
+        let accumulator = UsageDailyAccumulator(store: storage)
+        let now = date(2026, 5, 14, 10, 0, timeZone: utc)
+        let oldReset = date(2026, 5, 14, 12, 0, timeZone: utc)   // now + 2h
+        let newReset = date(2026, 5, 21, 12, 0, timeZone: utc)   // oldReset + 7d
+        let preResetWeekly = weekly(usedPercent: 90, resetsAt: oldReset)
+
+        accumulator.recordTick(weekly: preResetWeekly, tool: .codex, now: now, calendar: cal, timeZone: utc)
+        XCTAssertEqual(accumulator.baseline(for: .codex)?.weeklyUsedAtDayStart, 90)
+        XCTAssertNil(accumulator.baseline(for: .codex)?.lastHandledResetIntervalID)
+
+        // Reset fired at 12:00; tick at 13:00 carries the post-reset window.
+        let postResetNow = date(2026, 5, 14, 13, 0, timeZone: utc)
+        let postResetWeekly = weekly(usedPercent: 3, resetsAt: newReset)
+        accumulator.recordTick(
+            weekly: postResetWeekly, tool: .codex, now: postResetNow,
+            calendar: cal, timeZone: utc, priorWeekly: preResetWeekly
+        )
+
+        let relocked = accumulator.baseline(for: .codex)
+        XCTAssertEqual(relocked?.weeklyUsedAtDayStart ?? -1, 3, accuracy: 0.001,
+                       "Re-lock must capture the post-reset usedPercent (spec §8.1)")
+        XCTAssertEqual(relocked?.todayAllowanceOfWeek ?? -1, (100.0 - 3.0) / 7.0, accuracy: 0.001,
+                       "Allowance must be recomputed against the NEW resetsAt (7 days out)")
+        XCTAssertNotNil(relocked?.lastHandledResetIntervalID)
+
+        // Second tick in the SAME reset interval must be idempotent — the
+        // baseline must not be re-locked again at the higher usedPercent.
+        let laterNow = date(2026, 5, 14, 14, 0, timeZone: utc)
+        let laterWeekly = weekly(usedPercent: 5, resetsAt: newReset)
+        accumulator.recordTick(
+            weekly: laterWeekly, tool: .codex, now: laterNow,
+            calendar: cal, timeZone: utc, priorWeekly: preResetWeekly
+        )
+
+        XCTAssertEqual(accumulator.baseline(for: .codex)?.weeklyUsedAtDayStart ?? -1, 3, accuracy: 0.001,
+                       "Re-lock must be idempotent per reset interval (spec §8.1)")
+    }
+
+    func testSmallCorrectionDropDoesNotRelock() {
+        let (storage, _) = makeInMemoryStorage()
+        let accumulator = UsageDailyAccumulator(store: storage)
+        let now = date(2026, 5, 14, 10, 0, timeZone: utc)
+        let resetsAt = date(2026, 5, 19, 0, 0, timeZone: utc)
+        let firstWeekly = weekly(usedPercent: 50, resetsAt: resetsAt)
+
+        accumulator.recordTick(weekly: firstWeekly, tool: .codex, now: now, calendar: cal, timeZone: utc)
+        let seeded = accumulator.baseline(for: .codex)
+
+        // Provider correction: 1.5% drop is inside the 2% tolerance and the
+        // boundary is unmoved → correctionIgnored, no re-lock (spec §8.2).
+        let correctionWeekly = weekly(usedPercent: 48.5, resetsAt: resetsAt)
+        accumulator.recordTick(
+            weekly: correctionWeekly, tool: .codex, now: date(2026, 5, 14, 11, 0, timeZone: utc),
+            calendar: cal, timeZone: utc, priorWeekly: firstWeekly
+        )
+
+        XCTAssertEqual(accumulator.baseline(for: .codex), seeded,
+                       "A small correction drop must NOT re-lock the baseline")
     }
 }
