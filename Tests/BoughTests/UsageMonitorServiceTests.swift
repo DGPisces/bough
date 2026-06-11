@@ -166,6 +166,66 @@ final class UsageMonitorServiceTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: continuityURL().path))
     }
 
+    func testDisableDeletesClaudeTokenMirror() throws {
+        TestHelpers.processEnvironmentLock.lock()
+        let originalHome = ProcessInfo.processInfo.environment["HOME"]
+        let fakeHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("UsageMonitorServiceTests-HOME-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fakeHome, withIntermediateDirectories: true)
+        setenv("HOME", fakeHome.path, 1)
+        defer {
+            if let originalHome {
+                setenv("HOME", originalHome, 1)
+            } else {
+                unsetenv("HOME")
+            }
+            try? FileManager.default.removeItem(at: fakeHome)
+            TestHelpers.processEnvironmentLock.unlock()
+        }
+
+        try ClaudeOAuthTokenMirror.write(ClaudeOAuthCredentials(
+            accessToken: "t", expiresAt: nil, scopes: [], subscriptionType: nil
+        ))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ClaudeOAuthTokenMirror.fileURL().path))
+
+        _ = try makeService().disable()
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: ClaudeOAuthTokenMirror.fileURL().path),
+            "disable() must delete the token mirror (spec §6.3)"
+        )
+    }
+
+    func testUninstallDeletesClaudeTokenMirror() throws {
+        TestHelpers.processEnvironmentLock.lock()
+        let originalHome = ProcessInfo.processInfo.environment["HOME"]
+        let fakeHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("UsageMonitorServiceTests-HOME-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fakeHome, withIntermediateDirectories: true)
+        setenv("HOME", fakeHome.path, 1)
+        defer {
+            if let originalHome {
+                setenv("HOME", originalHome, 1)
+            } else {
+                unsetenv("HOME")
+            }
+            try? FileManager.default.removeItem(at: fakeHome)
+            TestHelpers.processEnvironmentLock.unlock()
+        }
+
+        try ClaudeOAuthTokenMirror.write(ClaudeOAuthCredentials(
+            accessToken: "t", expiresAt: nil, scopes: [], subscriptionType: nil
+        ))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ClaudeOAuthTokenMirror.fileURL().path))
+
+        _ = try makeService().uninstall()
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: ClaudeOAuthTokenMirror.fileURL().path),
+            "uninstall() must delete the token mirror (spec §6.3)"
+        )
+    }
+
     func testMissingBundleArtifactNeedsRepair() throws {
         try FileManager.default.removeItem(at: helperURL())
 

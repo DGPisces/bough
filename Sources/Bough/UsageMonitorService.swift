@@ -278,6 +278,8 @@ struct UsageMonitorService {
     func disable() throws -> UsageMonitorLifecycleStatus {
         try? client.unregister()
         terminateHelperProcesses()
+        // spec §6.3 — mirror lifetime bound to monitor enablement
+        ClaudeOAuthTokenMirror.delete()
         setWriterOwner(.app)
         return UsageMonitorLifecycleStatus(state: .stopped, writerOwner: .app, message: nil)
     }
@@ -291,6 +293,8 @@ struct UsageMonitorService {
             try? client.unregister()
         }
         terminateHelperProcesses()
+        // spec §6.3 — mirror lifetime bound to monitor enablement
+        ClaudeOAuthTokenMirror.delete()
         setWriterOwner(.app)
         return UsageMonitorLifecycleStatus(state: .stopped, writerOwner: .app, message: nil)
     }
@@ -319,6 +323,8 @@ struct UsageMonitorService {
         try? client.unregister()
         terminateHelperProcesses()
         removeManagedRuntimeArtifacts()
+        // spec §6.3 — mirror lifetime bound to monitor enablement
+        ClaudeOAuthTokenMirror.delete()
         setWriterOwner(.app)
         return UsageMonitorLifecycleStatus(state: .stopped, writerOwner: .app, message: nil)
     }
@@ -367,6 +373,8 @@ struct UsageMonitorService {
         for url in [statusURL, commandURL] where url.path != continuityStoreURL.path {
             try? fileManager.removeItem(at: url)
         }
+        // spec §6.3 — token mirror is a managed runtime artifact
+        ClaudeOAuthTokenMirror.delete()
     }
 
     private func terminateHelperProcesses() {
