@@ -1024,6 +1024,53 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: stableBridge.path))
     }
 
+    /// Corrupt sentinel edge-case: settings.json points at the wrapper, but the
+    /// wrapper content has no valid `# RESTORE:` line. Retirement must refuse to
+    /// modify settings.json (uninstall trust-boundary-2) AND must leave the wrapper
+    /// script in place — deleting it here would leave settings.json pointing at a
+    /// nonexistent file, silently breaking the user's statusLine.
+    func testRetireWithCorruptSentinelLeavesSettingsAndScriptUntouched() throws {
+        let paths = paths()
+        let stableBridge = paths.root.appendingPathComponent(".bough/bough-statusline-bridge.sh")
+
+        // Write settings.json pointing at the wrapper.
+        try Self.writeJSON(
+            "{\"statusLine\":{\"command\":\"\(paths.wrapper.path)\"}}",
+            to: paths.settings
+        )
+
+        // Write a wrapper file with garbage content — no valid `# RESTORE:` sentinel.
+        try FileManager.default.createDirectory(
+            at: paths.wrapper.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let corrupt = """
+        #!/usr/bin/env bash
+        # This wrapper is intentionally missing the RESTORE sentinel.
+        echo "corrupt wrapper"
+        """
+        try Data(corrupt.utf8).write(to: paths.wrapper)
+
+        let settingsBefore = try Data(contentsOf: paths.settings)
+
+        let retired = ConfigInstaller.retireClaudeCodeStatusLineIfInstalled(
+            fm: FileManager.default,
+            settingsPath: paths.settings.path,
+            stableBridgePath: stableBridge.path,
+            wrapperPath: paths.wrapper.path
+        )
+
+        XCTAssertFalse(retired, "Retirement must return false when sentinel is corrupt")
+        XCTAssertEqual(
+            try Data(contentsOf: paths.settings), settingsBefore,
+            "settings.json must be unchanged when the wrapper sentinel cannot be parsed"
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: paths.wrapper.path),
+            "Wrapper script must NOT be deleted when retirement refused to modify settings.json"
+        )
+    }
+
     func testHookInstallKeepsChainWrapperAndHooks() throws {
         let paths = paths()
         try Self.writeJSON(#"{"statusLine":{"command":"/usr/local/bin/starship"}}"#, to: paths.settings)

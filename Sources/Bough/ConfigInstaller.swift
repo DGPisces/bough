@@ -700,6 +700,16 @@ struct ConfigInstaller {
                 wrapperPath: wrapperPath
             )
         }
+        // Only remove the scripts when settings.json no longer points at a Bough
+        // command. If uninstall refused (e.g. corrupt wrapper sentinel — the wrapper
+        // has no valid `# RESTORE:` line so the prev_cmd cannot be recovered),
+        // settings.json still references the wrapper; deleting it here would leave
+        // the user's statusLine pointing at a nonexistent file.
+        let afterCurrent = currentClaudeCodeStatusLineCommand(fm: fm, settingsPath: settingsPath)
+        let stillPointsAtBough = isBoughClaudeCodeStatusLineCommand(afterCurrent)
+            || afterCurrent == stableBridgePath
+            || afterCurrent == wrapperPath
+        guard !stillPointsAtBough else { return false }
         try? fm.removeItem(atPath: stableBridgePath)
         try? fm.removeItem(atPath: wrapperPath)
         return uninstalled
