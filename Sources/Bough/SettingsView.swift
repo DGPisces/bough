@@ -971,10 +971,8 @@ private struct IntegrationsPage: View {
     /// returns (success or failure).
     @State private var claudeBusy = false
     /// Regression guard: authoritative toggle value for the
-    /// Claude Code row. Read at body-eval time from
-    /// `ConfigInstaller.currentClaudeCodeStatusLineCommand() != nil` (i.e.
-    /// "statusLine is installed") so toggling off + on across app launches
-    /// reflects the actual installed state, not just the hook flag.
+    /// Claude Code row, read at body-eval time so toggling off + on across
+    /// app launches reflects the actual installed state.
     @State private var claudeIntegrationEnabled = IntegrationsPage.computeClaudeIntegrationEnabled()
     /// Regression guard: install failure banner. Surfaces just
     /// above the cli_status section when set. Cleared on the next successful
@@ -982,16 +980,10 @@ private struct IntegrationsPage: View {
     @State private var claudeInstallError: String?
 
     /// Source-of-truth for whether Bough's Claude Code integration is on.
-    /// Combined check: hook entry present AND statusLine wrapper/bridge
-    /// installed. The toggle reflects this combined state so a partial
-    /// installation (one half missing) reads as "off" and a single click
-    /// re-establishes both halves.
+    /// statusLine retired (spec §7): the integration is now only the
+    /// session-monitoring hook, so the hook flag alone decides the toggle.
     private static func computeClaudeIntegrationEnabled() -> Bool {
-        let hookOn = ConfigInstaller.isEnabled(source: "claude")
-        let statusLineOn = ConfigInstaller.isBoughClaudeCodeStatusLineCommand(
-            ConfigInstaller.currentClaudeCodeStatusLineCommand()
-        )
-        return hookOn && statusLineOn
+        ConfigInstaller.isEnabled(source: "claude")
     }
 
     private func refreshCLIStatuses() {
@@ -1005,10 +997,10 @@ private struct IntegrationsPage: View {
     }
 
     /// Regression guard: unified install / uninstall lever.
-    /// Toggle ON → enable hook AND chain-install statusLine wrapper.
-    /// Toggle OFF → disable hook AND uninstall wrapper (chain-restore).
-    /// Both halves go through ChainInstallCoordinator so the call is
-    /// serialized against AppDelegate's first-launch auto-install.
+    /// Toggle ON → enable the session-monitoring hook (statusLine retired, spec §7).
+    /// Toggle OFF → disable hook AND retire any historical statusLine leftovers.
+    /// Both paths go through ChainInstallCoordinator so concurrent callers
+    /// (Settings toggle, Welcome Guide) serialize.
     @MainActor
     private func handleClaudeIntegrationToggle(_ desired: Bool) async {
         claudeBusy = true
@@ -1095,8 +1087,8 @@ private struct IntegrationsPage: View {
                     let targetID = localToolTargetID(for: cli.source)
                     if cli.source == "claude" {
                         // Regression guard: unified Claude Code
-                        // row — toggle wires up BOTH the hook AND the
-                        // statusLine wrapper through ChainInstallCoordinator.
+                        // row — toggle wires up the session-monitoring hook
+                        // through ChainInstallCoordinator (statusLine retired).
                         CLIStatusRow(
                             name: cli.name,
                             source: cli.source,

@@ -887,132 +887,141 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
         )
     }
 
-    // MARK: - Phase 21-03 / D-06 chain auto-install gate
+    // MARK: - Spec §7 statusLine retirement migration
 
-    /// Gate proceeds when all four conditions hold: flag never set, settings.json
-    /// exists, current statusLine command is neither the Bough bridge directly nor
-    /// the Bough wrapper. The gate is pure — no UserDefaults / ~/.claude side effects.
-    func testChainAutoInstallGate_proceedsWhenAllConditionsMet() throws {
+    /// Chained install fixture (wrapper + sentinel): retirement must restore the
+    /// user's prev_cmd from the wrapper's RESTORE sentinel and delete both the
+    /// wrapper and the stable bridge script from ~/.bough.
+    func testRetireRestoresPrevCommandFromChainedInstall() throws {
         let paths = paths()
+        let stableBridge = paths.root.appendingPathComponent(".bough/bough-statusline-bridge.sh")
         try Self.writeJSON(#"{"statusLine":{"command":"/usr/local/bin/starship"}}"#, to: paths.settings)
-
-        let decision = ConfigInstaller.testEvaluateChainAutoInstallGate(
+        let install = ConfigInstaller.testInstallClaudeCodeStatusLineChainAware(
             settingsPath: paths.settings.path,
-            wrapperPath: paths.wrapper.path,
-            proposedBridgePath: paths.bridge.path,
-            hasAttemptedFlag: false
+            proposedBridgePath: stableBridge.path,
+            wrapperPath: paths.wrapper.path
         )
-
-        XCTAssertEqual(decision, .proceed)
-    }
-
-    /// `hasAttemptedFlag: true` shortcircuits before any disk read — even when
-    /// settings.json is missing AND no Bough install exists, the gate must return
-    /// `.skipFlagSet`. Asserting flag-first ordering protects the one-shot guarantee.
-    func testChainAutoInstallGate_skipsWhenFlagAlreadySet() throws {
-        let paths = paths()
-        // Settings absent on purpose — flag check must win regardless.
-        let decision = ConfigInstaller.testEvaluateChainAutoInstallGate(
-            settingsPath: paths.settings.path,
-            wrapperPath: paths.wrapper.path,
-            proposedBridgePath: paths.bridge.path,
-            hasAttemptedFlag: true
-        )
-
-        XCTAssertEqual(decision, .skipFlagSet)
-    }
-
-    /// User is not a Claude Code user → no settings.json on disk → gate refuses
-    /// to fire so Bough never creates a config file the user did not opt into.
-    func testChainAutoInstallGate_skipsWhenSettingsAbsent() throws {
-        let paths = paths()
-        // Do NOT create settings.json — emulate a non-Claude-Code user.
-        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.settings.path))
-
-        let decision = ConfigInstaller.testEvaluateChainAutoInstallGate(
-            settingsPath: paths.settings.path,
-            wrapperPath: paths.wrapper.path,
-            proposedBridgePath: paths.bridge.path,
-            hasAttemptedFlag: false
-        )
-
-        XCTAssertEqual(decision, .skipNoSettings)
-    }
-
-    /// Bough bridge already in settings.json (direct install) → no auto-install needed.
-    func testChainAutoInstallGate_skipsWhenBoughBridgeAlreadyInstalled() throws {
-        let paths = paths()
-        try Self.writeJSON(
-            #"{"statusLine":{"command":"\#(paths.bridge.path)"}}"#,
-            to: paths.settings
-        )
-
-        let decision = ConfigInstaller.testEvaluateChainAutoInstallGate(
-            settingsPath: paths.settings.path,
-            wrapperPath: paths.wrapper.path,
-            proposedBridgePath: paths.bridge.path,
-            hasAttemptedFlag: false
-        )
-
-        XCTAssertEqual(decision, .skipBoughBridge)
-    }
-
-    /// WR-01: when the bundled bridge cannot be resolved (transient FS race,
-    /// code-sign cache hiccup, etc.), the gate MUST return `.deferTransient`
-    /// — NOT `.skipNoSettings`. The AppDelegate caller relies on this case to
-    /// avoid setting the one-shot UserDefaults flag so the next launch retries.
-    /// Previously the production entry returned `.skipNoSettings`, the
-    /// AppDelegate set the flag, and the user was permanently locked out of
-    /// auto-install on the next (successful) launch.
-    func testChainAutoInstallGate_defersWhenBundleResolutionFails() throws {
-        let decision = ConfigInstaller.evaluateChainAutoInstallGate(
-            hasAttemptedFlag: false,
-            bridgePathResolver: { nil }
-        )
-
-        guard case .deferTransient(let reason) = decision else {
-            XCTFail("Expected .deferTransient, got \(decision)")
+        guard case .chained = install else {
+            XCTFail("Precondition: expected .chained, got \(install)")
             return
         }
-        XCTAssertFalse(
-            reason.isEmpty,
-            "Defer reason must be populated so AppDelegate can log the actual cause (not a misleading `~/.claude/settings.json absent` line)"
-        )
-    }
+        try Data("#!/usr/bin/env bash\nexit 0\n".utf8).write(to: stableBridge)
 
-    /// Companion to the test above: when the bundle resolves and the user
-    /// IS a Claude Code user with a third-party statusLine, the production
-    /// entry must still return `.proceed` — proving the resolver-injection
-    /// refactor did not alter the happy path.
-    func testChainAutoInstallGate_proceedsThroughProductionEntryWhenResolverSucceeds() throws {
-        // The production entry reads ~/.claude/settings.json directly, so this
-        // test can only assert "non-deferred" outcome — the happy-path proceed
-        // assertion is already covered by testChainAutoInstallGate_proceedsWhenAllConditionsMet
-        // via the pure-function seam. Here we only assert the resolver hook
-        // does not corrupt the contract for a successful resolve.
-        let decision = ConfigInstaller.evaluateChainAutoInstallGate(
-            hasAttemptedFlag: true,  // flag-set shortcircuits before any disk read — deterministic
-            bridgePathResolver: { "/fake/but/non-nil" }
-        )
-        XCTAssertEqual(decision, .skipFlagSet)
-    }
-
-    /// Bough wrapper already in settings.json (chain install present) → idempotent skip.
-    func testChainAutoInstallGate_skipsWhenBoughWrapperAlreadyInstalled() throws {
-        let paths = paths()
-        try Self.writeJSON(
-            #"{"statusLine":{"command":"\#(paths.wrapper.path)"}}"#,
-            to: paths.settings
-        )
-
-        let decision = ConfigInstaller.testEvaluateChainAutoInstallGate(
+        let retired = ConfigInstaller.retireClaudeCodeStatusLineIfInstalled(
+            fm: FileManager.default,
             settingsPath: paths.settings.path,
-            wrapperPath: paths.wrapper.path,
-            proposedBridgePath: paths.bridge.path,
-            hasAttemptedFlag: false
+            stableBridgePath: stableBridge.path,
+            wrapperPath: paths.wrapper.path
         )
 
-        XCTAssertEqual(decision, .skipBoughWrapper)
+        XCTAssertTrue(retired)
+        XCTAssertEqual(
+            ConfigInstaller.testCurrentClaudeCodeStatusLineCommand(settingsPath: paths.settings.path),
+            "/usr/local/bin/starship",
+            "Retirement must restore the user's prev_cmd via the wrapper sentinel"
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.wrapper.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stableBridge.path))
+    }
+
+    /// Direct bridge install fixture (no prev statusLine): retirement must
+    /// remove the statusLine key entirely and delete the bridge script.
+    func testRetireRemovesStatusLineKeyForDirectInstall() throws {
+        let paths = paths()
+        let stableBridge = paths.root.appendingPathComponent(".bough/bough-statusline-bridge.sh")
+        XCTAssertEqual(
+            ConfigInstaller.testInstallClaudeCodeStatusLine(
+                settingsPath: paths.settings.path,
+                proposedBridgePath: stableBridge.path
+            ),
+            .installed
+        )
+        try FileManager.default.createDirectory(
+            at: stableBridge.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("#!/usr/bin/env bash\nexit 0\n".utf8).write(to: stableBridge)
+
+        let retired = ConfigInstaller.retireClaudeCodeStatusLineIfInstalled(
+            fm: FileManager.default,
+            settingsPath: paths.settings.path,
+            stableBridgePath: stableBridge.path,
+            wrapperPath: paths.wrapper.path
+        )
+
+        XCTAssertTrue(retired)
+        let root = try Self.jsonObject(at: paths.settings)
+        XCTAssertNil(root["statusLine"], "Direct install with no prev_cmd must lose the statusLine key entirely")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stableBridge.path))
+    }
+
+    /// A third-party statusLine (e.g. starship) must NEVER be touched by the
+    /// retirement — settings.json stays byte-identical; leftover Bough scripts
+    /// are still swept from ~/.bough.
+    func testRetireLeavesThirdPartyStatusLineUntouched() throws {
+        let paths = paths()
+        let stableBridge = paths.root.appendingPathComponent(".bough/bough-statusline-bridge.sh")
+        try Self.writeJSON(#"{"statusLine":{"command":"/usr/local/bin/starship"},"theme":"dark"}"#, to: paths.settings)
+        try FileManager.default.createDirectory(
+            at: stableBridge.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("#!/usr/bin/env bash\nexit 0\n".utf8).write(to: stableBridge)
+        try Data("#!/usr/bin/env bash\nexit 0\n".utf8).write(to: paths.wrapper)
+        let before = try Data(contentsOf: paths.settings)
+
+        let retired = ConfigInstaller.retireClaudeCodeStatusLineIfInstalled(
+            fm: FileManager.default,
+            settingsPath: paths.settings.path,
+            stableBridgePath: stableBridge.path,
+            wrapperPath: paths.wrapper.path
+        )
+
+        XCTAssertFalse(retired, "Nothing to uninstall — non-Bough statusLine must be left alone")
+        XCTAssertEqual(
+            try Data(contentsOf: paths.settings), before,
+            "settings.json must be byte-identical after retiring over a third-party statusLine"
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stableBridge.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.wrapper.path))
+    }
+
+    /// Idempotency: running the retirement twice converges to the same end
+    /// state, and the second pass reports nothing left to uninstall.
+    func testRetireIsIdempotent() throws {
+        let paths = paths()
+        let stableBridge = paths.root.appendingPathComponent(".bough/bough-statusline-bridge.sh")
+        try Self.writeJSON(#"{"statusLine":{"command":"/usr/local/bin/starship"}}"#, to: paths.settings)
+        _ = ConfigInstaller.testInstallClaudeCodeStatusLineChainAware(
+            settingsPath: paths.settings.path,
+            proposedBridgePath: stableBridge.path,
+            wrapperPath: paths.wrapper.path
+        )
+
+        let first = ConfigInstaller.retireClaudeCodeStatusLineIfInstalled(
+            fm: FileManager.default,
+            settingsPath: paths.settings.path,
+            stableBridgePath: stableBridge.path,
+            wrapperPath: paths.wrapper.path
+        )
+        let afterFirst = try Data(contentsOf: paths.settings)
+
+        let second = ConfigInstaller.retireClaudeCodeStatusLineIfInstalled(
+            fm: FileManager.default,
+            settingsPath: paths.settings.path,
+            stableBridgePath: stableBridge.path,
+            wrapperPath: paths.wrapper.path
+        )
+
+        XCTAssertTrue(first)
+        XCTAssertFalse(second, "Second retirement pass must find nothing to uninstall")
+        XCTAssertEqual(try Data(contentsOf: paths.settings), afterFirst, "End state must not change on the second pass")
+        XCTAssertEqual(
+            ConfigInstaller.testCurrentClaudeCodeStatusLineCommand(settingsPath: paths.settings.path),
+            "/usr/local/bin/starship"
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.wrapper.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stableBridge.path))
     }
 
     func testHookInstallKeepsChainWrapperAndHooks() throws {
@@ -1063,18 +1072,15 @@ final class ConfigInstallerClaudeCodeTests: XCTestCase {
 
     /// WR-03: ChainInstallCoordinator.shared is an actor — Swift's runtime
     /// guarantees one in-flight call per actor instance. This smoke test
-    /// uses the actor's DEBUG-only test seam (which serializes against the
-    /// SAME actor queue as `install(replaceExisting:)`) to fire two
-    /// overlapping critical sections and assert they observe each other's
-    /// completion strictly in order.
+    /// uses the actor's test seam (which serializes against the SAME actor
+    /// queue as `installClaudeIntegration` / `uninstallClaudeIntegration`)
+    /// to fire two overlapping critical sections and assert they observe
+    /// each other's completion strictly in order.
     ///
-    /// Why a test seam: the production `install(replaceExisting:)` entry
-    /// touches the user's real ~/.claude/settings.json — the production
-    /// `installClaudeCodeStatusLine` is unscoped (no injectable path) so a
-    /// real-disk test would either mutate the user's machine or depend on
-    /// whether the bundle is resolvable in the test process. Routing
-    /// through a DEBUG critical-section seam on the same actor gives us
-    /// the serialization-order assertion without touching the disk.
+    /// Why a test seam: the production entries touch the user's real
+    /// ~/.claude/settings.json, so a real-disk test would mutate the user's
+    /// machine. Routing through a critical-section seam on the same actor
+    /// gives us the serialization-order assertion without touching the disk.
     func testChainInstallCoordinator_serializesConcurrentCallers() async throws {
         // Reset shared counter state (test seam guarantees this is safe
         // because every call to it goes through the same actor queue).

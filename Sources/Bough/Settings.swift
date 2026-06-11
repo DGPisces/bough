@@ -2,15 +2,9 @@ import AppKit
 import Foundation
 import ServiceManagement
 
-/// Phase 21 / D-06: AppKit↔SwiftUI notifications for Settings-page banners.
-/// AppDelegate posts these from background tasks; SettingsView subscribes via
+/// AppKit↔SwiftUI notifications for Settings pages; subscribers use
 /// `.onReceive(NotificationCenter.default.publisher(for:))`.
 enum SettingsNotification {
-    /// Posted after a successful first-launch chain auto-install (AppDelegate → SettingsView).
-    /// userInfo is empty; the receiver looks up the banner copy from L10n directly so the
-    /// notification's payload doesn't need to track locale changes.
-    static let claudeCodeChainAutoInstallSucceeded =
-        Notification.Name("com.dgpisces.bough.ClaudeCodeChainAutoInstallSucceeded")
     /// Regression guard: posted by `HooksPage`'s Claude Code
     /// toggle after the install / uninstall coordinator finishes mutating
     /// settings.json. The `UsagePage` listens to re-classify the data-source
@@ -190,13 +184,10 @@ enum SettingsKey {
     static let notificationsThresholdMasterEnabled = "bough.notifications.threshold.master.enabled"
     static let deprecatedUpdateChannel = "updateChannel"
 
-    // Phase 21 / D-06: one-shot flag — set to true the moment the first-launch chain
-    // auto-install gate fires (BEFORE the install attempt) so a crash / hang never
+    // Spec §7: one-shot flag — set to true the moment the statusLine retirement
+    // migration fires (BEFORE the uninstall work) so a crash / hang never
     // re-triggers the mutation. Inspect via `defaults read com.dgpisces.bough ...`.
-    static let hasAttemptedClaudeCodeChainAutoInstall = "BoughHasAttemptedClaudeCodeChainAutoInstall"
-    // Phase 21 / D-06: pending banner copy. Set by AppDelegate post-success when
-    // Settings is not yet open; drained by `UsagePage.onAppear` on next open.
-    static let pendingClaudeCodeChainBanner = "BoughPendingClaudeCodeChainBanner"
+    static let hasRetiredClaudeCodeStatusLine = "hasRetiredClaudeCodeStatusLine"
 
     // Codex CLI outdated notice — keyed by detected version so a downgrade re-surfaces the banner (D-12).
     // Sanitize the version suffix to [A-Za-z0-9._-] to keep the key well-formed.
