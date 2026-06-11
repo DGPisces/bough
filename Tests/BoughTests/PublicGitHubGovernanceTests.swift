@@ -68,7 +68,7 @@ final class PublicGitHubGovernanceTests: XCTestCase {
         XCTAssertTrue(release.contains(#"gh release edit "${release_args[@]}""#))
         XCTAssertTrue(release.contains(#"gh release upload "${upload_args[@]}""#))
         XCTAssertTrue(release.contains("(.browserDownloadUrl // .url)"))
-        XCTAssertTrue(release.contains("BOUGH_HOMEBREW_TAP_TOKEN"))
+        XCTAssertTrue(release.contains("BOUGH_TAP_DEPLOY_KEY"))
         XCTAssertTrue(release.contains("Tools/Release/release-flow.sh open-tap-pr"))
         XCTAssertTrue(release.contains("git -C \"$APPCAST_STAGING\" diff --cached --quiet"))
         XCTAssertTrue(release.contains("No appcast changes to publish."))

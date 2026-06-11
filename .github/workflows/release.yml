@@ -225,9 +225,11 @@ jobs:
       - name: Open Homebrew tap PR
         if: ${{ !contains(github.ref_name, '-') }}
         env:
-          # github.token is scoped to DGPisces/bough. This secret must be a
-          # fine-grained PAT or GitHub App token with write access to the tap.
-          GH_TOKEN: ${{ secrets.BOUGH_HOMEBREW_TAP_TOKEN }}
+          # github.token only reads the public tap for the existing-PR check.
+          # The cask branch is pushed through the tap-publisher deploy key;
+          # the tap repo's auto-pr workflow opens the manual-review PR.
+          GH_TOKEN: ${{ github.token }}
+          BOUGH_TAP_DEPLOY_KEY: ${{ secrets.BOUGH_TAP_DEPLOY_KEY }}
         run: |
           Tools/Release/release-flow.sh open-tap-pr \
             --tag "$BOUGH_RELEASE_TAG" \

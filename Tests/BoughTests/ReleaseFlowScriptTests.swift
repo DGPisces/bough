@@ -224,7 +224,10 @@ final class ReleaseFlowScriptTests: XCTestCase {
         )
 
         XCTAssertTrue(workflow.contains("- name: Open Homebrew tap PR"))
-        XCTAssertTrue(workflow.contains("GH_TOKEN: ${{ secrets.BOUGH_HOMEBREW_TAP_TOKEN }}"))
+        // github.token cannot write to the tap repo and PATs expire, so the
+        // cask branch must go through the never-expiring tap deploy key.
+        XCTAssertTrue(workflow.contains("BOUGH_TAP_DEPLOY_KEY: ${{ secrets.BOUGH_TAP_DEPLOY_KEY }}"))
+        XCTAssertFalse(workflow.contains("BOUGH_HOMEBREW_TAP_TOKEN"))
         XCTAssertTrue(workflow.contains("Tools/Release/release-flow.sh open-tap-pr"))
         XCTAssertTrue(workflow.contains("--asset-sha256 \"$BOUGH_DMG_SHA256\""))
         let verifyRemoteFeed = try XCTUnwrap(workflow.range(of: "Verify stable remote feed"))
@@ -370,9 +373,11 @@ final class ReleaseFlowScriptTests: XCTestCase {
         XCTAssertEqual(result.exitCode, 0, result.stderr)
         XCTAssertTrue(result.stdout.contains("tapRepo=DGPisces/homebrew-tap"))
         XCTAssertTrue(result.stdout.contains("branch=bough-v1.0.4"))
-        XCTAssertTrue(result.stdout.contains("gh pr create"))
-        XCTAssertTrue(result.stdout.contains("--repo DGPisces/homebrew-tap"))
-        XCTAssertTrue(result.stdout.contains("--head bough-v1.0.4"))
+        // The branch push goes through the tap deploy key; PR creation is the
+        // tap repo's auto-pr workflow, not a cross-repo token from this side.
+        XCTAssertTrue(result.stdout.contains("push git@github.com:DGPisces/homebrew-tap.git HEAD:bough-v1.0.4"))
+        XCTAssertTrue(result.stdout.contains("tap auto-pr workflow opens the manual-review PR"))
+        XCTAssertFalse(result.stdout.contains("gh pr create"))
         XCTAssertFalse(result.stdout.contains("gh pr merge"))
         XCTAssertFalse(result.stdout.contains("homebrew/cask"))
     }
