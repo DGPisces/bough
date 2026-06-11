@@ -240,6 +240,20 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         XCTAssertEqual(calls.value, 2)
     }
 
+    // MARK: CLI 版本探测
+
+    func testVersionProbeParsesSemverFromScriptOutput() throws {
+        let script = tempDir.appendingPathComponent("fake-claude")
+        try "#!/bin/sh\necho \"2.1.173 (Claude Code)\"\n".write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        XCTAssertEqual(ClaudeCLIVersionProbe.detect(executableCandidates: [script.path]), "2.1.173")
+    }
+
+    func testVersionProbeReturnsNilForMissingExecutable() {
+        let missing = tempDir.appendingPathComponent("no-such-claude").path
+        XCTAssertNil(ClaudeCLIVersionProbe.detect(executableCandidates: [missing]))
+    }
+
     // MARK: token 镜像
 
     func testTokenMirrorWriteAndDeleteRoundTrip() throws {

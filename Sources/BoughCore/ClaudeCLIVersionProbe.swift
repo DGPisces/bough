@@ -35,13 +35,19 @@ public enum ClaudeCLIVersionProbe {
         process.arguments = ["--version"]
         let pipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = Pipe()
+        // Discard stderr instead of piping it: an undrained Pipe blocks a
+        // child that writes >64KB to stderr until the deadline below.
+        process.standardError = FileHandle.nullDevice
         do { try process.run() } catch { return nil }
         let deadline = Date().addingTimeInterval(3)
         while process.isRunning && Date() < deadline {
             Thread.sleep(forTimeInterval: 0.05)
         }
-        if process.isRunning { process.terminate(); return nil }
+        if process.isRunning {
+            process.terminate()
+            process.waitUntilExit() // reap — avoid leaving a transient zombie
+            return nil
+        }
         guard let output = String(
             data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8
         ) else { return nil }
