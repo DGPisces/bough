@@ -368,6 +368,96 @@ final class UsageMonitorRunnerTests: XCTestCase {
         XCTAssertEqual(UsageMonitorRunner.appClosedIdleInterval, 300)
     }
 
+    // MARK: - OAuth fetcher tests
+
+    func testMirrorFreshAndFetcherInjected_consumesFileNotFetcher() throws {
+        let store = try UsageContinuityStore(path: continuityPath())
+        let claudeURL = tempDir.appendingPathComponent("claude-usage.json")
+        let now = date(2026, 5, 19, 9)
+        // Write file and set mtime to "now" so age = 0 < 420s (fresh).
+        try claudePayload(weeklyUsed: 55, updatedAt: now).write(to: claudeURL)
+        try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: claudeURL.path)
+
+        let fetcher = FakeClaudeUsageFetcher(result: .failure(OAuthUsageError.credentialsUnavailable(reason: "should not be called")))
+        let runner = makeRunner(store: store, claudeOAuthFetcher: fetcher, now: { now })
+
+        let outcome = runner.runClaudeCodeOnce()
+
+        XCTAssertEqual(outcome, .accepted(tool: .claudeCode))
+        XCTAssertEqual(fetcher.fetchCount, 0, "Fetcher must not be called when mirror is fresh")
+    }
+
+    func testMirrorStaleAndFetcherInjected_fetcherCalledOutcomeAccepted() throws {
+        let store = try UsageContinuityStore(path: continuityPath())
+        let claudeURL = tempDir.appendingPathComponent("claude-usage.json")
+        let now = date(2026, 5, 19, 9)
+        let staleMtime = now.addingTimeInterval(-600) // 10 minutes ago > 420s
+        // Write the file with a stale mtime.
+        try claudePayload(weeklyUsed: 30, updatedAt: staleMtime).write(to: claudeURL)
+        try FileManager.default.setAttributes([.modificationDate: staleMtime], ofItemAtPath: claudeURL.path)
+
+        let freshPayload = claudePayload(weeklyUsed: 30, updatedAt: now)
+        let fetcher = FakeClaudeUsageFetcher(result: .success(freshPayload))
+        let runner = makeRunner(store: store, claudeOAuthFetcher: fetcher, now: { now })
+
+        let outcome = runner.runClaudeCodeOnce()
+
+        XCTAssertEqual(outcome, .accepted(tool: .claudeCode))
+        XCTAssertEqual(fetcher.fetchCount, 1, "Fetcher must be called when mirror is stale")
+    }
+
+    func testMirrorMissingAndFetcherThrowsTokenExpired_outcomeUnavailable() throws {
+        let store = try UsageContinuityStore(path: continuityPath())
+        // Do not write the claude-usage.json file at all.
+
+        let fetcher = FakeClaudeUsageFetcher(result: .failure(OAuthUsageError.tokenExpired))
+        let runner = makeRunner(store: store, claudeOAuthFetcher: fetcher)
+
+        let outcome = runner.runClaudeCodeOnce()
+
+        XCTAssertEqual(outcome, .unavailable(reason: "Claude usage source unavailable"))
+    }
+
+    func testCodexOAuthFetcherSuccess_readerNotCalled() throws {
+        let store = try UsageContinuityStore(path: continuityPath())
+        let now = date(2026, 5, 19, 9)
+        let oauthFetcher = FakeCodexUsageFetcher(result: .success(codexResult(weeklyUsed: 40)))
+        let reader = FakeCodexRateLimitMonitorReader(result: .success(codexResult(weeklyUsed: 99)))
+        let runner = makeRunner(store: store, codexRateLimitReader: reader, codexOAuthFetcher: oauthFetcher, now: { now })
+
+        let outcome = runner.runCodexOnce()
+
+        XCTAssertEqual(outcome, .accepted(tool: .codex))
+        XCTAssertEqual(oauthFetcher.fetchCount, 1)
+        XCTAssertEqual(reader.readCount, 0, "CLI reader must not be called when OAuth succeeds")
+    }
+
+    func testCodexOAuthThrowsAuthFailure_fallsThroughToReader() throws {
+        let store = try UsageContinuityStore(path: continuityPath())
+        let now = date(2026, 5, 19, 9)
+        let oauthFetcher = FakeCodexUsageFetcher(result: .failure(OAuthUsageError.unauthorized(statusCode: 401)))
+        let reader = FakeCodexRateLimitMonitorReader(result: .success(codexResult(weeklyUsed: 25)))
+        let runner = makeRunner(store: store, codexRateLimitReader: reader, codexOAuthFetcher: oauthFetcher, now: { now })
+
+        let outcome = runner.runCodexOnce()
+
+        XCTAssertEqual(outcome, .accepted(tool: .codex))
+        XCTAssertEqual(oauthFetcher.fetchCount, 1)
+        XCTAssertEqual(reader.readCount, 1, "CLI reader must be called after auth-class OAuth failure")
+    }
+
+    func testCodexOAuthThrowsNetwork_outcomeFailed_readerNotCalled() throws {
+        let store = try UsageContinuityStore(path: continuityPath())
+        let oauthFetcher = FakeCodexUsageFetcher(result: .failure(OAuthUsageError.network("connection refused")))
+        let reader = FakeCodexRateLimitMonitorReader(result: .success(codexResult(weeklyUsed: 99)))
+        let runner = makeRunner(store: store, codexRateLimitReader: reader, codexOAuthFetcher: oauthFetcher)
+
+        let outcome = runner.runCodexOnce()
+
+        XCTAssertEqual(outcome, .failed(reason: "Codex usage source read failed"))
+        XCTAssertEqual(reader.readCount, 0, "CLI reader must not be called after non-auth OAuth failure")
+    }
+
     // MARK: - Helpers
 
     private func makeRunner(
@@ -375,6 +465,8 @@ final class UsageMonitorRunnerTests: XCTestCase {
         statusPath: String? = nil,
         commandPath: String? = nil,
         codexRateLimitReader: CodexRateLimitMonitorReading? = nil,
+        claudeOAuthFetcher: ClaudeUsageFetching? = nil,
+        codexOAuthFetcher: CodexUsageFetching? = nil,
         now: (() -> Date)? = nil
     ) -> UsageMonitorRunner {
         let storage = BaselineMemoryStore()
@@ -391,6 +483,8 @@ final class UsageMonitorRunnerTests: XCTestCase {
             statusPath: statusPath ?? tempDir.appendingPathComponent("usage-monitor-status.json").path,
             commandPath: commandPath ?? tempDir.appendingPathComponent("usage-monitor-command.json").path,
             codexRateLimitReader: codexRateLimitReader,
+            claudeOAuthFetcher: claudeOAuthFetcher,
+            codexOAuthFetcher: codexOAuthFetcher,
             now: now ?? { self.date(2026, 5, 19, 9) },
             calendar: cal,
             timeZone: utc
@@ -511,6 +605,48 @@ private final class FakeCodexRateLimitMonitorReader: CodexRateLimitMonitorReadin
 
     func readRateLimits() throws -> [String: AnyCodableLike] {
         readCount += 1
+        return try result.get()
+    }
+}
+
+private final class FakeClaudeUsageFetcher: ClaudeUsageFetching, @unchecked Sendable {
+    private let lock = NSLock()
+    private let result: Result<Data, Error>
+    private var _fetchCount = 0
+
+    var fetchCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _fetchCount
+    }
+
+    init(result: Result<Data, Error>) {
+        self.result = result
+    }
+
+    func fetchStatusLinePayload() throws -> Data {
+        lock.lock(); _fetchCount += 1; lock.unlock()
+        return try result.get()
+    }
+
+    func resetTransientGates() {}
+}
+
+private final class FakeCodexUsageFetcher: CodexUsageFetching, @unchecked Sendable {
+    private let lock = NSLock()
+    private let result: Result<[String: AnyCodableLike], Error>
+    private var _fetchCount = 0
+
+    var fetchCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _fetchCount
+    }
+
+    init(result: Result<[String: AnyCodableLike], Error>) {
+        self.result = result
+    }
+
+    func fetchRateLimitsResult() throws -> [String: AnyCodableLike] {
+        lock.lock(); _fetchCount += 1; lock.unlock()
         return try result.get()
     }
 }
