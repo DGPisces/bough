@@ -136,15 +136,42 @@ final class AppState {
     @ObservationIgnored
     var airDropEnabledProvider: () -> Bool = { AirDropSettings.isEnabled() }
 
+    /// Wires the direct-OAuth usage channels (spec §9): Claude via the
+    /// credentials file/Keychain, Codex via ~/.codex/auth.json, with the
+    /// spawn-once app-server reader as Codex's auth-failure fallback.
+    func startUsageChannels() {
+        guard codingSessionsEnabledProvider() else { return }
+        let mirrorWriter: (ClaudeOAuthCredentials) -> Void = { credentials in
+            guard UsageStore.shouldMirrorClaudeToken() else { return }
+            try? ClaudeOAuthTokenMirror.write(credentials)
+        }
+        let claude = ClaudeOAuthUsageClient(
+            credentialsReader: ClaudeOAuthCredentialsReader(
+                keychainRead: ClaudeKeychainReader.readCredentialsData
+            ),
+            tokenMirrorWriter: mirrorWriter
+        )
+        let codex = CodexOAuthUsageClient()
+        let fallback = CodexAppServerRateLimitMonitorReader(
+            executableURL: URL(fileURLWithPath: codexAppServerExecutablePath)
+        )
+        usageStore.startUsageChannels(claude: claude, codex: codex, codexFallback: fallback)
+    }
+
     func refreshUsageManually() {
         guard codingSessionsEnabledProvider() else { return }
         Task { @MainActor in
-            await usageStore.refreshCodex(using: codexAppServerService)
+            await usageStore.refreshAllOAuth(force: true)
         }
     }
 
+    func refreshUsageForPanelOpen() {
+        guard codingSessionsEnabledProvider() else { return }
+        usageStore.refreshForPanelOpenIfNeeded()
+    }
+
     func setUsageRefreshActivity(_ activity: UsageRefreshActivity) {
-        usageStore.setCodexRefreshActivity(activity)
+        usageStore.setRefreshActivity(activity)
     }
 
     /// Computed: first item in permission queue (backward compat for UI reads)

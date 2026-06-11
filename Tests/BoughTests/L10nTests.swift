@@ -151,7 +151,12 @@ final class L10nTests: XCTestCase {
             "usage_provider_display_toggle", "usage_provider_statistics_toggle",
             "usage_claude_hook-not-installed", "usage_claude_hook-installed-not-triggered",
             "usage_claude_payload-missing-rate-limits", "usage_claude_parse-failure",
-            "usage_claude_stale", // Claude Code hook convergence (QUOTA-04, QUOTA-05 — plan 17-05)
+            "usage_claude_stale",
+            // Direct-OAuth usage channel failures (spec §9)
+            "usage_oauth_no_credentials", "usage_oauth_token_expired",
+            "usage_oauth_keychain_denied", "usage_oauth_rate_limited",
+            "usage_oauth_unauthorized",
+            // Claude Code hook convergence (QUOTA-04, QUOTA-05 — plan 17-05)
             "usage_claude_code_hook_connected_badge", "usage_claude_code_hook_warning_badge",
             "usage_claude_code_hook_absent_badge", "usage_claude_code_hook_retry",
             "usage_claude_code_hook_section",

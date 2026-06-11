@@ -15,9 +15,9 @@ struct UsagePage: View {
         payloadValid: false,
         isFresh: nil
     )
-    /// Regression guard: explicit flash banner after manual refresh
-    /// so the user gets visible feedback that the button did something. nil
-    /// suppresses the row; populated after `refreshClaudeCodeUsageFromDisk` returns.
+    /// Inline feedback row under the refresh button. nil suppresses the row.
+    /// Currently cleared on refresh/tool change; the OAuth channel badge work
+    /// (later task) will repopulate it with channel status.
     @State private var refreshFeedback: String?
     /// Dismissal state for the Codex CLI outdated banner. Not @AppStorage because the key
     /// depends on the detected version at runtime (D-12). Synced from UserDefaults on appear.
@@ -173,26 +173,11 @@ struct UsagePage: View {
                         }
                         Spacer()
                         Button(l10n["refresh"]) {
-                            // Regression guard: the refresh button now
-                            // works for both data sources. Codex goes through the
-                            // page action (server reader). Claude Code re-reads
-                            // ~/.bough/claude-usage.json from disk AND bumps the
-                            // mutation tick so the connectivity probe re-runs
-                            // immediately. Without the explicit tick bump,
-                            // SwiftUI would not observe a state change when the
-                            // refresh succeeded with an unchanged payload, and
-                            // the user reads "button does nothing".
-                            switch selectedDisplayTool {
-                            case .codex:
-                                refreshFeedback = nil
-                                pageActions.refresh()
-                            case .claudeCode:
-                                let ok = appState.usageStore.refreshClaudeCodeUsageFromDisk(markRefreshAttempt: true)
-                                refreshClaudeCodeStatusLineConnectivity()
-                                refreshFeedback = ok
-                                    ? l10n["usage_claude_refresh_succeeded"]
-                                    : l10n["usage_claude_refresh_failed"]
-                            }
+                            // Unified refresh: both providers route through the
+                            // page action, which forces a direct-OAuth refresh
+                            // of every enabled channel.
+                            refreshFeedback = nil
+                            pageActions.refresh()
                         }
                         .id(SettingsTargetID.usageRefresh)
                         .settingsControlHighlight(

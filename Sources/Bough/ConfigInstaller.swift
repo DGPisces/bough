@@ -615,10 +615,6 @@ struct ConfigInstaller {
         return isBoughStatusLineBridgePath(command)
     }
 
-    static func boughClaudeCodeStatusLineIsInstalled(settingsPath: String, fm: FileManager = .default) -> Bool {
-        isBoughClaudeCodeStatusLineCommand(currentClaudeCodeStatusLineCommand(settingsPath: settingsPath, fm: fm))
-    }
-
     @discardableResult
     static func installClaudeCodeStatusLine(replaceExisting: Bool = false) -> ClaudeCodeStatusLineInstallResult {
         guard let bundledBridgePath = bundledClaudeCodeStatusLineBridgePath() else {

@@ -222,6 +222,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         startChainAutoInstallTask()
         appState.startSessionDiscovery()
         appState.startCodexAppServerWatcher()
+        // Direct-OAuth usage channels run independently of the app-server
+        // watcher. startCodingRuntime covers both the launch path and the
+        // coding-sessions re-enable path; the disable path stops the channels
+        // via suspendCodingSessionsForDisabledMode →
+        // pauseCodingSessionCollectionForDisabledMode → stopUsageChannels.
+        appState.startUsageChannels()
         RemoteManager.shared.startup()
         startHookRecovery()
     }

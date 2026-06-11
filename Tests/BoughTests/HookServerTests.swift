@@ -37,7 +37,6 @@ final class HookServerTests: XCTestCase {
         appState.usageStore = UsageStore(
             defaults: defaults,
             scheduler: RecordingHookServerUsageRefreshScheduler(),
-            monitorClaudeCode: false,
             now: { Date(timeIntervalSince1970: 1_000) }
         )
         let server = HookServer(appState: appState)
