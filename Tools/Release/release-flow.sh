@@ -762,18 +762,6 @@ update_homebrew_cask_file() {
         || die "cask URL mismatch: expected $download_url got ${expanded_url:-<missing>}"
 }
 
-tap_pr_body() {
-    cat <<EOF
-Updates Bough Homebrew Cask to ${TAG}.
-
-- Version: ${VERSION}
-- DMG: ${DOWNLOAD_URL}
-- SHA-256: ${ASSET_SHA256}
-
-Manual merge required.
-EOF
-}
-
 cmd_update_homebrew_cask() {
     parse_args "$@"
     require_value "--version" "$VERSION"
@@ -796,7 +784,12 @@ cmd_open_tap_pr() {
     parse_args "$@"
     validate_homebrew_release_inputs
 
+    # github.token cannot write to the tap repo, and PATs expire. The cask
+    # branch is pushed through the tap-publisher deploy key instead; the tap
+    # repo's auto-pr workflow then opens the manual-review PR with its own
+    # repo-scoped token.
     local pr_title="Update Bough to ${TAG}"
+    local tap_push_url="git@github.com:${TAP_REPO}.git"
     local cask_full_path existing_pr
     if [[ "$DRY_RUN" == "1" ]]; then
         echo "homebrew tap PR:"
@@ -811,15 +804,15 @@ cmd_open_tap_pr() {
         print_command Tools/Release/release-flow.sh _update-homebrew-cask --cask "\$RUNNER_TEMP/bough-homebrew-tap/$CASK_PATH" --version "$VERSION" --asset-sha256 "$ASSET_SHA256" --download-url "$DOWNLOAD_URL"
         print_command git -C "\$RUNNER_TEMP/bough-homebrew-tap" add "$CASK_PATH"
         print_command git -C "\$RUNNER_TEMP/bough-homebrew-tap" commit -m "$pr_title"
-        print_command git -C "\$RUNNER_TEMP/bough-homebrew-tap" push origin "HEAD:${TAP_BRANCH}"
-        print_command gh pr create --repo "$TAP_REPO" --base main --head "$TAP_BRANCH" --title "$pr_title" --body "$(tap_pr_body)"
+        print_command git -C "\$RUNNER_TEMP/bough-homebrew-tap" push "$tap_push_url" "HEAD:${TAP_BRANCH}"
+        echo "  tap auto-pr workflow opens the manual-review PR for ${TAP_BRANCH}"
         return
     fi
 
     command -v gh >/dev/null 2>&1 || die "gh CLI is required to open the Homebrew tap PR"
     command -v git >/dev/null 2>&1 || die "git is required to open the Homebrew tap PR"
-    [[ -n "${GH_TOKEN:-}" ]] \
-        || die "GH_TOKEN with contents and pull request write access to $TAP_REPO is required"
+    [[ -n "${BOUGH_TAP_DEPLOY_KEY:-}" ]] \
+        || die "BOUGH_TAP_DEPLOY_KEY with write access to $TAP_REPO is required"
 
     existing_pr="$(gh pr list \
         --repo "$TAP_REPO" \
@@ -833,9 +826,10 @@ cmd_open_tap_pr() {
     fi
 
     tap_dir="$(mktemp -d)"
+    tap_key_file="$(mktemp)"
     # Expand now: a deferred '$tap_dir' would be unbound (set -u) once this
     # function's frame is gone when the EXIT trap fires.
-    trap "rm -rf '$tap_dir'" EXIT
+    trap "rm -rf '$tap_dir' '$tap_key_file'" EXIT
 
     gh repo clone "$TAP_REPO" "$tap_dir" -- --depth 1
     git -C "$tap_dir" switch -c "$TAP_BRANCH"
@@ -852,13 +846,30 @@ cmd_open_tap_pr() {
         -c user.name="github-actions[bot]" \
         -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
         commit -m "$pr_title"
-    git -C "$tap_dir" push origin "HEAD:${TAP_BRANCH}"
-    gh pr create \
-        --repo "$TAP_REPO" \
-        --base main \
-        --head "$TAP_BRANCH" \
-        --title "$pr_title" \
-        --body "$(tap_pr_body)"
+    printf '%s\n' "$BOUGH_TAP_DEPLOY_KEY" > "$tap_key_file"
+    chmod 600 "$tap_key_file"
+    # Force push: only this automation writes bough-v* branches, and a stale
+    # branch from a run that died before its PR appeared must not wedge reruns.
+    GIT_SSH_COMMAND="ssh -i '$tap_key_file' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
+        git -C "$tap_dir" push --force "$tap_push_url" "HEAD:${TAP_BRANCH}"
+
+    # The tap repo's auto-pr workflow opens the PR; poll so a missing or
+    # broken workflow fails this release step instead of silently skipping.
+    # `|| true` keeps one transient gh failure from killing the whole poll.
+    local attempt pr_url=""
+    for attempt in $(seq 1 12); do
+        pr_url="$(gh pr list \
+            --repo "$TAP_REPO" \
+            --head "$TAP_BRANCH" \
+            --state open \
+            --json url \
+            --jq '.[0].url // empty' || true)"
+        [[ -n "$pr_url" ]] && break
+        sleep 5
+    done
+    [[ -n "$pr_url" ]] \
+        || die "tap auto-pr workflow did not open a PR for ${TAP_BRANCH}; check $TAP_REPO actions"
+    echo "Homebrew tap PR: $pr_url"
 }
 
 cmd_verify_remote() {
