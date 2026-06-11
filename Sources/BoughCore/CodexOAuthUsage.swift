@@ -27,9 +27,19 @@ public struct CodexOAuthCredentials: Equatable, Sendable {
             accessToken: accessToken,
             accountId: (tokens["account_id"] as? String) ?? (tokens["accountId"] as? String),
             refreshToken: (tokens["refresh_token"] as? String) ?? (tokens["refreshToken"] as? String),
-            lastRefresh: lastRefreshRaw.flatMap { ISO8601DateFormatter().date(from: $0) },
+            lastRefresh: lastRefreshRaw.flatMap(parseISO8601),
             isAPIKey: false
         )
+    }
+
+    /// Codex may write `last_refresh` with or without fractional seconds
+    /// (e.g. `2026-06-01T00:00:00.123Z`); accept both so a fractional
+    /// timestamp does not silently disable the proactive refresh.
+    private static func parseISO8601(_ raw: String) -> Date? {
+        if let date = ISO8601DateFormatter().date(from: raw) { return date }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: raw)
     }
 
     public init(
@@ -247,7 +257,16 @@ public final class CodexOAuthUsageClient: CodexUsageFetching, @unchecked Sendabl
         guard let updated = try? JSONSerialization.data(withJSONObject: root, options: [.sortedKeys]) else {
             return nil
         }
+        // Atomic replace resets POSIX permissions to umask defaults (0644),
+        // which would downgrade codex's 0600 token file to world-readable.
+        // Capture the original mode and re-apply it (defaulting to 0600).
+        let originalMode = (try? FileManager.default
+            .attributesOfItem(atPath: authURL.path))?[.posixPermissions] as? NSNumber
         try? updated.write(to: authURL, options: .atomic)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: originalMode ?? NSNumber(value: 0o600)],
+            ofItemAtPath: authURL.path
+        )
         return CodexOAuthCredentials.parse(jsonData: updated)
     }
 }

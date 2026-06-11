@@ -129,6 +129,64 @@ final class CodexOAuthUsageTests: XCTestCase {
         XCTAssertNotNil(written["last_refresh"])
     }
 
+    func testRefreshWithoutNewRefreshTokenPreservesOldOne() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let staleISO = ISO8601DateFormatter().string(from: now.addingTimeInterval(-9 * 24 * 3600))
+        writeAuthJSON(#"{"tokens":{"access_token":"old","refresh_token":"r1"},"last_refresh":"\#(staleISO)"}"#)
+        let client = CodexOAuthUsageClient(
+            codexHomeURL: codexHome,
+            transport: { request in
+                if request.url?.host == "auth.openai.com" {
+                    return OAuthHTTPResponse(statusCode: 200, headers: [:], body:
+                        #"{"access_token":"new-tok"}"#.data(using: .utf8)!)
+                }
+                return OAuthHTTPResponse(statusCode: 200, headers: [:], body: """
+                {"rate_limit":{"primary_window":{"used_percent":1,"reset_at":2100000,"limit_window_seconds":18000},
+                "secondary_window":{"used_percent":2,"reset_at":2600000,"limit_window_seconds":604800}}}
+                """.data(using: .utf8)!)
+            },
+            now: { now }
+        )
+        _ = try client.fetchRateLimitsResult()
+        let written = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: codexHome.appendingPathComponent("auth.json"))
+        ) as! [String: Any]
+        let tokens = written["tokens"] as! [String: Any]
+        XCTAssertEqual(tokens["access_token"] as? String, "new-tok")
+        XCTAssertEqual(tokens["refresh_token"] as? String, "r1")
+    }
+
+    func testRefreshWriteBackPreservesFilePermissions() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let staleISO = ISO8601DateFormatter().string(from: now.addingTimeInterval(-9 * 24 * 3600))
+        writeAuthJSON(#"{"tokens":{"access_token":"old","refresh_token":"r1"},"last_refresh":"\#(staleISO)"}"#)
+        let authPath = codexHome.appendingPathComponent("auth.json").path
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: authPath)
+        let client = CodexOAuthUsageClient(
+            codexHomeURL: codexHome,
+            transport: { request in
+                if request.url?.host == "auth.openai.com" {
+                    return OAuthHTTPResponse(statusCode: 200, headers: [:], body:
+                        #"{"access_token":"new-tok","refresh_token":"r2"}"#.data(using: .utf8)!)
+                }
+                return OAuthHTTPResponse(statusCode: 200, headers: [:], body: """
+                {"rate_limit":{"primary_window":{"used_percent":1,"reset_at":2100000,"limit_window_seconds":18000},
+                "secondary_window":{"used_percent":2,"reset_at":2600000,"limit_window_seconds":604800}}}
+                """.data(using: .utf8)!)
+            },
+            now: { now }
+        )
+        _ = try client.fetchRateLimitsResult()
+        let mode = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: authPath)[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(mode.uint16Value, 0o600)
+        // Write-back actually happened (not skipped).
+        let written = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: codexHome.appendingPathComponent("auth.json"))
+        ) as! [String: Any]
+        XCTAssertEqual((written["tokens"] as! [String: Any])["access_token"] as? String, "new-tok")
+    }
+
     func test401ThrowsUnauthorizedWithCooldown() {
         let nowBox = MutableBox<Date>(Date(timeIntervalSince1970: 2_000_000))
         writeAuthJSON(#"{"tokens":{"access_token":"a","refresh_token":"r"},"last_refresh":"2026-06-11T00:00:00Z"}"#)
@@ -157,5 +215,17 @@ final class CodexOAuthUsageTests: XCTestCase {
         XCTAssertThrowsError(try client.fetchRateLimitsResult()) {
             XCTAssertEqual(($0 as? OAuthUsageError)?.isAuthFailure, true)
         }
+    }
+
+    // Fix 4: last_refresh with fractional seconds must parse to the correct Date.
+    func testParseFractionalSecondLastRefresh() {
+        let fractionalISO = "2026-06-01T00:00:00.123Z"
+        let json = #"{"tokens":{"access_token":"a1","refresh_token":"r1"},"last_refresh":"\#(fractionalISO)"}"#
+        let creds = CodexOAuthCredentials.parse(jsonData: json.data(using: .utf8)!)
+        XCTAssertNotNil(creds?.lastRefresh, "lastRefresh must parse from fractional-seconds ISO8601")
+        let fractionalFmt = ISO8601DateFormatter()
+        fractionalFmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let expected = fractionalFmt.date(from: fractionalISO)
+        XCTAssertEqual(creds?.lastRefresh, expected)
     }
 }
