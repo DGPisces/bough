@@ -18,6 +18,7 @@ final class ArchitectureBoundaryTests: XCTestCase {
             "Platform",
             "README.md",
             "README.zh-CN.md",
+            "RELEASING.md",
             "Sources",
             "Tests",
             "Tools",
@@ -224,6 +225,7 @@ final class ArchitectureBoundaryTests: XCTestCase {
             try relativeFilePaths(under: "Tools/Release"),
             [
                 "appcast.xml",
+                "bump-version.sh",
                 "check-version-consistency.sh",
                 "extract-changelog.sh",
                 "release-flow.sh",

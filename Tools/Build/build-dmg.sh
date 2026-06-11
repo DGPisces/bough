@@ -6,9 +6,10 @@ set -euo pipefail
 # Example: BUILD_ARCH=arm64 SKIP_SIGN=1 SKIP_NOTARIZE=1 ./Tools/Build/build-dmg.sh
 #
 # Version is read from Platform/Apple/Info.plist.
-# To ship a new release: edit Platform/Apple/Info.plist (CFBundleShortVersionString +
-# CFBundleVersion), commit, then run this script. The release-checklist banner
-# at the end echoes the version it built from for the `gh release create` step.
+# To ship a new release: run Tools/Release/bump-version.sh <X.Y.Z> (updates all
+# version sync points — see RELEASING.md), commit, then run this script. The
+# release-checklist banner at the end echoes the version it built from for the
+# `gh release create` step.
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BUILD_DIR="$REPO_ROOT/.build"

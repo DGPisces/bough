@@ -32,6 +32,29 @@ For pull requests:
 All pull requests require maintainer approval before merge. The repository uses
 squash merge for a linear `main` history.
 
+## CI Checks
+
+Every pull request must pass the required checks:
+
+- `ci / build-and-test` — `swift build`, `swift test --parallel`, and the
+  version-consistency gate on macOS 14.
+- `ci / unsigned-packaging-smoke` — unsigned DMG packaging plus a packaged
+  usage-monitor smoke test on macOS 26.
+
+`ci / test-macos26` runs the test suite on the newer toolchain for visibility;
+it is not required yet. `main` also requires branches to be up to date before
+merge, so a rebase (or the maintainer pressing "Update branch") may be needed
+before landing.
+
+Run `swift test` locally before pushing. The suite is self-contained: it never
+touches your real `~/.bough`, `~/.claude`, or `~/.codex` configuration.
+
+## Changelog and Releases
+
+`CHANGELOG.md` is maintained by the maintainer in release-preparation PRs —
+feature PRs should not edit it. The release process is documented in
+[RELEASING.md](RELEASING.md).
+
 ## Security Reports
 
 Report vulnerabilities through GitHub private vulnerability reporting for
