@@ -1,4 +1,5 @@
 import XCTest
+import Yams
 
 final class PublicGitHubGovernanceTests: XCTestCase {
     private let repoRoot = TestHelpers.repoRoot(from: #filePath)
@@ -12,15 +13,51 @@ final class PublicGitHubGovernanceTests: XCTestCase {
         XCTAssertEqual(codeowners, ["* @DGPisces"])
     }
 
-    func testDependabotOnlyCreatesWeeklySwiftPackageUpdates() throws {
-        let dependabot = try repoText(".github/dependabot.yml")
+    func testDependabotCoversSwiftPackagesAndGitHubActionsWeekly() throws {
+        let raw = try repoText(".github/dependabot.yml")
+        XCTAssertFalse(raw.localizedCaseInsensitiveContains("automerge"))
 
-        XCTAssertTrue(dependabot.contains(#"package-ecosystem: "swift""#))
-        XCTAssertTrue(dependabot.contains(#"directory: "/""#))
-        XCTAssertTrue(dependabot.contains(#"interval: "weekly""#))
-        XCTAssertTrue(dependabot.contains("open-pull-requests-limit: 5"))
-        XCTAssertFalse(dependabot.contains("github-actions"))
-        XCTAssertFalse(dependabot.localizedCaseInsensitiveContains("automerge"))
+        let yaml = try XCTUnwrap(try Yams.load(yaml: raw) as? [String: Any])
+        let updates = try XCTUnwrap(yaml["updates"] as? [[String: Any]])
+        XCTAssertEqual(updates.count, 2)
+
+        for ecosystem in ["swift", "github-actions"] {
+            let entry = try XCTUnwrap(
+                updates.first { $0["package-ecosystem"] as? String == ecosystem },
+                "dependabot must cover the \(ecosystem) ecosystem"
+            )
+            XCTAssertEqual(entry["directory"] as? String, "/")
+            XCTAssertEqual((entry["schedule"] as? [String: Any])?["interval"] as? String, "weekly")
+            XCTAssertEqual(entry["open-pull-requests-limit"] as? Int, 5)
+        }
+    }
+
+    func testWorkflowActionsArePinnedToCommitShas() throws {
+        let workflows = try allFiles(under: ".github/workflows")
+            .filter { $0.hasSuffix(".yml") || $0.hasSuffix(".yaml") }
+        XCTAssertFalse(workflows.isEmpty, "expected workflow files under .github/workflows")
+
+        var checkedActions = 0
+        for workflow in workflows.sorted() {
+            let yaml = try XCTUnwrap(
+                try Yams.load(yaml: repoText(workflow)) as? [String: Any],
+                "\(workflow) must parse as a YAML mapping"
+            )
+            let jobs = try XCTUnwrap(yaml["jobs"] as? [String: Any], "\(workflow) must define jobs")
+            for (jobName, job) in jobs {
+                guard let job = job as? [String: Any] else { continue }
+                XCTAssertNil(job["uses"], "\(workflow) \(jobName): reusable workflow calls are not expected")
+                for step in job["steps"] as? [[String: Any]] ?? [] {
+                    guard let uses = step["uses"] as? String else { continue }
+                    XCTAssertNotNil(
+                        uses.range(of: #"^[^@\s]+@[0-9a-f]{40}$"#, options: .regularExpression),
+                        "\(workflow) \(jobName): action must be pinned to a 40-hex commit SHA, got: \(uses)"
+                    )
+                    checkedActions += 1
+                }
+            }
+        }
+        XCTAssertGreaterThanOrEqual(checkedActions, 4, "expected to verify the checkout/cache pins across workflows")
     }
 
     func testPublicCIUsesHostedArmMacAndNoSecrets() throws {
@@ -32,6 +69,7 @@ final class PublicGitHubGovernanceTests: XCTestCase {
         XCTAssertTrue(ci.contains("permissions:\n  contents: read"))
         XCTAssertTrue(ci.contains("name: ci / build-and-test"))
         XCTAssertTrue(ci.contains("name: ci / unsigned-packaging-smoke"))
+        XCTAssertTrue(ci.contains("name: ci / test-macos26"))
         XCTAssertTrue(ci.contains("runs-on: macos-14"))
         XCTAssertTrue(ci.contains("runs-on: macos-26"))
         XCTAssertTrue(ci.contains("swift build"))
