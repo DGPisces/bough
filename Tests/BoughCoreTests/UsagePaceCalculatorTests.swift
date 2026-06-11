@@ -19,6 +19,17 @@ final class UsagePaceCalculatorTests: XCTestCase {
         XCTAssertNil(pace.etaAt)
     }
 
+    func testFrontLoadedOnTrackStillLastsToReset() throws {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        // delta ∈ (0, 2]（expected 50 / actual 52）：原始平均速率投影会算出略早于
+        // 重置的 ETA，但 onTrack 档刻意不投影（delta > 2 才投影）——锁定该不对称。
+        let pace = try XCTUnwrap(UsagePaceCalculator.pace(
+            for: weekly(used: 52, resetsIn: 3.5 * 24 * 3600, now: now), now: now))
+        XCTAssertEqual(pace.stage, .onTrack)
+        XCTAssertTrue(pace.willLastToReset)
+        XCTAssertNil(pace.etaAt)
+    }
+
     func testFarAheadProducesETA() throws {
         let now = Date(timeIntervalSince1970: 1_000_000)
         // 过 1/7（剩 6 天）→ expected ≈14.3；actual 60 → farAhead；
