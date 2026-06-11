@@ -299,19 +299,21 @@ public final class CodexOAuthUsageClient: CodexUsageFetching, @unchecked Sendabl
     /// written, then swapped into place via POSIX rename(2), which keeps the
     /// temp file's mode (FileManager.replaceItemAt would instead resurrect
     /// the destination's old metadata, discarding the born-with mode).
+    ///
+    /// The temp name carries a UUID and creation uses O_EXCL so overlapping
+    /// refreshes (same-process concurrent fetches, or app + helper) can never
+    /// share — let alone interleave writes into — one temp file; each writer
+    /// renames its own fully-written payload or fails cleanly.
     private static func atomicWritePreservingMode(_ data: Data, to url: URL, mode: NSNumber) throws {
         let directory = url.deletingLastPathComponent()
         let tempURL = directory.appendingPathComponent(
-            ".\(url.lastPathComponent).tmp-\(ProcessInfo.processInfo.processIdentifier)")
-        guard FileManager.default.createFile(
-            atPath: tempURL.path, contents: nil,
-            attributes: [.posixPermissions: mode]
-        ) else {
-            throw CocoaError(.fileWriteUnknown)
+            ".\(url.lastPathComponent).tmp-\(ProcessInfo.processInfo.processIdentifier)-\(UUID().uuidString)")
+        let fd = Darwin.open(tempURL.path, O_CREAT | O_EXCL | O_WRONLY, mode_t(mode.uint16Value))
+        guard fd >= 0 else {
+            throw POSIXError(POSIXError.Code(rawValue: errno) ?? .EIO)
         }
         do {
-            let handle = try FileHandle(forWritingTo: tempURL)
-            defer { try? handle.close() }
+            let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
             try handle.write(contentsOf: data)
             try handle.close()
             guard Darwin.rename(tempURL.path, url.path) == 0 else { throw POSIXError(.EIO) }
