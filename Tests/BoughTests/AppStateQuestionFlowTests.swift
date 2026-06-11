@@ -23,8 +23,8 @@ final class AppStateQuestionFlowTests: XCTestCase {
             }
         }
 
-        await Task.yield()
-        XCTAssertEqual(appState.questionQueue.count, 1)
+        let didQueueQuestion = try await TestHelpers.waitUntil { appState.questionQueue.count == 1 }
+        XCTAssertTrue(didQueueQuestion)
 
         appState.answerQuestionMulti([
             (question: "你希望我接下来以哪种方式协作？", answer: "先给方案"),
@@ -56,7 +56,8 @@ final class AppStateQuestionFlowTests: XCTestCase {
             }
         }
 
-        await Task.yield()
+        let didQueueQuestion = try await TestHelpers.waitUntil { appState.questionQueue.count == 1 }
+        XCTAssertTrue(didQueueQuestion)
         appState.answerQuestionMulti([
             (question: "你希望我主要使用哪种语言回复？", answer: "中文"),
         ])
@@ -86,7 +87,8 @@ final class AppStateQuestionFlowTests: XCTestCase {
             }
         }
 
-        await Task.yield()
+        let didQueueQuestion = try await TestHelpers.waitUntil { appState.questionQueue.count == 1 }
+        XCTAssertTrue(didQueueQuestion)
         appState.answerQuestionMulti([
             (question: "选择要处理的范围", answer: .multiple(["API, docs", "Other, custom"])),
         ])
@@ -112,7 +114,8 @@ final class AppStateQuestionFlowTests: XCTestCase {
             }
         }
 
-        await Task.yield()
+        let didQueueQuestion = try await TestHelpers.waitUntil { appState.questionQueue.count == 1 }
+        XCTAssertTrue(didQueueQuestion)
         appState.answerQuestionMulti([
             (question: "Choose an action", answer: .multiple(["Continue", "Stop"])),
         ])
@@ -141,7 +144,8 @@ final class AppStateQuestionFlowTests: XCTestCase {
             }
         }
 
-        await Task.yield()
+        let didQueueQuestion = try await TestHelpers.waitUntil { appState.questionQueue.count == 1 }
+        XCTAssertTrue(didQueueQuestion)
         appState.skipQuestion()
 
         let responseData = await responseTask.value
@@ -168,7 +172,8 @@ final class AppStateQuestionFlowTests: XCTestCase {
             }
         }
 
-        await Task.yield()
+        let didQueueQuestion = try await TestHelpers.waitUntil { appState.questionQueue.count == 1 }
+        XCTAssertTrue(didQueueQuestion)
         appState.handlePeerDisconnect(sessionId: sessionId)
 
         let responseData = await responseTask.value
@@ -199,16 +204,17 @@ final class AppStateQuestionFlowTests: XCTestCase {
                 appState.handlePermissionRequest(event1, continuation: continuation)
             }
         }
-        await Task.yield()
+        let didQueueFirstPermission = try await TestHelpers.waitUntil { appState.permissionQueue.count == 1 }
+        XCTAssertTrue(didQueueFirstPermission)
 
         let r2 = Task<Data, Never> {
             await withCheckedContinuation { continuation in
                 appState.handlePermissionRequest(event2, continuation: continuation)
             }
         }
-        await Task.yield()
+        let didQueueSecondPermission = try await TestHelpers.waitUntil { appState.permissionQueue.count == 2 }
+        XCTAssertTrue(didQueueSecondPermission)
 
-        XCTAssertEqual(appState.permissionQueue.count, 2)
         XCTAssertEqual(appState.currentTool, "Bash")
         XCTAssertEqual(appState.toolDescription, "first approval\nCommand:\necho 1")
 
@@ -216,8 +222,8 @@ final class AppStateQuestionFlowTests: XCTestCase {
         let response1 = await r1.value
         XCTAssertEqual(try extractPermissionBehavior(from: response1), "allow")
 
-        await Task.yield()
-        XCTAssertEqual(appState.permissionQueue.count, 1)
+        let didShowNextPermission = try await TestHelpers.waitUntil { appState.permissionQueue.count == 1 }
+        XCTAssertTrue(didShowNextPermission)
         XCTAssertEqual(appState.toolDescription, "second approval\nCommand:\necho 2")
 
         appState.denyPermission()
@@ -242,9 +248,9 @@ final class AppStateQuestionFlowTests: XCTestCase {
             }
         }
 
-        await Task.yield()
+        let didQueuePermission = try await TestHelpers.waitUntil { appState.permissionQueue.count == 1 }
+        XCTAssertTrue(didQueuePermission)
         XCTAssertEqual(appState.surface, .sessionList)
-        XCTAssertEqual(appState.permissionQueue.count, 1)
 
         appState.approvePermission()
         let response = await responseTask.value
@@ -288,7 +294,8 @@ final class AppStateQuestionFlowTests: XCTestCase {
             }
         }
 
-        await Task.yield()
+        let didQueueQuestion = try await TestHelpers.waitUntil { appState.questionQueue.count == 1 }
+        XCTAssertTrue(didQueueQuestion)
         appState.answerQuestionMulti([
             (question: "第一个问题", answer: "A"),
             (question: "第二个问题", answer: "D"),
@@ -318,7 +325,8 @@ final class AppStateQuestionFlowTests: XCTestCase {
             }
         }
 
-        await Task.yield()
+        let didQueueQuestion = try await TestHelpers.waitUntil { appState.questionQueue.count == 1 }
+        XCTAssertTrue(didQueueQuestion)
         appState.answerQuestionMulti([
             (question: "没有 header", answer: "B"),
             (question: "空 header", answer: "C"),
@@ -347,7 +355,8 @@ final class AppStateQuestionFlowTests: XCTestCase {
             }
         }
 
-        await Task.yield()
+        let didQueueQuestion = try await TestHelpers.waitUntil { appState.questionQueue.count == 1 }
+        XCTAssertTrue(didQueueQuestion)
         appState.answerQuestion("A")
         XCTAssertEqual(appState.questionQueue.count, 1, "Queue should not be drained by direct answerQuestion")
         appState.skipQuestion()
@@ -373,13 +382,15 @@ final class AppStateQuestionFlowTests: XCTestCase {
                 appState.handlePermissionRequest(permissionEvent, continuation: continuation)
             }
         }
-        await Task.yield()
+        let didQueuePermission = try await TestHelpers.waitUntil { appState.permissionQueue.count == 1 }
+        XCTAssertTrue(didQueuePermission)
         let askTask = Task<Data, Never> {
             await withCheckedContinuation { continuation in
                 appState.handleAskUserQuestion(askEvent, continuation: continuation)
             }
         }
-        await Task.yield()
+        let didQueueQuestion = try await TestHelpers.waitUntil { appState.questionQueue.count == 1 }
+        XCTAssertTrue(didQueueQuestion)
 
         XCTAssertEqual(appState.surface, .approvalCard(sessionId: "s-visible-approval"))
         XCTAssertEqual(appState.permissionQueue.count, 1)
