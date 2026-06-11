@@ -78,8 +78,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
                 appState.handlePermissionRequest(first, continuation: cont)
             }
         }
-        await Task.yield()
-        XCTAssertEqual(appState.permissionQueue.count, 1)
+        try await TestHelpers.waitUntil { appState.permissionQueue.count == 1 }
 
         let secondTask = Task<Data, Never> {
             await withCheckedContinuation { cont in
@@ -113,9 +112,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
                 appState.handlePermissionRequest(second, continuation: cont)
             }
         }
-        await Task.yield()
-
-        XCTAssertEqual(appState.permissionQueue.count, 2)
+        try await TestHelpers.waitUntil { appState.permissionQueue.count == 2 }
         await assertTaskNotResolved(firstTask)
         await assertTaskNotResolved(secondTask)
 
@@ -138,8 +135,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
                 appState.handlePermissionRequest(pending, continuation: cont)
             }
         }
-        await Task.yield()
-        XCTAssertEqual(appState.permissionQueue.count, 1)
+        try await TestHelpers.waitUntil { appState.permissionQueue.count == 1 }
 
         // Agent moved on — emits PostToolUse for the same tool_use_id.
         appState.handleEvent(try makeHookEvent(
@@ -163,7 +159,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
                 appState.handlePermissionRequest(first, continuation: cont)
             }
         }
-        await Task.yield()
+        try await TestHelpers.waitUntil { appState.permissionQueue.count == 1 }
         appState.dismissPermissionPrompt()
         XCTAssertNil(appState.activePermissionQueueIndex)
 
@@ -182,9 +178,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
                 appState.handlePermissionRequest(second, continuation: cont)
             }
         }
-        await Task.yield()
-
-        XCTAssertEqual(appState.activePermissionQueueIndex, 0)
+        try await TestHelpers.waitUntil { appState.activePermissionQueueIndex == 0 }
         appState.approvePermission()
         let secondResponse = await secondTask.value
         XCTAssertEqual(try behavior(secondResponse), "allow")
@@ -205,8 +199,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
                 appState.handlePermissionRequest(drained, continuation: cont)
             }
         }
-        await Task.yield()
-        XCTAssertEqual(appState.permissionQueue.count, 2)
+        try await TestHelpers.waitUntil { appState.permissionQueue.count == 2 }
 
         appState.handleEvent(try makeHookEvent(
             name: "PostToolUse",
@@ -234,8 +227,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
                 appState.handlePermissionRequest(pending, continuation: cont)
             }
         }
-        await Task.yield()
-        XCTAssertEqual(appState.permissionQueue.count, 1)
+        try await TestHelpers.waitUntil { appState.permissionQueue.count == 1 }
 
         appState.handleEvent(try makeHookEvent(
             name: "PostToolUse",
@@ -262,7 +254,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
                 appState.handlePermissionRequest(first, continuation: cont)
             }
         }
-        await Task.yield()
+        try await TestHelpers.waitUntil { appState.permissionQueue.count == 1 }
         appState.dismissPermissionPrompt()
         XCTAssertNil(appState.activePermissionQueueIndex)
 
@@ -271,9 +263,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
                 appState.handlePermissionRequest(second, continuation: cont)
             }
         }
-        await Task.yield()
-
-        XCTAssertEqual(appState.activePermissionQueueIndex, 0)
+        try await TestHelpers.waitUntil { appState.activePermissionQueueIndex == 0 }
         appState.approvePermission()
         let secondResponse = await secondTask.value
         XCTAssertEqual(try behavior(secondResponse), "allow")
@@ -304,8 +294,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
                 appState.handlePermissionRequest(pending, continuation: cont)
             }
         }
-        await Task.yield()
-        XCTAssertEqual(appState.permissionQueue.count, 1)
+        try await TestHelpers.waitUntil { appState.permissionQueue.count == 1 }
         XCTAssertEqual(appState.sessions["s1"]?.status, .waitingApproval)
 
         // Activity event for the same session that carries no tool_use_id.
@@ -345,8 +334,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
                 appState.handlePermissionRequest(pendingForToolB, continuation: cont)
             }
         }
-        await Task.yield()
-        XCTAssertEqual(appState.permissionQueue.count, 1)
+        try await TestHelpers.waitUntil { appState.permissionQueue.count == 1 }
 
         // Tool A finishes — PostToolUse arrives with a tool_use_id that was
         // never in the queue (and never cached, since we skipped its PreToolUse
@@ -382,8 +370,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
                 appState.handlePermissionRequest(pending, continuation: cont)
             }
         }
-        await Task.yield()
-        XCTAssertEqual(appState.permissionQueue.count, 1)
+        try await TestHelpers.waitUntil { appState.permissionQueue.count == 1 }
 
         appState.handleEvent(try makeHookEvent(
             name: "PostToolUse",
@@ -426,8 +413,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
             }
         }
 
-        // Give the main actor a tick to enqueue the request before reading state.
-        await Task.yield()
+        try await TestHelpers.waitUntil { appState.permissionQueue.count == 1 }
         let session = appState.sessions["s1"]
         XCTAssertEqual(session?.currentTool, "Bash")
         appState.approvePermission()
@@ -456,7 +442,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
             }
         }
 
-        await Task.yield()
+        try await TestHelpers.waitUntil { appState.permissionQueue.count == 1 }
         appState.approvePermission(always: true)
         let response = await responseTask.value
         XCTAssertEqual(try alwaysRuleToolName(response), "Bash")

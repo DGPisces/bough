@@ -105,17 +105,16 @@ final class JSONLTailerTests: XCTestCase {
         let expectation = self.expectation(description: "delta delivered")
         let captured = LockedBox<ConversationTailDelta?>(nil)
 
+        let queue = DispatchQueue(label: "tailer-test")
         let tailer = JSONLTailer(
-            queue: DispatchQueue(label: "tailer-test"),
+            queue: queue,
             onDelta: { delta in
                 captured.set(delta)
                 expectation.fulfill()
             }
         )
         tailer.attach(sessionId: "s1", filePath: url.path)
-
-        // Let the DispatchSource attach before appending.
-        Thread.sleep(forTimeInterval: 0.15)
+        queue.sync {}  // attach is queue.async; barrier guarantees the watch is installed
 
         let line = assistantLine(text: "ping") + "\n"
         try appendToFile(url: url, content: line)
@@ -136,15 +135,16 @@ final class JSONLTailerTests: XCTestCase {
 
         let receivedDelta = self.expectation(description: "delta fires for new append only")
 
+        let queue = DispatchQueue(label: "tailer-test")
         let tailer = JSONLTailer(
-            queue: DispatchQueue(label: "tailer-test"),
+            queue: queue,
             onDelta: { delta in
                 XCTAssertEqual(delta.lastAssistantMessage, "fresh")
                 receivedDelta.fulfill()
             }
         )
         tailer.attach(sessionId: "s1", filePath: url.path)
-        Thread.sleep(forTimeInterval: 0.15)
+        queue.sync {}  // attach is queue.async; barrier guarantees the watch is installed
         try appendToFile(url: url, content: assistantLine(text: "fresh") + "\n")
 
         wait(for: [receivedDelta], timeout: 2)
@@ -159,19 +159,22 @@ final class JSONLTailerTests: XCTestCase {
         let expectation = self.expectation(description: "delta delivered after line completes")
         let captured = LockedBox<ConversationTailDelta?>(nil)
 
+        let queue = DispatchQueue(label: "tailer-test")
         let tailer = JSONLTailer(
-            queue: DispatchQueue(label: "tailer-test"),
+            queue: queue,
             onDelta: { delta in
                 captured.set(delta)
                 expectation.fulfill()
             }
         )
         tailer.attach(sessionId: "s1", filePath: url.path)
-        Thread.sleep(forTimeInterval: 0.15)
+        queue.sync {}  // attach is queue.async; barrier guarantees the watch is installed
 
         let line = assistantLine(text: "split once") + "\n"
         let splitIndex = line.index(line.startIndex, offsetBy: line.count / 2)
         try appendToFile(url: url, content: String(line[..<splitIndex]))
+        // Coverage-only pause: lets the fragment usually arrive first. If the
+        // two appends coalesce the test still passes, so this cannot flake red.
         Thread.sleep(forTimeInterval: 0.15)
         try appendToFile(url: url, content: String(line[splitIndex...]))
 
@@ -188,15 +191,16 @@ final class JSONLTailerTests: XCTestCase {
 
         let expectation = self.expectation(description: "initial delta delivered")
         let captured = LockedBox<ConversationTailDelta?>(nil)
+        let queue = DispatchQueue(label: "tailer-test")
         let tailer = JSONLTailer(
-            queue: DispatchQueue(label: "tailer-test"),
+            queue: queue,
             onDelta: { delta in
                 captured.set(delta)
                 expectation.fulfill()
             }
         )
         tailer.attach(sessionId: "s1", filePath: url.path)
-        Thread.sleep(forTimeInterval: 0.15)
+        queue.sync {}  // attach is queue.async; barrier guarantees the watch is installed
 
         let line = #"{"type" : "assistant","message":{"content":[{"type":"text","text":"spaced type"}]}}"# + "\n"
         try appendToFile(url: url, content: line)
@@ -213,23 +217,23 @@ final class JSONLTailerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: url) }
 
         let callCount = LockedBox(0)
+        let queue = DispatchQueue(label: "tailer-test")
         let tailer = JSONLTailer(
-            queue: DispatchQueue(label: "tailer-test"),
+            queue: queue,
             onDelta: { _ in callCount.mutate { $0 += 1 } }
         )
         tailer.attach(sessionId: "s1", filePath: url.path)
-        Thread.sleep(forTimeInterval: 0.15)
+        queue.sync {}  // attach is queue.async; barrier guarantees the watch is installed
 
         try appendToFile(url: url, content: assistantLine(text: "first") + "\n")
-        // Give the dispatch source a moment to deliver.
-        Thread.sleep(forTimeInterval: 0.2)
+        XCTAssertTrue(spinUntil { callCount.get() == 1 }, "first append was not delivered")
+        queue.sync {}  // drain any coalesced source events before detach
 
         tailer.detach(sessionId: "s1")
-        // Allow detach to flush.
-        Thread.sleep(forTimeInterval: 0.15)
+        queue.sync {}  // barrier guarantees the source is cancelled
 
         try appendToFile(url: url, content: assistantLine(text: "ignored") + "\n")
-        Thread.sleep(forTimeInterval: 0.2)
+        queue.sync {}  // drain the queue; a cancelled source cannot deliver more events
 
         XCTAssertEqual(callCount.get(), 1)
     }
@@ -241,20 +245,25 @@ final class JSONLTailerTests: XCTestCase {
 
         let expectation = self.expectation(description: "delta delivered after delayed replacement")
         let captured = LockedBox<ConversationTailDelta?>(nil)
+        let queue = DispatchQueue(label: "tailer-test")
         let tailer = JSONLTailer(
-            queue: DispatchQueue(label: "tailer-test"),
+            queue: queue,
             onDelta: { delta in
                 captured.set(delta)
                 expectation.fulfill()
             }
         )
         tailer.attach(sessionId: "s1", filePath: url.path)
-        Thread.sleep(forTimeInterval: 0.15)
+        queue.sync {}  // attach is queue.async; barrier guarantees the watch is installed
 
         try FileManager.default.removeItem(at: url)
-        Thread.sleep(forTimeInterval: 0.25)
+        XCTAssertTrue(spinUntil { tailer.activeSessionCount == 0 }, "delete event was not observed")
+
         try Data("".utf8).write(to: url)
-        Thread.sleep(forTimeInterval: 0.6)
+        XCTAssertTrue(
+            spinUntil(timeout: 5.0) { tailer.activeSessionCount == 1 },
+            "tailer did not reattach to the replaced file"
+        )
         try appendToFile(url: url, content: assistantLine(text: "after rotate") + "\n")
 
         wait(for: [expectation], timeout: 3)
@@ -272,8 +281,9 @@ final class JSONLTailerTests: XCTestCase {
         let expectation = self.expectation(description: "delta reads active count")
         let count = LockedBox<Int?>(nil)
         let tailerBox = LockedBox<JSONLTailer?>(nil)
+        let queue = DispatchQueue(label: "tailer-test-active-count")
         let tailer = JSONLTailer(
-            queue: DispatchQueue(label: "tailer-test-active-count"),
+            queue: queue,
             onDelta: { _ in
                 guard let tailer = tailerBox.get() else { return }
                 count.set(tailer.activeSessionCount)
@@ -282,13 +292,30 @@ final class JSONLTailerTests: XCTestCase {
         )
         tailerBox.set(tailer)
         tailer.attach(sessionId: "s1", filePath: url.path)
-        Thread.sleep(forTimeInterval: 0.15)
+        queue.sync {}  // attach is queue.async; barrier guarantees the watch is installed
 
         try appendToFile(url: url, content: assistantLine(text: "count") + "\n")
 
         wait(for: [expectation], timeout: 2)
         XCTAssertEqual(count.get(), 1)
         tailer.detach(sessionId: "s1")
+    }
+
+    // MARK: - Deterministic waits
+
+    /// Synchronously polls `predicate` until true or `timeout` elapses.
+    /// DispatchSource event delivery is asynchronous; fixed sleeps under CI
+    /// load either flake or hide bugs, so wait on observable state instead.
+    private func spinUntil(
+        timeout: TimeInterval = 2.0,
+        _ predicate: () -> Bool
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if predicate() { return true }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        return predicate()
     }
 
     // MARK: - Fixtures
