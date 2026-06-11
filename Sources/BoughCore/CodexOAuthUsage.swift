@@ -224,16 +224,19 @@ public final class CodexOAuthUsageClient: CodexUsageFetching, @unchecked Sendabl
               now().timeIntervalSince(lastRefresh) > Self.refreshStalenessInterval else {
             return nil
         }
-        // Failed-refresh cooldown: skip the attempt, proceed with the old token.
-        if gate.activeCooldown(key: Self.refreshFailureKey, now: now()) != nil {
-            return nil
-        }
         // Pre-flight re-read: another process may have refreshed already.
+        // This runs BEFORE the cooldown check so a cooldown never makes us
+        // miss credentials another process refreshed after our initial read.
         if let freshData = try? Data(contentsOf: authURL),
            let fresh = CodexOAuthCredentials.parse(jsonData: freshData),
            let freshLast = fresh.lastRefresh,
            now().timeIntervalSince(freshLast) <= Self.refreshStalenessInterval {
             return fresh
+        }
+        // Failed-refresh cooldown: skip the network attempt (the cheap local
+        // re-read above is never gated), proceed with the old token.
+        if gate.activeCooldown(key: Self.refreshFailureKey, now: now()) != nil {
+            return nil
         }
 
         var tokenRequest = URLRequest(url: Self.refreshEndpoint)
@@ -271,13 +274,16 @@ public final class CodexOAuthUsageClient: CodexUsageFetching, @unchecked Sendabl
             armRefreshFailureCooldown()
             return nil
         }
-        // Atomic replace resets POSIX permissions to umask defaults (0644),
-        // which would downgrade codex's 0600 token file to world-readable.
-        // Capture the original mode and re-apply it (defaulting to 0600).
+        // Write-back transaction: create a temp file that is BORN with the
+        // original mode (default 0600) in the same directory, then atomically
+        // swap it in. This avoids the brief umask-default window of
+        // Data.write(.atomic) and makes a permissions failure abort the write
+        // instead of being silently ignored.
         let originalMode = (try? FileManager.default
             .attributesOfItem(atPath: authURL.path))?[.posixPermissions] as? NSNumber
         do {
-            try updated.write(to: authURL, options: .atomic)
+            try Self.atomicWritePreservingMode(
+                updated, to: authURL, mode: originalMode ?? NSNumber(value: 0o600))
         } catch {
             // The refreshed token is valid in memory — use it for this fetch,
             // but arm the cooldown so we don't re-refresh (and rotate the
@@ -285,11 +291,34 @@ public final class CodexOAuthUsageClient: CodexUsageFetching, @unchecked Sendabl
             armRefreshFailureCooldown()
             return CodexOAuthCredentials.parse(jsonData: updated)
         }
-        try? FileManager.default.setAttributes(
-            [.posixPermissions: originalMode ?? NSNumber(value: 0o600)],
-            ofItemAtPath: authURL.path
-        )
         return CodexOAuthCredentials.parse(jsonData: updated)
+    }
+
+    /// Atomic replace that never exposes the payload with umask-default
+    /// permissions: the temp file is created with `mode` BEFORE any bytes are
+    /// written, then swapped into place via POSIX rename(2), which keeps the
+    /// temp file's mode (FileManager.replaceItemAt would instead resurrect
+    /// the destination's old metadata, discarding the born-with mode).
+    private static func atomicWritePreservingMode(_ data: Data, to url: URL, mode: NSNumber) throws {
+        let directory = url.deletingLastPathComponent()
+        let tempURL = directory.appendingPathComponent(
+            ".\(url.lastPathComponent).tmp-\(ProcessInfo.processInfo.processIdentifier)")
+        guard FileManager.default.createFile(
+            atPath: tempURL.path, contents: nil,
+            attributes: [.posixPermissions: mode]
+        ) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        do {
+            let handle = try FileHandle(forWritingTo: tempURL)
+            defer { try? handle.close() }
+            try handle.write(contentsOf: data)
+            try handle.close()
+            guard Darwin.rename(tempURL.path, url.path) == 0 else { throw POSIXError(.EIO) }
+        } catch {
+            try? FileManager.default.removeItem(at: tempURL)
+            throw error
+        }
     }
 
     private func armRefreshFailureCooldown() {

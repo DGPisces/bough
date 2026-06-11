@@ -191,6 +191,57 @@ final class CodexOAuthUsageTests: XCTestCase {
         XCTAssertEqual((written["tokens"] as! [String: Any])["access_token"] as? String, "new-tok")
     }
 
+    // Write-back failure (unwritable directory): the refreshed in-memory token
+    // is still used for this fetch, and the refresh-failure cooldown is armed
+    // so the next tick does not re-POST (and rotate the refresh token again)
+    // against an unwritable file.
+    func testWriteBackFailureUsesInMemoryTokenAndArmsCooldown() throws {
+        let nowBox = MutableBox<Date>(Date(timeIntervalSince1970: 2_000_000))
+        let staleISO = ISO8601DateFormatter().string(from: nowBox.get().addingTimeInterval(-9 * 24 * 3600))
+        writeAuthJSON(#"{"tokens":{"access_token":"old","refresh_token":"r1"},"last_refresh":"\#(staleISO)"}"#)
+        // Read-only directory: auth.json stays readable, but the write-back
+        // temp file cannot be created. Restore before tearDown's removeItem.
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: codexHome.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codexHome.path)
+        }
+        let refreshCalls = Counter()
+        let authHeaders = MutableBox<[String]>([])
+        let client = CodexOAuthUsageClient(
+            codexHomeURL: codexHome,
+            transport: { request in
+                if request.url?.host == "auth.openai.com" {
+                    refreshCalls.increment()
+                    return OAuthHTTPResponse(statusCode: 200, headers: [:], body:
+                        #"{"access_token":"new-tok","refresh_token":"r2"}"#.data(using: .utf8)!)
+                }
+                authHeaders.set(authHeaders.get() + [request.value(forHTTPHeaderField: "Authorization") ?? ""])
+                return OAuthHTTPResponse(statusCode: 200, headers: [:], body: """
+                {"rate_limit":{"primary_window":{"used_percent":1,"reset_at":2100000,"limit_window_seconds":18000},
+                "secondary_window":{"used_percent":2,"reset_at":2600000,"limit_window_seconds":604800}}}
+                """.data(using: .utf8)!)
+            },
+            now: { nowBox.get() },
+            gate: OAuthCooldownGate()
+        )
+        // First fetch: refresh POST succeeds, write-back fails, usage GET uses
+        // the refreshed in-memory token.
+        _ = try client.fetchRateLimitsResult()
+        XCTAssertEqual(refreshCalls.value, 1)
+        XCTAssertEqual(authHeaders.get(), ["Bearer new-tok"])
+        // auth.json was not modified (the transaction aborted cleanly).
+        let written = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: codexHome.appendingPathComponent("auth.json"))
+        ) as! [String: Any]
+        XCTAssertEqual((written["tokens"] as! [String: Any])["access_token"] as? String, "old")
+        // Second fetch within the cooldown: the on-disk token is still stale,
+        // but the failure cooldown gates the refresh POST.
+        nowBox.set(nowBox.get().addingTimeInterval(60))
+        _ = try client.fetchRateLimitsResult()
+        XCTAssertEqual(refreshCalls.value, 1)
+        XCTAssertEqual(authHeaders.get(), ["Bearer new-tok", "Bearer old"])
+    }
+
     func test401ThrowsUnauthorizedWithCooldown() {
         let nowBox = MutableBox<Date>(Date(timeIntervalSince1970: 2_000_000))
         writeAuthJSON(#"{"tokens":{"access_token":"a","refresh_token":"r"},"last_refresh":"2026-06-11T00:00:00Z"}"#)
