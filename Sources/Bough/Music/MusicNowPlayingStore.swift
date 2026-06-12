@@ -353,6 +353,8 @@ final class MusicNowPlayingStore {
             if hadOnlineData { markPublished() }
         }
         guard let onlineProvider, let key, let snapshot, let track = snapshot.track else { return }
+        if track.artwork != nil, onlineArtwork != nil { onlineArtwork = nil }
+        if track.lyricLine != nil, onlineLyrics != nil { onlineLyrics = nil }
         let needsLyrics = onlineLyrics == nil && track.lyricLine == nil
         let needsArtwork = track.artwork == nil && onlineArtwork == nil
         guard needsLyrics || needsArtwork, onlineFetchTask == nil else { return }

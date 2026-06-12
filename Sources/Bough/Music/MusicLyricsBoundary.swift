@@ -1,6 +1,6 @@
 import Foundation
 
-enum MusicLyricCandidateSource: Equatable {
+enum MusicLyricCandidateSource: Equatable, Sendable {
     case mediaRemotePayload
     case officialNoTokenLocal
     case appleMusicScripting
@@ -21,7 +21,7 @@ enum MusicLyricCandidateSource: Equatable {
     }
 }
 
-struct MusicLyricCandidate: Equatable {
+struct MusicLyricCandidate: Equatable, Sendable {
     let text: String?
     let source: MusicLyricCandidateSource
     let requiresToken: Bool

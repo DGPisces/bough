@@ -226,7 +226,7 @@ final class NotchPanelViewTests: XCTestCase {
         XCTAssertTrue(leftWing.contains("HStack(spacing: 6)"))
         XCTAssertTrue(leftWing.contains(".padding(.leading, 6)"))
         XCTAssertFalse(leftWing.contains("let notchHeight: CGFloat"))
-        XCTAssertTrue(leftWing.contains("MusicFigureView(snapshot: appState.musicStore.snapshot, size: mascotSize)"))
+        XCTAssertTrue(leftWing.contains("MusicFigureView(snapshot: appState.musicStore.snapshot, size: mascotSize, onlineArtwork: appState.musicStore.onlineArtwork)"))
         XCTAssertTrue(leftWing.contains("CompactToolActivityDot(tool: shownTool)"))
 
         XCTAssertTrue(idleIndicator.contains("HStack(spacing: 6)"))

@@ -1,6 +1,6 @@
 import Foundation
 
-enum MusicPlaybackState: String, CaseIterable, Equatable {
+enum MusicPlaybackState: String, CaseIterable, Equatable, Sendable {
     case playing
     case paused
     case stopped
@@ -16,13 +16,13 @@ enum MusicPlaybackState: String, CaseIterable, Equatable {
     }
 }
 
-enum MusicCommand: String, CaseIterable, Equatable {
+enum MusicCommand: String, CaseIterable, Equatable, Sendable {
     case previous
     case playPause
     case next
 }
 
-struct MusicPlayerIdentity: Equatable, Hashable {
+struct MusicPlayerIdentity: Equatable, Hashable, Sendable {
     let bundleIdentifier: String?
     let displayName: String
 
@@ -36,7 +36,7 @@ struct MusicPlayerIdentity: Equatable, Hashable {
     }
 }
 
-struct MusicArtworkSnapshot: Equatable {
+struct MusicArtworkSnapshot: Equatable, Sendable {
     let data: Data
     let mimeType: String?
 
@@ -51,7 +51,7 @@ struct MusicArtworkSnapshot: Equatable {
 ///
 /// Titles, artists, album names, lyric lines, artwork, and player identities are
 /// transient. Do not persist, export, webhook, or write them to diagnostics.
-struct MusicTrackSnapshot: Equatable {
+struct MusicTrackSnapshot: Equatable, Sendable {
     let title: String?
     let artist: String?
     let album: String?
@@ -76,7 +76,7 @@ struct MusicTrackSnapshot: Equatable {
     }
 }
 
-struct MusicCommandAvailability: Equatable {
+struct MusicCommandAvailability: Equatable, Sendable {
     let canPlayPause: Bool
     let canSkipPrevious: Bool
     let canSkipNext: Bool
@@ -99,13 +99,13 @@ struct MusicCommandAvailability: Equatable {
     }
 }
 
-struct MusicSoftFailure: Equatable {
+struct MusicSoftFailure: Equatable, Sendable {
     let message: String
     let command: MusicCommand?
     let occurredAt: Date
 }
 
-struct MusicPlaybackPosition: Equatable {
+struct MusicPlaybackPosition: Equatable, Sendable {
     let elapsed: TimeInterval
     let duration: TimeInterval?
     let rate: Double
@@ -134,7 +134,7 @@ struct MusicPlaybackPosition: Equatable {
 ///
 /// This is deliberately not `Codable`; downstream phases should keep music
 /// metadata inside the Bough app process and render it directly.
-struct MusicNowPlayingSnapshot: Equatable {
+struct MusicNowPlayingSnapshot: Equatable, Sendable {
     let player: MusicPlayerIdentity
     let track: MusicTrackSnapshot?
     let playbackState: MusicPlaybackState
@@ -206,7 +206,7 @@ extension MusicNowPlayingSnapshot {
     }
 }
 
-enum MusicServiceState: Equatable {
+enum MusicServiceState: Equatable, Sendable {
     case disabled
     case unavailable(reason: String)
     case available(MusicNowPlayingSnapshot?)

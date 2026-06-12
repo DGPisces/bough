@@ -48,7 +48,7 @@ struct MusicStripModel: Equatable {
         }
 
         lyricLine = track?.lyricLine
-        artwork = onlineArtwork ?? track?.artwork
+        artwork = track?.artwork ?? onlineArtwork
         playbackState = snapshot.playbackState
         commands = snapshot.commands
         failedCommand = softFailure?.command
@@ -58,14 +58,11 @@ struct MusicStripModel: Equatable {
     }
 
     func displayedLyricLine(at date: Date) -> String? {
+        if let lyricLine { return lyricLine }
         if let timedLyrics, let position {
-            if let line = timedLyrics.currentLine(at: position.elapsed(at: date)) {
-                return line
-            }
-        } else if let timedLyrics {
-            return timedLyrics.lines.first?.text
+            if let line = timedLyrics.currentLine(at: position.elapsed(at: date)) { return line }
         }
-        return lyricLine
+        return timedLyrics?.lines.first?.text
     }
 
     func progressFraction(at date: Date) -> Double? {
@@ -302,10 +299,11 @@ struct CompactMusicPlayPauseControl: View {
 struct MusicFigureView: View {
     let snapshot: MusicNowPlayingSnapshot?
     var size: CGFloat = MusicStripModel.compactFigureSize
+    var onlineArtwork: MusicArtworkSnapshot? = nil
     @ObservedObject private var l10n = L10n.shared
 
     private var model: MusicStripModel? {
-        MusicStripModel(snapshot: snapshot)
+        MusicStripModel(snapshot: snapshot, onlineArtwork: onlineArtwork)
     }
 
     private var isPlaying: Bool {

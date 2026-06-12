@@ -233,7 +233,7 @@ actor MusicOnlineDataProvider: MusicOnlineDataProviding {
 
     static func matches(title: String?, artistNames: [String], duration: TimeInterval?, key: MusicTrackMatchKey, durationHint: TimeInterval?) -> Bool {
         let candidateTitle = MusicTrackMatchKey.normalize(title)
-        guard !candidateTitle.isEmpty, candidateTitle == key.title || candidateTitle.contains(key.title) || key.title.contains(candidateTitle) else { return false }
+        guard !candidateTitle.isEmpty, candidateTitle == key.title || candidateTitle.contains(key.title) else { return false }
         if !key.artist.isEmpty {
             let candidateArtist = MusicTrackMatchKey.normalize(artistNames.joined(separator: " "))
             guard !candidateArtist.isEmpty, candidateArtist.contains(key.artist) || key.artist.contains(candidateArtist) else { return false }

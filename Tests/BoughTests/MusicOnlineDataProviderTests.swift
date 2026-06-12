@@ -102,6 +102,24 @@ final class MusicOnlineDataProviderTests: XCTestCase {
         XCTAssertNil(lyrics)
     }
 
+    func testRejectsQQResultWhenKeyTitleIsLongerThanSongname() async {
+        // QQ 返回 songname:"Hello"，但查询的 key.title 是更长的 "hello world"
+        // 修复后只允许 candidateTitle.contains(key.title)，不再反向 key.title.contains(candidateTitle)
+        let http = StubHTTP()
+        let qqBody = Data("""
+        {"data":{"song":{"list":[{"songmid":"mid001","songname":"Hello","singer":[{"name":"Artist"}],"albummid":"ALB001","interval":295}]}}}
+        """.utf8)
+        http.routes = [
+            ("client_search_cp", qqBody),
+            ("api/search/get", Data(#"{"result":{"songs":[]}}"#.utf8)),
+        ]
+        let key = MusicTrackMatchKey(title: "hello world", artist: "Artist", album: nil)!
+        let provider = MusicOnlineDataProvider(http: http, qqLocalLibrary: nonexistentLibrary())
+        let lyrics = await provider.timedLyrics(for: key, durationHint: 295)
+        XCTAssertNil(lyrics, "songname 'Hello' 不应匹配更长的 key.title 'hello world'")
+        XCTAssertFalse(http.requestedURLs.contains { $0.contains("fcg_query_lyric_new") }, "不应去拉歌词")
+    }
+
     func testArtworkUsesQQAlbumMidTemplateFromSearch() async {
         let pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
         let png = Data(base64Encoded: pngBase64)!

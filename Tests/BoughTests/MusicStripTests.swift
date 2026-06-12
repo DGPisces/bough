@@ -217,6 +217,25 @@ final class MusicStripTests: XCTestCase {
         XCTAssertNil(model.progressFraction(at: Date()))
     }
 
+    func testLocalArtworkAndLyricsTakePriorityOverOnline() {
+        let pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        let localArtwork = MusicArtworkSnapshot(data: Data(base64Encoded: pngBase64)!, mimeType: nil)
+        let onlineArtwork = MusicArtworkSnapshot(data: Data([0x01, 0x02]), mimeType: nil)
+        let onlineLyrics = MusicTimedLyrics.parsingLRC("[00:01.00]online lyric")
+
+        let snapshot = MusicNowPlayingSnapshot(
+            player: MusicPlayerIdentity(bundleIdentifier: "com.apple.Music", displayName: "Music"),
+            track: MusicTrackSnapshot(title: "Song", artist: "Artist", album: nil, lyricLine: "local lyric", artwork: localArtwork),
+            playbackState: .playing,
+            commands: MusicCommandAvailability(canPlayPause: true, canSkipPrevious: true, canSkipNext: true),
+            capturedAt: Date()
+        )
+        let model = MusicStripModel(snapshot: snapshot, timedLyrics: onlineLyrics, onlineArtwork: onlineArtwork)!
+
+        XCTAssertEqual(model.artwork, localArtwork, "本地 artwork 应优先于在线 artwork")
+        XCTAssertEqual(model.displayedLyricLine(at: Date()), "local lyric", "本地 lyricLine 应优先于 timedLyrics")
+    }
+
     func testModelUsesOnlineArtworkWhenLocalMissing() {
         let pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
         let online = MusicArtworkSnapshot(data: Data(base64Encoded: pngBase64)!, mimeType: nil)

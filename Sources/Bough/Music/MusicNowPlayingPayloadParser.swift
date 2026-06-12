@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-struct MusicNowPlayingPayload: Equatable {
+struct MusicNowPlayingPayload: Equatable, Sendable {
     let bundleIdentifier: String?
     let displayName: String?
     let title: String?
