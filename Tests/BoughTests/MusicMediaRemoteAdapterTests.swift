@@ -95,7 +95,7 @@ final class MusicMediaRemoteAdapterTests: XCTestCase {
     }
 
     func testAdapterSourceCachesQQMusicAlbumLookupMisses() throws {
-        let source = try sourceFile("Sources/Bough/Music/MediaRemoteNowPlayingService.swift")
+        let source = try sourceFile("Sources/Bough/Music/QQMusicLocalLibrary.swift")
 
         XCTAssertTrue(source.contains("private var albumMidMissCache: [AlbumLookupKey: AlbumLookupMiss] = [:]"))
         XCTAssertTrue(source.contains("AlbumLookupMiss(databaseModificationDate: databaseModificationDate)"))

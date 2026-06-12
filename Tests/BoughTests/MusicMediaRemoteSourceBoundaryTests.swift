@@ -99,12 +99,17 @@ final class MusicMediaRemoteSourceBoundaryTests: XCTestCase {
             encoding: .utf8
         )
 
+        let qqLibrary = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/Bough/Music/QQMusicLocalLibrary.swift"),
+            encoding: .utf8
+        )
+
         XCTAssertTrue(adapter.contains("OSAScriptNowPlayingPayloadReader"))
         XCTAssertTrue(reader.contains("URL(fileURLWithPath: \"/usr/bin/osascript\")"))
         XCTAssertTrue(reader.contains("JSONDecoder().decode(DecodedPayload.self"))
         XCTAssertTrue(reader.contains("playbackStateValue: numberFromValue(unwrap(request.localPlaybackState))"))
-        XCTAssertTrue(adapter.contains("QQMusicArtworkResolver"))
-        XCTAssertTrue(adapter.contains("albumMidCache"))
+        XCTAssertTrue(qqLibrary.contains("actor QQMusicArtworkResolver"))
+        XCTAssertTrue(qqLibrary.contains("albumMidCache"))
         XCTAssertFalse(adapter.contains("prefersScriptPayload"))
 
         let nativeRange = try XCTUnwrap(adapter.range(of: "if let requestPayload = currentRequestPayload(playbackState: playbackState)"))
