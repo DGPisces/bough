@@ -292,6 +292,33 @@ final class MusicMediaRemoteAdapterTests: XCTestCase {
         }
     }
 
+    func testAdapterForwardsSeekToRuntime() async throws {
+        let runtime = FakeMediaRemoteRuntime()
+        let service = MediaRemoteNowPlayingService(
+            runtimeLoader: { runtime },
+            allowedPlayerMonitor: FakeAllowedPlayerMonitor()
+        )
+        try await service.seek(to: 42.5)
+        XCTAssertEqual(runtime.seekTargets, [42.5])
+    }
+
+    func testRuntimeCapturesElapsedAndDurationKeysInSource() throws {
+        let repoRoot = TestHelpers.repoRoot(from: #filePath)
+        let adapter = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/Bough/Music/MediaRemoteNowPlayingService.swift"),
+            encoding: .utf8
+        )
+        let reader = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/Bough/Music/OSAScriptNowPlayingPayloadReader.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(adapter.contains("kMRMediaRemoteNowPlayingInfoElapsedTime"))
+        XCTAssertTrue(adapter.contains("kMRMediaRemoteNowPlayingInfoDuration"))
+        XCTAssertTrue(adapter.contains("MRMediaRemoteSetElapsedTime"))
+        XCTAssertTrue(reader.contains("kMRMediaRemoteNowPlayingInfoElapsedTime"))
+        XCTAssertTrue(reader.contains("kMRMediaRemoteNowPlayingInfoDuration"))
+    }
+
     private func sourceFile(_ relativePath: String) throws -> String {
         let url = TestHelpers.repoRoot(from: #filePath).appendingPathComponent(relativePath)
         return try String(contentsOf: url, encoding: .utf8)
@@ -328,6 +355,11 @@ private final class FakeMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
         if let commandError {
             throw commandError
         }
+    }
+
+    private(set) var seekTargets: [TimeInterval] = []
+    func seek(to seconds: TimeInterval) async throws {
+        seekTargets.append(seconds)
     }
 }
 

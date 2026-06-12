@@ -144,6 +144,26 @@ final class MusicNowPlayingStore {
         }
     }
 
+    func seek(to target: TimeInterval) async {
+        guard controlsEnabled else {
+            applySoftFailure(message: "Music controls are off", command: nil)
+            return
+        }
+        guard case let .available(snapshot?) = state, let position = snapshot.position else { return }
+        let stateBeforeSeek = state
+        let clamped = position.duration.map { min(max(0, target), $0) } ?? max(0, target)
+        state = .available(snapshot.withPosition(position.withElapsed(clamped, at: now())))
+        markPublished()
+        do {
+            try await service.seek(to: clamped)
+            softFailure = nil
+            schedulePostCommandRefresh()
+        } catch {
+            state = stateBeforeSeek
+            applySoftFailure(message: musicErrorMessage(error), command: nil)
+        }
+    }
+
     func openCurrentPlayer() {
         guard controlsEnabled else {
             applySoftFailure(message: "Music controls are off", command: nil)

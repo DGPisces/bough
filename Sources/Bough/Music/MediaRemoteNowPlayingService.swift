@@ -6,6 +6,7 @@ protocol MediaRemoteNowPlayingRuntime: AnyObject {
     func currentPayload() async throws -> MusicNowPlayingPayload
     func currentPayload(bypassingScriptBackoff: Bool) async throws -> MusicNowPlayingPayload
     func send(_ command: MusicCommand) async throws
+    func seek(to seconds: TimeInterval) async throws
 }
 
 protocol MusicAllowedPlayerRuntimeMonitoring: AnyObject {
@@ -126,6 +127,10 @@ extension MediaRemoteNowPlayingRuntime {
     func currentPayload(bypassingScriptBackoff _: Bool) async throws -> MusicNowPlayingPayload {
         try await currentPayload()
     }
+
+    func seek(to _: TimeInterval) async throws {
+        throw MusicNowPlayingServiceError.commandUnavailable
+    }
 }
 
 final class MediaRemoteNowPlayingService: MusicNowPlayingServicing {
@@ -178,6 +183,10 @@ final class MediaRemoteNowPlayingService: MusicNowPlayingServicing {
 
     func send(_ command: MusicCommand) async throws {
         try await loadRuntime().send(command)
+    }
+
+    func seek(to seconds: TimeInterval) async throws {
+        try await loadRuntime().seek(to: seconds)
     }
 
     static func commandIdentifier(for command: MusicCommand) -> Int32 {
@@ -288,6 +297,7 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
     private typealias GetNowPlayingStringFunction = @convention(c) (DispatchQueue, @escaping NowPlayingStringBlock) -> Void
     private typealias GetNowPlayingPlaybackStateFunction = @convention(c) (DispatchQueue, @escaping NowPlayingPlaybackStateBlock) -> Void
     private typealias SendCommandFunction = @convention(c) (Int32, CFDictionary?) -> DarwinBoolean
+    private typealias SetElapsedTimeFunction = @convention(c) (Double) -> Void
 
     private static let frameworkBundlePath = "/System/Library/PrivateFrameworks/MediaRemote.framework/"
     private static let frameworkPath = "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote"
@@ -298,6 +308,7 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
     private let getApplicationDisplayID: GetNowPlayingStringFunction?
     private let getApplicationPlaybackState: GetNowPlayingPlaybackStateFunction?
     private let sendCommand: SendCommandFunction?
+    private let setElapsedTime: SetElapsedTimeFunction?
     private let keys: MediaRemoteNowPlayingKeys
     private let scriptPayloadReader = OSAScriptNowPlayingPayloadReader()
     private let qqMusicArtworkResolver = QQMusicArtworkResolver()
@@ -321,6 +332,7 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
             getApplicationDisplayID: resolve("MRMediaRemoteGetNowPlayingApplicationDisplayID", from: handle),
             getApplicationPlaybackState: resolve("MRMediaRemoteGetNowPlayingApplicationPlaybackState", from: handle),
             sendCommand: resolve("MRMediaRemoteSendCommand", from: handle),
+            setElapsedTime: resolve("MRMediaRemoteSetElapsedTime", from: handle),
             keys: MediaRemoteNowPlayingKeys(handle: handle)
         )
     }
@@ -331,6 +343,7 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
         getApplicationDisplayID: GetNowPlayingStringFunction?,
         getApplicationPlaybackState: GetNowPlayingPlaybackStateFunction?,
         sendCommand: SendCommandFunction?,
+        setElapsedTime: SetElapsedTimeFunction?,
         keys: MediaRemoteNowPlayingKeys
     ) {
         self.handle = handle
@@ -338,6 +351,7 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
         self.getApplicationDisplayID = getApplicationDisplayID
         self.getApplicationPlaybackState = getApplicationPlaybackState
         self.sendCommand = sendCommand
+        self.setElapsedTime = setElapsedTime
         self.keys = keys
     }
 
@@ -371,6 +385,8 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
             playbackStateValue: playbackState,
             playbackRate: numberValue(for: keys.playbackRate, in: dictionary),
             timestamp: dateValue(for: keys.timestamp, in: dictionary),
+            elapsedTime: numberValue(for: keys.elapsedTime, in: dictionary),
+            duration: numberValue(for: keys.duration, in: dictionary),
             lyricCandidates: lyricCandidates(from: dictionary),
             commandAvailability: nil
         )
@@ -421,6 +437,8 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
             playbackStateValue: playbackState,
             playbackRate: numberValue(for: keys.playbackRate, in: dictionary),
             timestamp: dateValue(for: keys.timestamp, in: dictionary),
+            elapsedTime: numberValue(for: keys.elapsedTime, in: dictionary),
+            duration: numberValue(for: keys.duration, in: dictionary),
             lyricCandidates: lyricCandidates(from: dictionary),
             commandAvailability: nil
         )
@@ -433,6 +451,13 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
         guard sendCommand(MediaRemoteNowPlayingService.commandIdentifier(for: command), nil).boolValue else {
             throw MusicNowPlayingServiceError.commandUnavailable
         }
+    }
+
+    func seek(to seconds: TimeInterval) async throws {
+        guard let setElapsedTime else {
+            throw MusicNowPlayingServiceError.commandUnavailable
+        }
+        setElapsedTime(max(0, seconds))
     }
 
     private func currentInfoDictionary() async -> NSDictionary {
@@ -623,6 +648,8 @@ private struct MediaRemoteNowPlayingKeys {
     let playbackRate: String
     let timestamp: String
     let lyrics: String?
+    let elapsedTime: String
+    let duration: String
 
     init(handle: UnsafeMutableRawPointer) {
         title = Self.constant("kMRMediaRemoteNowPlayingInfoTitle", handle: handle)
@@ -633,6 +660,8 @@ private struct MediaRemoteNowPlayingKeys {
         playbackRate = Self.constant("kMRMediaRemoteNowPlayingInfoPlaybackRate", handle: handle)
         timestamp = Self.constant("kMRMediaRemoteNowPlayingInfoTimestamp", handle: handle)
         lyrics = Self.optionalConstant("kMRMediaRemoteNowPlayingInfoLyrics", handle: handle)
+        elapsedTime = Self.constant("kMRMediaRemoteNowPlayingInfoElapsedTime", handle: handle)
+        duration = Self.constant("kMRMediaRemoteNowPlayingInfoDuration", handle: handle)
     }
 
     private static func constant(_ symbol: String, handle: UnsafeMutableRawPointer) -> String {

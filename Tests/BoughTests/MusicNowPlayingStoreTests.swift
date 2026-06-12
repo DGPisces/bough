@@ -359,6 +359,52 @@ final class MusicNowPlayingStoreTests: XCTestCase {
         XCTAssertNil(store.settingsAbnormalMessage)
     }
 
+    func testSeekAppliesOptimisticPositionThenSchedulesRefresh() async {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        let captured = Date(timeIntervalSince1970: 100)
+        service.readResults = [.success(makeSeekSnapshot(
+            position: MusicPlaybackPosition(elapsed: 10, duration: 60, rate: 1, capturedAt: captured)
+        ))]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler)
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+
+        await store.seek(to: 45)
+
+        XCTAssertEqual(service.seekTargets, [45])
+        XCTAssertEqual(store.snapshot?.position?.elapsed, 45)
+    }
+
+    func testSeekFailureRollsBackOptimisticPositionAndRaisesSoftFailure() async {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        let captured = Date(timeIntervalSince1970: 100)
+        service.readResults = [.success(makeSeekSnapshot(
+            position: MusicPlaybackPosition(elapsed: 10, duration: 60, rate: 1, capturedAt: captured)
+        ))]
+        service.seekError = MusicNowPlayingServiceError.commandUnavailable
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler)
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+
+        await store.seek(to: 45)
+
+        XCTAssertEqual(store.settingsAbnormalMessage, "Music command unavailable")
+        XCTAssertEqual(store.snapshot?.position?.elapsed, 10)
+    }
+
+    private func makeSeekSnapshot(position: MusicPlaybackPosition?) -> MusicNowPlayingSnapshot {
+        MusicNowPlayingSnapshot(
+            player: MusicPlayerIdentity(bundleIdentifier: "com.apple.Music", displayName: "Music"),
+            track: MusicTrackSnapshot(title: "Song", artist: "A", album: nil, lyricLine: nil, artwork: nil),
+            playbackState: .playing,
+            commands: MusicCommandAvailability(canPlayPause: true, canSkipPrevious: true, canSkipNext: true),
+            capturedAt: position?.capturedAt ?? Date(),
+            position: position
+        )
+    }
+
     func testSettingsSourceShowsOnlyAbnormalMusicMessage() throws {
         let source = try sourceFile("Sources/Bough/SettingsView.swift")
         let page = try XCTUnwrap(source.slice(from: "private struct MusicPage: View", to: "// MARK: - Session Display Page"))
@@ -466,6 +512,13 @@ private final class FakeMusicNowPlayingService: MusicNowPlayingServicing {
         if let commandError {
             throw commandError
         }
+    }
+
+    private(set) var seekTargets: [TimeInterval] = []
+    var seekError: Error?
+    func seek(to seconds: TimeInterval) async throws {
+        if let seekError { throw seekError }
+        seekTargets.append(seconds)
     }
 }
 

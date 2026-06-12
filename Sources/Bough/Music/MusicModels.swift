@@ -197,6 +197,15 @@ struct MusicTrackMatchKey: Hashable, Sendable {
     }
 }
 
+extension MusicNowPlayingSnapshot {
+    func withPosition(_ position: MusicPlaybackPosition?) -> MusicNowPlayingSnapshot {
+        MusicNowPlayingSnapshot(
+            player: player, track: track, playbackState: playbackState,
+            commands: commands, capturedAt: capturedAt, position: position
+        )
+    }
+}
+
 enum MusicServiceState: Equatable {
     case disabled
     case unavailable(reason: String)

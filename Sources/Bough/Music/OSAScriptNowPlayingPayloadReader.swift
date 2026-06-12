@@ -11,6 +11,8 @@ actor OSAScriptNowPlayingPayloadReader {
         let artworkMimeType: String?
         let playbackStateValue: Int?
         let playbackRate: Double?
+        let elapsedTime: Double?
+        let duration: Double?
         let lyrics: String?
     }
 
@@ -84,6 +86,8 @@ actor OSAScriptNowPlayingPayloadReader {
             artworkMimeType: stringForKey('kMRMediaRemoteNowPlayingInfoArtworkMIMEType'),
             playbackStateValue: numberFromValue(unwrap(request.localPlaybackState)),
             playbackRate: numberForKey('kMRMediaRemoteNowPlayingInfoPlaybackRate'),
+            elapsedTime: numberForKey('kMRMediaRemoteNowPlayingInfoElapsedTime'),
+            duration: numberForKey('kMRMediaRemoteNowPlayingInfoDuration'),
             lyrics: stringForKey('kMRMediaRemoteNowPlayingInfoLyrics')
         };
 
@@ -169,6 +173,8 @@ actor OSAScriptNowPlayingPayloadReader {
             artworkMimeType: decoded.artworkMimeType,
             playbackStateValue: decoded.playbackStateValue,
             playbackRate: decoded.playbackRate,
+            elapsedTime: decoded.elapsedTime,
+            duration: decoded.duration,
             lyricCandidates: lyricCandidates(from: decoded.lyrics),
             commandAvailability: nil
         )
