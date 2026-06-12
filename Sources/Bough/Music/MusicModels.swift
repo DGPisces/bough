@@ -170,6 +170,33 @@ struct MusicNowPlayingSnapshot: Equatable {
     }
 }
 
+/// Normalized identity of a track used to correlate online lyrics/artwork
+/// with the locally observed snapshot. In-memory only.
+struct MusicTrackMatchKey: Hashable, Sendable {
+    let title: String
+    let artist: String
+    let album: String
+
+    init?(title: String?, artist: String?, album: String?) {
+        let normalizedTitle = Self.normalize(title)
+        guard !normalizedTitle.isEmpty else { return nil }
+        self.title = normalizedTitle
+        self.artist = Self.normalize(artist)
+        self.album = Self.normalize(album)
+    }
+
+    static func normalize(_ value: String?) -> String {
+        guard var text = value?.lowercased() else { return "" }
+        for (open, close) in [("(", ")"), ("[", "]"), ("（", "）"), ("【", "】")] {
+            while let openRange = text.range(of: open),
+                  let closeRange = text.range(of: close, range: openRange.upperBound..<text.endIndex) {
+                text.removeSubrange(openRange.lowerBound..<closeRange.upperBound)
+            }
+        }
+        return text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+}
+
 enum MusicServiceState: Equatable {
     case disabled
     case unavailable(reason: String)

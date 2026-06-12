@@ -4,6 +4,8 @@ enum MusicLyricCandidateSource: Equatable {
     case mediaRemotePayload
     case officialNoTokenLocal
     case appleMusicScripting
+    /// Bough's own online lyrics search (QQ/NetEase), explicitly approved 2026-06-11.
+    case boughOnlineSearch
     case tokenRequiredAPI
     case reverseEngineeredAPI
     case thirdPartySDK
@@ -11,7 +13,7 @@ enum MusicLyricCandidateSource: Equatable {
 
     var isAllowed: Bool {
         switch self {
-        case .mediaRemotePayload, .officialNoTokenLocal, .appleMusicScripting:
+        case .mediaRemotePayload, .officialNoTokenLocal, .appleMusicScripting, .boughOnlineSearch:
             return true
         case .tokenRequiredAPI, .reverseEngineeredAPI, .thirdPartySDK, .unknown:
             return false

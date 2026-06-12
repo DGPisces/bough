@@ -36,4 +36,16 @@ final class MusicTimedLyricsTests: XCTestCase {
         XCTAssertEqual(lyrics.currentLine(at: 19.9), "a")
         XCTAssertEqual(lyrics.currentLine(at: 25), "b")
     }
+
+    func testMatchKeyNormalizesCaseWhitespaceAndParentheticalSuffixes() {
+        let key = MusicTrackMatchKey(title: "  Hello (Live)  ", artist: "Some  ARTIST", album: "Album【豪华版】")
+        XCTAssertEqual(key?.title, "hello")
+        XCTAssertEqual(key?.artist, "some artist")
+        XCTAssertEqual(key?.album, "album")
+    }
+
+    func testMatchKeyRequiresNonEmptyTitle() {
+        XCTAssertNil(MusicTrackMatchKey(title: " (Live) ", artist: "A", album: nil))
+        XCTAssertNil(MusicTrackMatchKey(title: nil, artist: "A", album: nil))
+    }
 }

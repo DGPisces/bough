@@ -204,6 +204,17 @@ final class MusicMediaRemotePayloadParserTests: XCTestCase {
         XCTAssertEqual(snapshot?.position?.capturedAt, Date(timeIntervalSince1970: 480))
     }
 
+    func testBoughOnlineSearchLyricSourceIsAllowed() {
+        XCTAssertTrue(MusicLyricCandidateSource.boughOnlineSearch.isAllowed)
+        XCTAssertFalse(MusicLyricCandidateSource.reverseEngineeredAPI.isAllowed)
+        XCTAssertEqual(
+            MusicLyricsBoundary.oneLine(from: [
+                MusicLyricCandidate(text: "online line", source: .boughOnlineSearch),
+            ]),
+            "online line"
+        )
+    }
+
     func testParserPositionRateIsZeroWhenPaused() {
         let payload = MusicNowPlayingPayload(
             bundleIdentifier: "com.apple.Music", displayName: "Music",
