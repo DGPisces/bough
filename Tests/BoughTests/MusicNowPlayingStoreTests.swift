@@ -635,3 +635,59 @@ extension MusicNowPlayingStoreTests {
         )
     }
 }
+
+// MARK: - FakeOnlineProvider
+
+private final class FakeOnlineProvider: MusicOnlineDataProviding, @unchecked Sendable {
+    var lyrics: MusicTimedLyrics?
+    var artwork: Data?
+    func timedLyrics(for key: MusicTrackMatchKey, durationHint: TimeInterval?) async -> MusicTimedLyrics? { lyrics }
+    func artworkData(for key: MusicTrackMatchKey, player: MusicAllowedPlayer?, rawTitle: String?, rawArtist: String?, rawAlbum: String?, durationHint: TimeInterval?) async -> Data? { artwork }
+}
+
+// MARK: - Online data tests
+
+extension MusicNowPlayingStoreTests {
+    func testOnlineLyricsAreFetchedAndPublishedWhenSnapshotLacksLyrics() async {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        let provider = FakeOnlineProvider()
+        provider.lyrics = MusicTimedLyrics.parsingLRC("[00:01]online")
+        service.readResults = [.success(makeStoreSnapshot(title: "Song"))]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler, onlineProvider: provider)
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+        await store.onlineFetchTaskForTesting?.value
+        XCTAssertEqual(store.onlineLyrics?.currentLine(at: 2), "online")
+    }
+
+    func testOnlineDataClearsWhenTrackChanges() async {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        let provider = FakeOnlineProvider()
+        provider.lyrics = MusicTimedLyrics.parsingLRC("[00:01]online")
+        service.readResults = [.success(makeStoreSnapshot(title: "Song A")), .success(makeStoreSnapshot(title: "Song B"))]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler, onlineProvider: provider)
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+        await store.onlineFetchTaskForTesting?.value
+        XCTAssertNotNil(store.onlineLyrics)
+        provider.lyrics = nil
+        await store.refreshNow()
+        XCTAssertNil(store.onlineLyrics, "换曲必须立即清空在线歌词")
+    }
+
+    func testOnlineArtworkMergesIntoSnapshotWhenKeyStillMatches() async {
+        let pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        let provider = FakeOnlineProvider()
+        provider.artwork = Data(base64Encoded: pngBase64)!
+        service.readResults = [.success(makeStoreSnapshot(title: "Song"))]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler, onlineProvider: provider)
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+        await store.onlineFetchTaskForTesting?.value
+        XCTAssertNotNil(store.snapshot?.track?.artwork, "在线封面应合并进当前 snapshot")
+    }
+}

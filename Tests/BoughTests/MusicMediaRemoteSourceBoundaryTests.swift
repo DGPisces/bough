@@ -62,7 +62,8 @@ final class MusicMediaRemoteSourceBoundaryTests: XCTestCase {
 
         XCTAssertTrue(appState.contains("var musicStore = MusicNowPlayingStore.live()"))
         XCTAssertTrue(adapter.contains("static func live() -> MusicNowPlayingStore"))
-        XCTAssertTrue(adapter.contains("MusicNowPlayingStore(service: MediaRemoteNowPlayingService())"))
+        XCTAssertTrue(adapter.contains("service: MediaRemoteNowPlayingService()"))
+        XCTAssertTrue(adapter.contains("onlineProvider: MusicOnlineDataProvider()"))
     }
 
     func testAdapterDoesNotCallUnsafeMediaRemoteDisplayNameABI() throws {

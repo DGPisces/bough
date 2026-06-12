@@ -288,7 +288,10 @@ extension MusicNowPlayingPayload {
 
 extension MusicNowPlayingStore {
     static func live() -> MusicNowPlayingStore {
-        MusicNowPlayingStore(service: MediaRemoteNowPlayingService())
+        MusicNowPlayingStore(
+            service: MediaRemoteNowPlayingService(),
+            onlineProvider: MusicOnlineDataProvider()
+        )
     }
 }
 

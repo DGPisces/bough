@@ -19,6 +19,15 @@ final class MusicNowPlayingStore {
     private let now: () -> Date
 
     @ObservationIgnored
+    private let onlineProvider: MusicOnlineDataProviding?
+
+    @ObservationIgnored
+    private var currentMatchKey: MusicTrackMatchKey?
+
+    @ObservationIgnored
+    private var onlineFetchTask: Task<Void, Never>?
+
+    @ObservationIgnored
     private var presentationNeeded = false
 
     @ObservationIgnored
@@ -41,6 +50,11 @@ final class MusicNowPlayingStore {
 
     private(set) var state: MusicServiceState = .disabled
     private(set) var softFailure: MusicSoftFailure?
+    private(set) var onlineLyrics: MusicTimedLyrics?
+
+    #if DEBUG
+    var onlineFetchTaskForTesting: Task<Void, Never>? { onlineFetchTask }
+    #endif
 
     var snapshot: MusicNowPlayingSnapshot? {
         state.snapshot
@@ -57,11 +71,13 @@ final class MusicNowPlayingStore {
         defaults: UserDefaults = .standard,
         service: MusicNowPlayingServicing = NoopMusicNowPlayingService(),
         scheduler: MusicPollingScheduling? = nil,
+        onlineProvider: MusicOnlineDataProviding? = nil,
         now: @escaping () -> Date = Date.init
     ) {
         self.defaults = defaults
         self.service = service
         self.scheduler = scheduler ?? TimerMusicPollingScheduler()
+        self.onlineProvider = onlineProvider
         self.now = now
         self.service.setPollingAvailabilityDidChangeHandler { [weak self] in
             self?.handlePollingAvailabilityChanged()
@@ -229,6 +245,7 @@ final class MusicNowPlayingStore {
     deinit {
         postCommandRefreshTask?.cancel()
         inFlightRefreshTask?.cancel()
+        onlineFetchTask?.cancel()
     }
 
     private var controlsEnabled: Bool {
@@ -293,6 +310,7 @@ final class MusicNowPlayingStore {
     }
 
     private func clearStateForDisabledOrUnneeded() {
+        resetOnlineData(publish: false)
         consecutiveFailures = 0
         softFailure = nil
         let target: MusicServiceState = controlsEnabled ? .available(nil) : .disabled
@@ -302,6 +320,7 @@ final class MusicNowPlayingStore {
     }
 
     private func applyAvailableSnapshot(_ snapshot: MusicNowPlayingSnapshot?) {
+        updateOnlineData(for: snapshot)
         let next = MusicServiceState.available(snapshot)
         let displayEquivalent = state.isDisplayEquivalent(to: next)
         state = next  // always refresh so the playback-position anchor stays current
@@ -313,9 +332,68 @@ final class MusicNowPlayingStore {
     }
 
     private func applyUnavailable(reason: String) {
+        resetOnlineData(publish: false)
         let next = MusicServiceState.unavailable(reason: reason)
         guard !state.isDisplayEquivalent(to: next) else { return }
         state = next
+        markPublished()
+    }
+
+    private func updateOnlineData(for snapshot: MusicNowPlayingSnapshot?) {
+        let key = snapshot?.track.flatMap {
+            MusicTrackMatchKey(title: $0.title, artist: $0.artist, album: $0.album)
+        }
+        if key != currentMatchKey {
+            currentMatchKey = key
+            onlineFetchTask?.cancel()
+            onlineFetchTask = nil
+            if onlineLyrics != nil {
+                onlineLyrics = nil
+                markPublished()
+            }
+        }
+        guard let onlineProvider, let key, let snapshot, let track = snapshot.track else { return }
+        let needsLyrics = onlineLyrics == nil && track.lyricLine == nil
+        let needsArtwork = track.artwork == nil
+        guard needsLyrics || needsArtwork, onlineFetchTask == nil else { return }
+
+        let player = MusicAllowedPlayer.match(
+            bundleIdentifier: snapshot.player.bundleIdentifier,
+            displayName: snapshot.player.displayName
+        )
+        let duration = snapshot.position?.duration
+        onlineFetchTask = Task { @MainActor [weak self] in
+            if needsLyrics, let lyrics = await onlineProvider.timedLyrics(for: key, durationHint: duration) {
+                guard let self, !Task.isCancelled, self.currentMatchKey == key else { return }
+                self.onlineLyrics = lyrics
+                self.markPublished()
+            }
+            if needsArtwork,
+               let data = await onlineProvider.artworkData(for: key, player: player, rawTitle: track.title, rawArtist: track.artist, rawAlbum: track.album, durationHint: duration) {
+                guard let self, !Task.isCancelled, self.currentMatchKey == key else { return }
+                self.applyOnlineArtwork(data)
+            }
+            self?.onlineFetchTask = nil
+        }
+    }
+
+    private func resetOnlineData(publish: Bool) {
+        currentMatchKey = nil
+        onlineFetchTask?.cancel()
+        onlineFetchTask = nil
+        guard onlineLyrics != nil else { return }
+        onlineLyrics = nil
+        if publish { markPublished() }
+    }
+
+    private func applyOnlineArtwork(_ data: Data) {
+        guard case let .available(snapshot?) = state,
+              let track = snapshot.track, track.artwork == nil else { return }
+        let merged = MusicTrackSnapshot(
+            title: track.title, artist: track.artist, album: track.album,
+            lyricLine: track.lyricLine, artwork: MusicArtworkSnapshot(data: data, mimeType: nil)
+        )
+        state = .available(snapshot.withTrack(merged))
         markPublished()
     }
 
