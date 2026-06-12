@@ -402,7 +402,8 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
             bypassingBackoff: bypassingScriptBackoff,
             probingActivePlayback: legacyPayload.isPlaybackLikelyActive
         ),
-           scriptPayload.hasDisplayableMediaRemoteMetadata {
+           scriptPayload.hasDisplayableMediaRemoteMetadata,
+           legacyPayload.describesSameSource(as: scriptPayload) {
             return await payloadByResolvingArtworkIfNeeded(scriptPayload)
         }
 

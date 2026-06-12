@@ -154,3 +154,27 @@ enum MusicNowPlayingPayloadParser {
         return MusicArtworkSnapshot(data: artworkData, mimeType: payload.artworkMimeType)
     }
 }
+
+extension MusicNowPlayingPayload {
+    /// Two payloads may be substituted for each other only if they cannot be
+    /// from different players. The first dimension present on BOTH sides decides:
+    /// bundle id (must be equal) → display name (must mutually contain) →
+    /// title (normalized must be equal). A dimension missing on either side is
+    /// skipped; if all dimensions are skipped the payloads are allowed.
+    func describesSameSource(as other: MusicNowPlayingPayload) -> Bool {
+        func clean(_ value: String?) -> String? {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed?.isEmpty == false ? trimmed : nil
+        }
+        if let lhs = clean(bundleIdentifier), let rhs = clean(other.bundleIdentifier) {
+            return lhs == rhs
+        }
+        if let lhs = clean(displayName)?.lowercased(), let rhs = clean(other.displayName)?.lowercased() {
+            return lhs.contains(rhs) || rhs.contains(lhs)
+        }
+        if let lhs = clean(title)?.lowercased(), let rhs = clean(other.title)?.lowercased() {
+            return lhs == rhs
+        }
+        return true
+    }
+}

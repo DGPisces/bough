@@ -228,6 +228,45 @@ final class MusicMediaRemotePayloadParserTests: XCTestCase {
         XCTAssertEqual(snapshot?.position?.capturedAt, Date(timeIntervalSince1970: 500))
     }
 
+    func testDescribesSameSourceUsesBundleIdWhenBothPresent() {
+        let qq = makeSourcePayload(bundle: "com.tencent.QQMusicMac")
+        let spotify = makeSourcePayload(bundle: "com.spotify.client", title: "Other Song")
+        XCTAssertFalse(qq.describesSameSource(as: spotify))
+        XCTAssertTrue(qq.describesSameSource(as: qq))
+        let anonymous = makeSourcePayload(bundle: nil)
+        XCTAssertTrue(anonymous.describesSameSource(as: spotify), "两侧可比维度都缺时放行")
+    }
+
+    func testDescribesSameSourceRejectsConflictingDisplayNamesWhenBundlesAbsent() {
+        let a = makeSourcePayload(bundle: nil, name: "Apple Music")
+        let b = makeSourcePayload(bundle: nil, name: "Spotify")
+        XCTAssertFalse(a.describesSameSource(as: b))
+    }
+
+    func testDescribesSameSourceRejectsConflictingTitlesWhenNoBundleOrName() {
+        let a = makeSourcePayload(bundle: nil, name: nil, title: "Song A")
+        let b = makeSourcePayload(bundle: nil, name: nil, title: "Song B")
+        XCTAssertFalse(a.describesSameSource(as: b))
+    }
+
+    func testScriptFallbackIsGuardedBySourceConsistency() throws {
+        let repoRoot = TestHelpers.repoRoot(from: #filePath)
+        let adapter = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/Bough/Music/MediaRemoteNowPlayingService.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(adapter.contains("legacyPayload.describesSameSource(as: scriptPayload)"))
+    }
+
+    private func makeSourcePayload(bundle: String?, name: String? = nil, title: String? = nil) -> MusicNowPlayingPayload {
+        MusicNowPlayingPayload(
+            bundleIdentifier: bundle, displayName: name,
+            title: title, artist: nil, album: nil,
+            artworkData: nil, artworkMimeType: nil,
+            playbackStateValue: nil, playbackRate: nil
+        )
+    }
+
     private func payload(
         bundleIdentifier: String? = "com.tencent.QQMusicMac",
         displayName: String? = "QQ Music",
