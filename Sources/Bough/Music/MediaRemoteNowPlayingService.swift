@@ -2,6 +2,18 @@ import Darwin
 import AppKit
 import Foundation
 
+// MediaRemote private-framework boundary.
+//
+// ABI fragility (documented-only by design): every MR* symbol used below is
+// resolved at runtime via dlsym from the MediaRemote private framework. A macOS
+// update may rename or remove them; load() then throws .unavailable and the
+// music strip simply stays hidden — no crash, no fallback chain.
+//
+// Command identifiers (documented-only by design): the Int32 values in
+// commandIdentifier(for:) mirror MediaRemote's command enum as observed on
+// macOS 13–26: 2 = toggle play/pause, 4 = next track, 5 = previous track. If the
+// transport buttons stop working after an OS update, re-verify these values.
+
 protocol MediaRemoteNowPlayingRuntime: AnyObject {
     func currentPayload() async throws -> MusicNowPlayingPayload
     func currentPayload(bypassingScriptBackoff: Bool) async throws -> MusicNowPlayingPayload
