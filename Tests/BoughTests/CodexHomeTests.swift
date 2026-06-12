@@ -82,18 +82,15 @@ final class CodexHomeTests: XCTestCase {
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         setenv("CODEX_HOME", root.path, 1)
 
-        let key = "cli_enabled_codex"
-        let saved = UserDefaults.standard.object(forKey: key)
-        UserDefaults.standard.set(true, forKey: key)
-        defer {
-            if let saved {
-                UserDefaults.standard.set(saved, forKey: key)
-            } else {
-                UserDefaults.standard.removeObject(forKey: key)
-            }
-        }
+        // Isolated suite: `.standard` is shared across `swift test --parallel`
+        // worker processes via cfprefsd, so another worker writing
+        // cli_enabled_codex would race this test.
+        let suiteName = "CodexHomeTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(true, forKey: "cli_enabled_codex")
 
-        XCTAssertTrue(AppState.discoveryWatchRoots().contains(sessions.path))
+        XCTAssertTrue(AppState.discoveryWatchRoots(defaults: defaults).contains(sessions.path))
     }
 
     func testDiscoveryWatchRootsSkipsCodexHomeWhenSessionsDirectoryIsMissing() throws {
@@ -103,18 +100,12 @@ final class CodexHomeTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         setenv("CODEX_HOME", root.path, 1)
 
-        let key = "cli_enabled_codex"
-        let saved = UserDefaults.standard.object(forKey: key)
-        UserDefaults.standard.set(true, forKey: key)
-        defer {
-            if let saved {
-                UserDefaults.standard.set(saved, forKey: key)
-            } else {
-                UserDefaults.standard.removeObject(forKey: key)
-            }
-        }
+        let suiteName = "CodexHomeTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(true, forKey: "cli_enabled_codex")
 
-        XCTAssertFalse(AppState.discoveryWatchRoots().contains(root.path))
+        XCTAssertFalse(AppState.discoveryWatchRoots(defaults: defaults).contains(root.path))
     }
 
     func testCodexTranscriptPathsUseCodexHomeHelper() throws {
