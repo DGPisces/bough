@@ -204,13 +204,6 @@ extension MusicNowPlayingSnapshot {
             commands: commands, capturedAt: capturedAt, position: position
         )
     }
-
-    func withTrack(_ track: MusicTrackSnapshot?) -> MusicNowPlayingSnapshot {
-        MusicNowPlayingSnapshot(
-            player: player, track: track, playbackState: playbackState,
-            commands: commands, capturedAt: capturedAt, position: position
-        )
-    }
 }
 
 enum MusicServiceState: Equatable {

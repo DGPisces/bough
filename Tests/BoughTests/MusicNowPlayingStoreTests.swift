@@ -677,7 +677,7 @@ extension MusicNowPlayingStoreTests {
         XCTAssertNil(store.onlineLyrics, "换曲必须立即清空在线歌词")
     }
 
-    func testOnlineArtworkMergesIntoSnapshotWhenKeyStillMatches() async {
+    func testOnlineArtworkFetchedIntoDedicatedField() async {
         let pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
         let scheduler = RecordingMusicPollingScheduler()
         let service = FakeMusicNowPlayingService()
@@ -688,6 +688,6 @@ extension MusicNowPlayingStoreTests {
         store.setPresentationNeeded(true)
         await store.refreshNow()
         await store.onlineFetchTaskForTesting?.value
-        XCTAssertNotNil(store.snapshot?.track?.artwork, "在线封面应合并进当前 snapshot")
+        XCTAssertNotNil(store.onlineArtwork, "在线封面应进入独立的 onlineArtwork 字段")
     }
 }

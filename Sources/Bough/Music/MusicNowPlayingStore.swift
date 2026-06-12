@@ -51,6 +51,7 @@ final class MusicNowPlayingStore {
     private(set) var state: MusicServiceState = .disabled
     private(set) var softFailure: MusicSoftFailure?
     private(set) var onlineLyrics: MusicTimedLyrics?
+    private(set) var onlineArtwork: MusicArtworkSnapshot?
 
     #if DEBUG
     var onlineFetchTaskForTesting: Task<Void, Never>? { onlineFetchTask }
@@ -332,7 +333,6 @@ final class MusicNowPlayingStore {
     }
 
     private func applyUnavailable(reason: String) {
-        resetOnlineData(publish: false)
         let next = MusicServiceState.unavailable(reason: reason)
         guard !state.isDisplayEquivalent(to: next) else { return }
         state = next
@@ -347,14 +347,14 @@ final class MusicNowPlayingStore {
             currentMatchKey = key
             onlineFetchTask?.cancel()
             onlineFetchTask = nil
-            if onlineLyrics != nil {
-                onlineLyrics = nil
-                markPublished()
-            }
+            let hadOnlineData = onlineLyrics != nil || onlineArtwork != nil
+            onlineLyrics = nil
+            onlineArtwork = nil
+            if hadOnlineData { markPublished() }
         }
         guard let onlineProvider, let key, let snapshot, let track = snapshot.track else { return }
         let needsLyrics = onlineLyrics == nil && track.lyricLine == nil
-        let needsArtwork = track.artwork == nil
+        let needsArtwork = track.artwork == nil && onlineArtwork == nil
         guard needsLyrics || needsArtwork, onlineFetchTask == nil else { return }
 
         let player = MusicAllowedPlayer.match(
@@ -368,10 +368,12 @@ final class MusicNowPlayingStore {
                 self.onlineLyrics = lyrics
                 self.markPublished()
             }
-            if needsArtwork,
-               let data = await onlineProvider.artworkData(for: key, player: player, rawTitle: track.title, rawArtist: track.artist, rawAlbum: track.album, durationHint: duration) {
-                guard let self, !Task.isCancelled, self.currentMatchKey == key else { return }
-                self.applyOnlineArtwork(data)
+            if needsArtwork {
+                if Task.isCancelled { self?.onlineFetchTask = nil; return }
+                if let data = await onlineProvider.artworkData(for: key, player: player, rawTitle: track.title, rawArtist: track.artist, rawAlbum: track.album, durationHint: duration) {
+                    guard let self, !Task.isCancelled, self.currentMatchKey == key else { return }
+                    self.applyOnlineArtwork(data)
+                }
             }
             self?.onlineFetchTask = nil
         }
@@ -381,19 +383,15 @@ final class MusicNowPlayingStore {
         currentMatchKey = nil
         onlineFetchTask?.cancel()
         onlineFetchTask = nil
-        guard onlineLyrics != nil else { return }
+        let hadOnlineData = onlineLyrics != nil || onlineArtwork != nil
         onlineLyrics = nil
-        if publish { markPublished() }
+        onlineArtwork = nil
+        if publish && hadOnlineData { markPublished() }
     }
 
     private func applyOnlineArtwork(_ data: Data) {
-        guard case let .available(snapshot?) = state,
-              let track = snapshot.track, track.artwork == nil else { return }
-        let merged = MusicTrackSnapshot(
-            title: track.title, artist: track.artist, album: track.album,
-            lyricLine: track.lyricLine, artwork: MusicArtworkSnapshot(data: data, mimeType: nil)
-        )
-        state = .available(snapshot.withTrack(merged))
+        guard onlineArtwork == nil else { return }
+        onlineArtwork = MusicArtworkSnapshot(data: data, mimeType: nil)
         markPublished()
     }
 
