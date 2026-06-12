@@ -71,16 +71,14 @@ final class MusicMediaRemoteAdapterTests: XCTestCase {
 
         XCTAssertTrue(reader.contains("private static let emptyOrFailureBackoffIntervals: [TimeInterval] = [10, 30, 60]"))
         XCTAssertTrue(reader.contains("private static let activePlaybackProbeInterval: TimeInterval = 2"))
-        XCTAssertTrue(reader.contains("emptyOrFailureBackoffUntil"))
-        XCTAssertTrue(reader.contains("activePlaybackProbeBackoffUntil"))
-        XCTAssertTrue(reader.contains("consecutiveEmptyOrFailureCount"))
+        XCTAssertTrue(reader.contains("private var backoffState"))
+        XCTAssertTrue(reader.contains("case waiting(until:"))
         XCTAssertTrue(reader.contains("actor OSAScriptNowPlayingPayloadReader"))
         XCTAssertTrue(reader.contains("private var inFlightReadTask: Task<MusicNowPlayingPayload?, Never>?"))
         XCTAssertTrue(reader.contains("Task.detached(priority: .utility)"))
         XCTAssertTrue(reader.contains("ProcessRunner.run("))
         XCTAssertTrue(source.contains("probingActivePlayback: legacyPayload.isPlaybackLikelyActive"))
-        XCTAssertTrue(reader.contains("if !bypassingBackoff {"))
-        XCTAssertTrue(reader.contains("if probingActivePlayback"))
+        XCTAssertTrue(reader.contains("if !bypassingBackoff"))
         XCTAssertTrue(reader.contains("payload?.hasDisplayableMediaRemoteMetadata == true"))
     }
 

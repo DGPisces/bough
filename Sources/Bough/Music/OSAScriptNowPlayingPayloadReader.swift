@@ -1,6 +1,8 @@
 import Foundation
 
 actor OSAScriptNowPlayingPayloadReader {
+    typealias ProcessRunning = @Sendable (_ path: String, _ args: [String], _ timeout: TimeInterval) -> Data?
+
     private struct DecodedPayload: Decodable {
         let bundleIdentifier: String?
         let displayName: String?
@@ -16,15 +18,32 @@ actor OSAScriptNowPlayingPayloadReader {
         let lyrics: String?
     }
 
+    private enum BackoffState {
+        case idle
+        case waiting(until: Date, consecutiveFailures: Int)
+    }
+
     private static let executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
     private static let emptyOrFailureBackoffIntervals: [TimeInterval] = [10, 30, 60]
     private static let activePlaybackProbeInterval: TimeInterval = 2
     private static let maxOutputBytes = 2 * 1024 * 1024
     private static let timeout: TimeInterval = 1.5
-    private var emptyOrFailureBackoffUntil: Date?
-    private var activePlaybackProbeBackoffUntil: Date?
-    private var consecutiveEmptyOrFailureCount = 0
+
+    private let processRunner: ProcessRunning
+    private let now: () -> Date
+    private var backoffState: BackoffState = .idle
     private var inFlightReadTask: Task<MusicNowPlayingPayload?, Never>?
+
+    init(
+        processRunner: @escaping ProcessRunning = { path, args, timeout in
+            ProcessRunner.run(path: path, args: args, timeout: timeout)
+        },
+        now: @escaping () -> Date = Date.init
+    ) {
+        self.processRunner = processRunner
+        self.now = now
+    }
+
     private static let script = """
     function run() {
         ObjC.import('Foundation');
@@ -104,55 +123,45 @@ actor OSAScriptNowPlayingPayloadReader {
         bypassingBackoff: Bool,
         probingActivePlayback: Bool = false
     ) async -> MusicNowPlayingPayload? {
-        let now = Date()
-        if !bypassingBackoff {
-            if probingActivePlayback {
-                if let activePlaybackProbeBackoffUntil, now < activePlaybackProbeBackoffUntil {
-                    return nil
-                }
-            } else if let emptyOrFailureBackoffUntil, now < emptyOrFailureBackoffUntil {
-                return nil
-            }
+        let current = now()
+        if !bypassingBackoff, case let .waiting(until, _) = backoffState, current < until {
+            return nil
         }
 
         if let inFlightReadTask {
             return await inFlightReadTask.value
         }
 
+        let runner = processRunner
         let readTask = Task.detached(priority: .utility) {
-            Self.readPayload()
+            Self.readPayload(runner: runner)
         }
         inFlightReadTask = readTask
         let payload = await readTask.value
         inFlightReadTask = nil
 
         if payload?.hasDisplayableMediaRemoteMetadata == true {
-            emptyOrFailureBackoffUntil = nil
-            activePlaybackProbeBackoffUntil = nil
-            consecutiveEmptyOrFailureCount = 0
+            backoffState = .idle
         } else {
-            if probingActivePlayback {
-                activePlaybackProbeBackoffUntil = now.addingTimeInterval(Self.activePlaybackProbeInterval)
+            let failures: Int
+            if case let .waiting(_, consecutiveFailures) = backoffState {
+                failures = consecutiveFailures + 1
+            } else {
+                failures = 1
             }
-            emptyOrFailureBackoffUntil = now.addingTimeInterval(nextBackoffInterval())
-            consecutiveEmptyOrFailureCount += 1
+            let interval = probingActivePlayback
+                ? Self.activePlaybackProbeInterval
+                : Self.emptyOrFailureBackoffIntervals[
+                    min(failures - 1, Self.emptyOrFailureBackoffIntervals.count - 1)
+                ]
+            backoffState = .waiting(until: current.addingTimeInterval(interval), consecutiveFailures: failures)
         }
 
         return payload
     }
 
-    private func nextBackoffInterval() -> TimeInterval {
-        Self.emptyOrFailureBackoffIntervals[
-            min(consecutiveEmptyOrFailureCount, Self.emptyOrFailureBackoffIntervals.count - 1)
-        ]
-    }
-
-    private static func readPayload() -> MusicNowPlayingPayload? {
-        guard let data = ProcessRunner.run(
-            path: executableURL.path,
-            args: ["-l", "JavaScript", "-e", script],
-            timeout: timeout
-        ) else {
+    private static func readPayload(runner: ProcessRunning) -> MusicNowPlayingPayload? {
+        guard let data = runner(executableURL.path, ["-l", "JavaScript", "-e", script], timeout) else {
             return nil
         }
         guard !data.isEmpty, data.count <= maxOutputBytes else {
