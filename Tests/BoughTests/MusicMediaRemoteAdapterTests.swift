@@ -180,6 +180,29 @@ final class MusicMediaRemoteAdapterTests: XCTestCase {
         XCTAssertEqual(lookupCount, 0)
     }
 
+    func testIdentityProviderIsConsultedAtMostOncePerSnapshot() async throws {
+        let runtime = FakeMediaRemoteRuntime()
+        runtime.payload = MusicNowPlayingPayload(
+            bundleIdentifier: nil, displayName: nil,
+            title: "Mismatch Track", artist: nil, album: nil,
+            artworkData: nil, artworkMimeType: nil,
+            playbackStateValue: 1, playbackRate: 1
+        )
+        var providerCalls = 0
+        let service = MediaRemoteNowPlayingService(
+            runtimeLoader: { runtime },
+            allowedPlayerMonitor: FakeAllowedPlayerMonitor(),
+            runningAllowedPlayerProvider: {
+                providerCalls += 1
+                return MusicPlayerIdentity(bundleIdentifier: "com.spotify.client", displayName: "Spotify")
+            }
+        )
+
+        _ = try await service.currentSnapshot()
+
+        XCTAssertEqual(providerCalls, 1, "运行应用列表每个轮询周期最多采样一次")
+    }
+
     func testAdapterDoesNotAttributeExplicitVideoIdentityToRunningAllowedPlayer() async throws {
         let runtime = FakeMediaRemoteRuntime()
         runtime.payload = MusicNowPlayingPayload(

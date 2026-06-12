@@ -174,6 +174,9 @@ final class MediaRemoteNowPlayingService: MusicNowPlayingServicing {
             return nil
         }
 
+        // Running-player identity is sampled at most once per snapshot, inside the
+        // resolver and only when an identity substitution is actually needed, so a
+        // player launching/terminating mid-read cannot flip this snapshot's identity.
         let payload = try await loadRuntime().currentPayload(bypassingScriptBackoff: bypassingScriptBackoff)
             .resolvingMismatchedNonMusicIdentity {
                 runningAllowedPlayerProvider()
