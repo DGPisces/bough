@@ -160,6 +160,18 @@ final class MusicMediaRemoteSourceBoundaryTests: XCTestCase {
         }
     }
 
+    func testMusicNetworkAccessIsConfinedToOnlineDataProvider() throws {
+        let repoRoot = TestHelpers.repoRoot(from: #filePath)
+        let allowedFile = "Sources/Bough/Music/MusicOnlineDataProvider.swift"
+        let networkTokens = ["URLSession", "URLRequest", "dataTask"]
+        for path in try swiftFiles(under: repoRoot.appendingPathComponent("Sources/Bough/Music")) {
+            let relativePath = path.path.replacingOccurrences(of: repoRoot.path + "/", with: "")
+            let source = try String(contentsOf: path, encoding: .utf8)
+            guard networkTokens.contains(where: source.contains) else { continue }
+            XCTAssertEqual(relativePath, allowedFile, "Unexpected network token in \(relativePath)")
+        }
+    }
+
     private func swiftFiles(under root: URL) throws -> [URL] {
         var result: [URL] = []
         let enumerator = try XCTUnwrap(FileManager.default.enumerator(
