@@ -1,6 +1,6 @@
 import Foundation
 
-enum MusicAllowedPlayer: CaseIterable, Equatable {
+enum MusicAllowedPlayer: CaseIterable, Equatable, Hashable {
     case appleMusic
     case spotify
     case qqMusic
@@ -48,6 +48,21 @@ enum MusicAllowedPlayer: CaseIterable, Equatable {
         }
     }
 
+    /// Prefix-matched after exact hints fail. Deliberately excludes the generic
+    /// "music" so arbitrary "*Music*" apps never alias to Apple Music.
+    private var displayNamePrefixHints: [String] {
+        switch self {
+        case .appleMusic:
+            return []
+        case .spotify:
+            return ["spotify"]
+        case .qqMusic:
+            return ["qq music", "qqmusic", "qq音乐"]
+        case .netEaseCloudMusic:
+            return ["netease", "网易云"]
+        }
+    }
+
     static func match(bundleIdentifier: String?, displayName: String?) -> MusicAllowedPlayer? {
         let normalizedBundleIdentifier = bundleIdentifier?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -67,8 +82,11 @@ enum MusicAllowedPlayer: CaseIterable, Equatable {
             return nil
         }
 
+        if let exact = allCases.first(where: { $0.displayNameHints.contains(normalizedDisplayName) }) {
+            return exact
+        }
         return allCases.first { player in
-            player.displayNameHints.contains(normalizedDisplayName)
+            player.displayNamePrefixHints.contains { normalizedDisplayName.hasPrefix($0) }
         }
     }
 

@@ -1,6 +1,6 @@
 import Foundation
 
-enum MusicPlaybackState: String, CaseIterable, Equatable {
+enum MusicPlaybackState: String, CaseIterable, Equatable, Sendable {
     case playing
     case paused
     case stopped
@@ -16,13 +16,13 @@ enum MusicPlaybackState: String, CaseIterable, Equatable {
     }
 }
 
-enum MusicCommand: String, CaseIterable, Equatable {
+enum MusicCommand: String, CaseIterable, Equatable, Sendable {
     case previous
     case playPause
     case next
 }
 
-struct MusicPlayerIdentity: Equatable, Hashable {
+struct MusicPlayerIdentity: Equatable, Hashable, Sendable {
     let bundleIdentifier: String?
     let displayName: String
 
@@ -36,7 +36,7 @@ struct MusicPlayerIdentity: Equatable, Hashable {
     }
 }
 
-struct MusicArtworkSnapshot: Equatable {
+struct MusicArtworkSnapshot: Equatable, Sendable {
     let data: Data
     let mimeType: String?
 
@@ -51,7 +51,7 @@ struct MusicArtworkSnapshot: Equatable {
 ///
 /// Titles, artists, album names, lyric lines, artwork, and player identities are
 /// transient. Do not persist, export, webhook, or write them to diagnostics.
-struct MusicTrackSnapshot: Equatable {
+struct MusicTrackSnapshot: Equatable, Sendable {
     let title: String?
     let artist: String?
     let album: String?
@@ -76,7 +76,7 @@ struct MusicTrackSnapshot: Equatable {
     }
 }
 
-struct MusicCommandAvailability: Equatable {
+struct MusicCommandAvailability: Equatable, Sendable {
     let canPlayPause: Bool
     let canSkipPrevious: Bool
     let canSkipNext: Bool
@@ -99,22 +99,64 @@ struct MusicCommandAvailability: Equatable {
     }
 }
 
-struct MusicSoftFailure: Equatable {
+struct MusicSoftFailure: Equatable, Sendable {
     let message: String
     let command: MusicCommand?
     let occurredAt: Date
+}
+
+struct MusicPlaybackPosition: Equatable, Sendable {
+    let elapsed: TimeInterval
+    let duration: TimeInterval?
+    let rate: Double
+    let capturedAt: Date
+
+    init?(elapsed: TimeInterval?, duration: TimeInterval?, rate: Double?, capturedAt: Date) {
+        guard let elapsed, elapsed >= 0 else { return nil }
+        self.elapsed = elapsed
+        self.duration = (duration ?? 0) > 0 ? duration : nil
+        self.rate = max(0, rate ?? 0)
+        self.capturedAt = capturedAt
+    }
+
+    func elapsed(at date: Date) -> TimeInterval {
+        let value = elapsed + max(0, date.timeIntervalSince(capturedAt)) * rate
+        guard let duration else { return value }
+        return min(value, duration)
+    }
+
+    func withElapsed(_ newElapsed: TimeInterval, at date: Date) -> MusicPlaybackPosition {
+        MusicPlaybackPosition(elapsed: max(0, newElapsed), duration: duration, rate: rate, capturedAt: date)!
+    }
 }
 
 /// A single transient now-playing read from an eligible player.
 ///
 /// This is deliberately not `Codable`; downstream phases should keep music
 /// metadata inside the Bough app process and render it directly.
-struct MusicNowPlayingSnapshot: Equatable {
+struct MusicNowPlayingSnapshot: Equatable, Sendable {
     let player: MusicPlayerIdentity
     let track: MusicTrackSnapshot?
     let playbackState: MusicPlaybackState
     let commands: MusicCommandAvailability
     let capturedAt: Date
+    let position: MusicPlaybackPosition?
+
+    init(
+        player: MusicPlayerIdentity,
+        track: MusicTrackSnapshot?,
+        playbackState: MusicPlaybackState,
+        commands: MusicCommandAvailability,
+        capturedAt: Date,
+        position: MusicPlaybackPosition? = nil
+    ) {
+        self.player = player
+        self.track = track
+        self.playbackState = playbackState
+        self.commands = commands
+        self.capturedAt = capturedAt
+        self.position = position
+    }
 
     var hasCurrentVisibleTrack: Bool {
         playbackState.keepsCurrentTrackVisible && track?.hasDisplayableMetadata == true
@@ -128,7 +170,43 @@ struct MusicNowPlayingSnapshot: Equatable {
     }
 }
 
-enum MusicServiceState: Equatable {
+/// Normalized identity of a track used to correlate online lyrics/artwork
+/// with the locally observed snapshot. In-memory only.
+struct MusicTrackMatchKey: Hashable, Sendable {
+    let title: String
+    let artist: String
+    let album: String
+
+    init?(title: String?, artist: String?, album: String?) {
+        let normalizedTitle = Self.normalize(title)
+        guard !normalizedTitle.isEmpty else { return nil }
+        self.title = normalizedTitle
+        self.artist = Self.normalize(artist)
+        self.album = Self.normalize(album)
+    }
+
+    static func normalize(_ value: String?) -> String {
+        guard var text = value?.lowercased() else { return "" }
+        for (open, close) in [("(", ")"), ("[", "]"), ("（", "）"), ("【", "】")] {
+            while let openRange = text.range(of: open),
+                  let closeRange = text.range(of: close, range: openRange.upperBound..<text.endIndex) {
+                text.removeSubrange(openRange.lowerBound..<closeRange.upperBound)
+            }
+        }
+        return text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+}
+
+extension MusicNowPlayingSnapshot {
+    func withPosition(_ position: MusicPlaybackPosition?) -> MusicNowPlayingSnapshot {
+        MusicNowPlayingSnapshot(
+            player: player, track: track, playbackState: playbackState,
+            commands: commands, capturedAt: capturedAt, position: position
+        )
+    }
+}
+
+enum MusicServiceState: Equatable, Sendable {
     case disabled
     case unavailable(reason: String)
     case available(MusicNowPlayingSnapshot?)

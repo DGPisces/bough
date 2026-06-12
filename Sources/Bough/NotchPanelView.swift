@@ -614,7 +614,7 @@ private struct CompactLeftWing: View {
     var body: some View {
         HStack(spacing: 6) {
             if !expanded && compactActivitySource == .music {
-                MusicFigureView(snapshot: appState.musicStore.snapshot, size: mascotSize)
+                MusicFigureView(snapshot: appState.musicStore.snapshot, size: mascotSize, onlineArtwork: appState.musicStore.onlineArtwork)
                     .matchedGeometryEffect(id: MusicArtworkTransitionID.artwork, in: musicArtworkNamespace)
                     .zIndex(MusicArtworkTransitionID.zIndex)
             } else {

@@ -131,6 +131,18 @@ final class MusicSettingsAndModelsTests: XCTestCase {
         }
     }
 
+    func testDisplayNamePrefixMatchingRecognizesLocalizedVariants() {
+        XCTAssertEqual(MusicAllowedPlayer.match(bundleIdentifier: nil, displayName: "Spotify Premium"), .spotify)
+        XCTAssertEqual(MusicAllowedPlayer.match(bundleIdentifier: nil, displayName: "QQ音乐 Mac"), .qqMusic)
+        XCTAssertEqual(MusicAllowedPlayer.match(bundleIdentifier: nil, displayName: "网易云音乐 8.0"), .netEaseCloudMusic)
+        XCTAssertEqual(MusicAllowedPlayer.match(bundleIdentifier: nil, displayName: "NetEase Music"), .netEaseCloudMusic)
+    }
+
+    func testGenericMusicNameDoesNotPrefixMatchOtherPlayers() {
+        XCTAssertEqual(MusicAllowedPlayer.match(bundleIdentifier: nil, displayName: "Music"), .appleMusic)
+        XCTAssertNil(MusicAllowedPlayer.match(bundleIdentifier: nil, displayName: "Music Player Pro"))
+    }
+
     func testMusicModelsStayTransientAndAppTargetLocal() throws {
         let source = try sourceFile("Sources/Bough/Music/MusicModels.swift")
         let appSources = try sources(under: "Sources/Bough")
@@ -171,6 +183,41 @@ final class MusicSettingsAndModelsTests: XCTestCase {
             .map { try String(contentsOf: $0, encoding: .utf8) }
         XCTAssertFalse(sources.isEmpty, "Source scan must include Swift files under \(relativePath).")
         return sources.joined(separator: "\n")
+    }
+
+    func testPlaybackPositionExtrapolatesWhilePlayingAndClampsToDuration() {
+        let captured = Date(timeIntervalSince1970: 100)
+        let position = MusicPlaybackPosition(elapsed: 30, duration: 60, rate: 1, capturedAt: captured)!
+        XCTAssertEqual(position.elapsed(at: captured.addingTimeInterval(10)), 40, accuracy: 0.001)
+        XCTAssertEqual(position.elapsed(at: captured.addingTimeInterval(100)), 60, accuracy: 0.001)
+    }
+
+    func testPlaybackPositionFreezesWhenRateIsZero() {
+        let captured = Date(timeIntervalSince1970: 100)
+        let position = MusicPlaybackPosition(elapsed: 30, duration: 60, rate: 0, capturedAt: captured)!
+        XCTAssertEqual(position.elapsed(at: captured.addingTimeInterval(50)), 30, accuracy: 0.001)
+    }
+
+    func testPlaybackPositionRejectsMissingElapsed() {
+        XCTAssertNil(MusicPlaybackPosition(elapsed: nil, duration: 60, rate: 1, capturedAt: Date()))
+    }
+
+    func testPositionIsNotPartOfDisplayEquivalence() {
+        let captured = Date(timeIntervalSince1970: 100)
+        let a = makePositionSnapshot(position: MusicPlaybackPosition(elapsed: 30, duration: 60, rate: 1, capturedAt: captured))
+        let b = makePositionSnapshot(position: MusicPlaybackPosition(elapsed: 55, duration: 60, rate: 1, capturedAt: captured))
+        XCTAssertTrue(a.isDisplayEquivalent(to: b))
+    }
+
+    private func makePositionSnapshot(position: MusicPlaybackPosition?) -> MusicNowPlayingSnapshot {
+        MusicNowPlayingSnapshot(
+            player: MusicPlayerIdentity(bundleIdentifier: "com.apple.Music", displayName: "Music"),
+            track: MusicTrackSnapshot(title: "T", artist: "A", album: nil, lyricLine: nil, artwork: nil),
+            playbackState: .playing,
+            commands: .unavailable,
+            capturedAt: position?.capturedAt ?? Date(),
+            position: position
+        )
     }
 
     private static let repoRoot = TestHelpers.repoRoot(from: #filePath)

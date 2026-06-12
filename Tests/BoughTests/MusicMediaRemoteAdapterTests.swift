@@ -67,20 +67,19 @@ final class MusicMediaRemoteAdapterTests: XCTestCase {
 
     func testAdapterSourceBacksOffEmptyScriptFallbackButAllowsBypass() throws {
         let source = try sourceFile("Sources/Bough/Music/MediaRemoteNowPlayingService.swift")
+        let reader = try sourceFile("Sources/Bough/Music/OSAScriptNowPlayingPayloadReader.swift")
 
-        XCTAssertTrue(source.contains("private static let emptyOrFailureBackoffIntervals: [TimeInterval] = [10, 30, 60]"))
-        XCTAssertTrue(source.contains("private static let activePlaybackProbeInterval: TimeInterval = 2"))
-        XCTAssertTrue(source.contains("emptyOrFailureBackoffUntil"))
-        XCTAssertTrue(source.contains("activePlaybackProbeBackoffUntil"))
-        XCTAssertTrue(source.contains("consecutiveEmptyOrFailureCount"))
-        XCTAssertTrue(source.contains("private actor OSAScriptNowPlayingPayloadReader"))
-        XCTAssertTrue(source.contains("private var inFlightReadTask: Task<MusicNowPlayingPayload?, Never>?"))
-        XCTAssertTrue(source.contains("Task.detached(priority: .utility)"))
-        XCTAssertTrue(source.contains("ProcessRunner.run("))
+        XCTAssertTrue(reader.contains("private static let emptyOrFailureBackoffIntervals: [TimeInterval] = [10, 30, 60]"))
+        XCTAssertTrue(reader.contains("private static let activePlaybackProbeInterval: TimeInterval = 2"))
+        XCTAssertTrue(reader.contains("private var backoffState"))
+        XCTAssertTrue(reader.contains("case waiting(until:"))
+        XCTAssertTrue(reader.contains("actor OSAScriptNowPlayingPayloadReader"))
+        XCTAssertTrue(reader.contains("private var inFlightReadTask: Task<MusicNowPlayingPayload?, Never>?"))
+        XCTAssertTrue(reader.contains("Task.detached(priority: .utility)"))
+        XCTAssertTrue(reader.contains("ProcessRunner.run("))
         XCTAssertTrue(source.contains("probingActivePlayback: legacyPayload.isPlaybackLikelyActive"))
-        XCTAssertTrue(source.contains("if !bypassingBackoff {"))
-        XCTAssertTrue(source.contains("if probingActivePlayback"))
-        XCTAssertTrue(source.contains("payload?.hasDisplayableMediaRemoteMetadata == true"))
+        XCTAssertTrue(reader.contains("if !bypassingBackoff"))
+        XCTAssertTrue(reader.contains("payload?.hasDisplayableMediaRemoteMetadata == true"))
     }
 
     func testAdapterSourceBoundsMediaRemoteCallbacksBeforeScriptFallback() throws {
@@ -94,11 +93,12 @@ final class MusicMediaRemoteAdapterTests: XCTestCase {
     }
 
     func testAdapterSourceCachesQQMusicAlbumLookupMisses() throws {
-        let source = try sourceFile("Sources/Bough/Music/MediaRemoteNowPlayingService.swift")
+        let source = try sourceFile("Sources/Bough/Music/QQMusicLocalLibrary.swift")
 
         XCTAssertTrue(source.contains("private var albumMidMissCache: [AlbumLookupKey: AlbumLookupMiss] = [:]"))
-        XCTAssertTrue(source.contains("AlbumLookupMiss(databaseModificationDate: databaseModificationDate)"))
-        XCTAssertTrue(source.contains("miss.databaseModificationDate == databaseModificationDate"))
+        XCTAssertTrue(source.contains("static let missRetryInterval: TimeInterval = 600"))
+        XCTAssertTrue(source.contains("recordedAt: now()"))
+        XCTAssertTrue(source.contains("now().timeIntervalSince(miss.recordedAt) < Self.missRetryInterval"))
         XCTAssertTrue(source.contains("private static func databaseModificationDate(for url: URL) -> Date?"))
     }
 
@@ -176,6 +176,29 @@ final class MusicMediaRemoteAdapterTests: XCTestCase {
 
         XCTAssertNil(snapshot)
         XCTAssertEqual(lookupCount, 0)
+    }
+
+    func testIdentityProviderIsConsultedAtMostOncePerSnapshot() async throws {
+        let runtime = FakeMediaRemoteRuntime()
+        runtime.payload = MusicNowPlayingPayload(
+            bundleIdentifier: nil, displayName: nil,
+            title: "Mismatch Track", artist: nil, album: nil,
+            artworkData: nil, artworkMimeType: nil,
+            playbackStateValue: 1, playbackRate: 1
+        )
+        var providerCalls = 0
+        let service = MediaRemoteNowPlayingService(
+            runtimeLoader: { runtime },
+            allowedPlayerMonitor: FakeAllowedPlayerMonitor(),
+            runningAllowedPlayerProvider: {
+                providerCalls += 1
+                return MusicPlayerIdentity(bundleIdentifier: "com.spotify.client", displayName: "Spotify")
+            }
+        )
+
+        _ = try await service.currentSnapshot()
+
+        XCTAssertEqual(providerCalls, 1, "运行应用列表每个轮询周期最多采样一次")
     }
 
     func testAdapterDoesNotAttributeExplicitVideoIdentityToRunningAllowedPlayer() async throws {
@@ -290,6 +313,33 @@ final class MusicMediaRemoteAdapterTests: XCTestCase {
         }
     }
 
+    func testAdapterForwardsSeekToRuntime() async throws {
+        let runtime = FakeMediaRemoteRuntime()
+        let service = MediaRemoteNowPlayingService(
+            runtimeLoader: { runtime },
+            allowedPlayerMonitor: FakeAllowedPlayerMonitor()
+        )
+        try await service.seek(to: 42.5)
+        XCTAssertEqual(runtime.seekTargets, [42.5])
+    }
+
+    func testRuntimeCapturesElapsedAndDurationKeysInSource() throws {
+        let repoRoot = TestHelpers.repoRoot(from: #filePath)
+        let adapter = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/Bough/Music/MediaRemoteNowPlayingService.swift"),
+            encoding: .utf8
+        )
+        let reader = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/Bough/Music/OSAScriptNowPlayingPayloadReader.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(adapter.contains("kMRMediaRemoteNowPlayingInfoElapsedTime"))
+        XCTAssertTrue(adapter.contains("kMRMediaRemoteNowPlayingInfoDuration"))
+        XCTAssertTrue(adapter.contains("MRMediaRemoteSetElapsedTime"))
+        XCTAssertTrue(reader.contains("kMRMediaRemoteNowPlayingInfoElapsedTime"))
+        XCTAssertTrue(reader.contains("kMRMediaRemoteNowPlayingInfoDuration"))
+    }
+
     private func sourceFile(_ relativePath: String) throws -> String {
         let url = TestHelpers.repoRoot(from: #filePath).appendingPathComponent(relativePath)
         return try String(contentsOf: url, encoding: .utf8)
@@ -326,6 +376,11 @@ private final class FakeMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
         if let commandError {
             throw commandError
         }
+    }
+
+    private(set) var seekTargets: [TimeInterval] = []
+    func seek(to seconds: TimeInterval) async throws {
+        seekTargets.append(seconds)
     }
 }
 
