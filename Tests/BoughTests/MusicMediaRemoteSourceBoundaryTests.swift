@@ -7,6 +7,7 @@ final class MusicMediaRemoteSourceBoundaryTests: XCTestCase {
         let repoRoot = TestHelpers.repoRoot(from: #filePath)
         let allowedFiles: Set<String> = [
             "Sources/Bough/Music/MediaRemoteNowPlayingService.swift",
+            "Sources/Bough/Music/OSAScriptNowPlayingPayloadReader.swift",
         ]
         let forbiddenTokens = ["MediaRemote", "MRMediaRemote", "dlopen", "dlsym"]
 
@@ -89,12 +90,19 @@ final class MusicMediaRemoteSourceBoundaryTests: XCTestCase {
 
     func testAdapterFallsBackThroughOSAScriptWhenBundledProcessIsDeniedMetadata() throws {
         let repoRoot = TestHelpers.repoRoot(from: #filePath)
-        let adapter = try String(contentsOf: repoRoot.appendingPathComponent("Sources/Bough/Music/MediaRemoteNowPlayingService.swift"), encoding: .utf8)
+        let adapter = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/Bough/Music/MediaRemoteNowPlayingService.swift"),
+            encoding: .utf8
+        )
+        let reader = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/Bough/Music/OSAScriptNowPlayingPayloadReader.swift"),
+            encoding: .utf8
+        )
 
         XCTAssertTrue(adapter.contains("OSAScriptNowPlayingPayloadReader"))
-        XCTAssertTrue(adapter.contains("URL(fileURLWithPath: \"/usr/bin/osascript\")"))
-        XCTAssertTrue(adapter.contains("JSONDecoder().decode(DecodedPayload.self"))
-        XCTAssertTrue(adapter.contains("playbackStateValue: numberFromValue(unwrap(request.localPlaybackState))"))
+        XCTAssertTrue(reader.contains("URL(fileURLWithPath: \"/usr/bin/osascript\")"))
+        XCTAssertTrue(reader.contains("JSONDecoder().decode(DecodedPayload.self"))
+        XCTAssertTrue(reader.contains("playbackStateValue: numberFromValue(unwrap(request.localPlaybackState))"))
         XCTAssertTrue(adapter.contains("QQMusicArtworkResolver"))
         XCTAssertTrue(adapter.contains("albumMidCache"))
         XCTAssertFalse(adapter.contains("prefersScriptPayload"))

@@ -67,20 +67,21 @@ final class MusicMediaRemoteAdapterTests: XCTestCase {
 
     func testAdapterSourceBacksOffEmptyScriptFallbackButAllowsBypass() throws {
         let source = try sourceFile("Sources/Bough/Music/MediaRemoteNowPlayingService.swift")
+        let reader = try sourceFile("Sources/Bough/Music/OSAScriptNowPlayingPayloadReader.swift")
 
-        XCTAssertTrue(source.contains("private static let emptyOrFailureBackoffIntervals: [TimeInterval] = [10, 30, 60]"))
-        XCTAssertTrue(source.contains("private static let activePlaybackProbeInterval: TimeInterval = 2"))
-        XCTAssertTrue(source.contains("emptyOrFailureBackoffUntil"))
-        XCTAssertTrue(source.contains("activePlaybackProbeBackoffUntil"))
-        XCTAssertTrue(source.contains("consecutiveEmptyOrFailureCount"))
-        XCTAssertTrue(source.contains("private actor OSAScriptNowPlayingPayloadReader"))
-        XCTAssertTrue(source.contains("private var inFlightReadTask: Task<MusicNowPlayingPayload?, Never>?"))
-        XCTAssertTrue(source.contains("Task.detached(priority: .utility)"))
-        XCTAssertTrue(source.contains("ProcessRunner.run("))
+        XCTAssertTrue(reader.contains("private static let emptyOrFailureBackoffIntervals: [TimeInterval] = [10, 30, 60]"))
+        XCTAssertTrue(reader.contains("private static let activePlaybackProbeInterval: TimeInterval = 2"))
+        XCTAssertTrue(reader.contains("emptyOrFailureBackoffUntil"))
+        XCTAssertTrue(reader.contains("activePlaybackProbeBackoffUntil"))
+        XCTAssertTrue(reader.contains("consecutiveEmptyOrFailureCount"))
+        XCTAssertTrue(reader.contains("actor OSAScriptNowPlayingPayloadReader"))
+        XCTAssertTrue(reader.contains("private var inFlightReadTask: Task<MusicNowPlayingPayload?, Never>?"))
+        XCTAssertTrue(reader.contains("Task.detached(priority: .utility)"))
+        XCTAssertTrue(reader.contains("ProcessRunner.run("))
         XCTAssertTrue(source.contains("probingActivePlayback: legacyPayload.isPlaybackLikelyActive"))
-        XCTAssertTrue(source.contains("if !bypassingBackoff {"))
-        XCTAssertTrue(source.contains("if probingActivePlayback"))
-        XCTAssertTrue(source.contains("payload?.hasDisplayableMediaRemoteMetadata == true"))
+        XCTAssertTrue(reader.contains("if !bypassingBackoff {"))
+        XCTAssertTrue(reader.contains("if probingActivePlayback"))
+        XCTAssertTrue(reader.contains("payload?.hasDisplayableMediaRemoteMetadata == true"))
     }
 
     func testAdapterSourceBoundsMediaRemoteCallbacksBeforeScriptFallback() throws {
