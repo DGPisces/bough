@@ -257,8 +257,13 @@ final class ConfigInstallerTests: XCTestCase {
         try "{".write(to: config, atomically: true, encoding: .utf8)
         defer {
             _ = ConfigInstaller.removeCustomCLI(source: source)
-            UserDefaults.standard.removeObject(forKey: "cli_enabled_\(source)")
         }
+
+        // Isolated suite: keeps the cli_enabled_* write out of `.standard`,
+        // which is shared across `swift test --parallel` worker processes.
+        let suiteName = "ConfigInstallerTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let result = ConfigInstaller.addCustomCLI(
             name: "Custom",
@@ -268,8 +273,8 @@ final class ConfigInstallerTests: XCTestCase {
         )
 
         XCTAssertTrue(result.ok)
-        XCTAssertFalse(ConfigInstaller.setEnabled(source: source, enabled: true))
-        XCTAssertFalse(ConfigInstaller.isEnabled(source: source))
+        XCTAssertFalse(ConfigInstaller.setEnabled(source: source, enabled: true, defaults: defaults))
+        XCTAssertFalse(ConfigInstaller.isEnabled(source: source, defaults: defaults))
     }
 
     func testRemoveManagedHookEntriesAlsoPrunesLegacyManagedHooks() throws {
@@ -411,21 +416,17 @@ final class ConfigInstallerTests: XCTestCase {
 
     func testCodexSetEnabledDoesNotCreateHooksWhenConfigTomlIsMalformed() throws {
         try withTemporaryCodexHome { home, config in
-            let key = "cli_enabled_codex"
-            let saved = UserDefaults.standard.object(forKey: key)
-            defer {
-                if let saved {
-                    UserDefaults.standard.set(saved, forKey: key)
-                } else {
-                    UserDefaults.standard.removeObject(forKey: key)
-                }
-            }
+            // Isolated suite: keeps the cli_enabled_codex write out of `.standard`,
+            // which is shared across `swift test --parallel` worker processes.
+            let suiteName = "ConfigInstallerTests-\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suiteName)!
+            defer { defaults.removePersistentDomain(forName: suiteName) }
             try """
             [features
             codex_hooks = true
             """.write(to: config, atomically: true, encoding: .utf8)
 
-            XCTAssertFalse(ConfigInstaller.setEnabled(source: "codex", enabled: true))
+            XCTAssertFalse(ConfigInstaller.setEnabled(source: "codex", enabled: true, defaults: defaults))
             XCTAssertFalse(FileManager.default.fileExists(atPath: home.appendingPathComponent("hooks.json").path))
         }
     }
@@ -435,27 +436,26 @@ final class ConfigInstallerTests: XCTestCase {
         let home = fm.temporaryDirectory
             .appendingPathComponent("ConfigInstallerTests-MissingCodexHome-\(UUID().uuidString)")
         let previous = ProcessInfo.processInfo.environment["CODEX_HOME"]
-        let key = "cli_enabled_codex"
-        let saved = UserDefaults.standard.object(forKey: key)
         defer {
             if let previous {
                 setenv("CODEX_HOME", previous, 1)
             } else {
                 unsetenv("CODEX_HOME")
             }
-            if let saved {
-                UserDefaults.standard.set(saved, forKey: key)
-            } else {
-                UserDefaults.standard.removeObject(forKey: key)
-            }
             try? fm.removeItem(at: home)
         }
 
+        // Isolated suite: keeps the cli_enabled_codex write out of `.standard`,
+        // which is shared across `swift test --parallel` worker processes.
+        let suiteName = "ConfigInstallerTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
         setenv("CODEX_HOME", home.path, 1)
-        UserDefaults.standard.set(true, forKey: key)
+        defaults.set(true, forKey: "cli_enabled_codex")
 
         XCTAssertFalse(fm.fileExists(atPath: home.path))
-        XCTAssertTrue(ConfigInstaller.testInstallCodexHooksIfEnabled())
+        XCTAssertTrue(ConfigInstaller.testInstallCodexHooksIfEnabled(defaults: defaults))
         XCTAssertTrue(fm.fileExists(atPath: home.appendingPathComponent("config.toml").path))
         XCTAssertTrue(fm.fileExists(atPath: home.appendingPathComponent("hooks.json").path))
         XCTAssertTrue(try String(contentsOf: home.appendingPathComponent("config.toml"), encoding: .utf8).contains("hooks = true"))

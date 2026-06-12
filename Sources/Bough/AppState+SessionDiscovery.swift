@@ -43,7 +43,9 @@ extension AppState {
         return discovered
     }
 
-    nonisolated static func discoveryWatchRoots() -> [String] {
+    /// `defaults` is injectable so tests can use an isolated suite instead of
+    /// `.standard`, which is shared across `swift test --parallel` worker processes.
+    nonisolated static func discoveryWatchRoots(defaults: UserDefaults = .standard) -> [String] {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidates: [(String, String)] = [
             ("claude", "\(home)/.claude/projects"),
@@ -61,7 +63,7 @@ extension AppState {
         var roots: [String] = []
         var seen = Set<String>()
         for (source, path) in candidates {
-            guard ConfigInstaller.isEnabled(source: source),
+            guard ConfigInstaller.isEnabled(source: source, defaults: defaults),
                   fm.fileExists(atPath: path),
                   seen.insert(path).inserted
             else { continue }

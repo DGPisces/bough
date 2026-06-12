@@ -223,8 +223,8 @@ extension ConfigInstaller {
     }
 
     /// internal: required by ConfigInstallerTests via @testable.
-    static func testInstallCodexHooksIfEnabled() -> Bool {
-        installCodexHooksIfEnabled(fm: FileManager.default, bridgeInstalled: true)
+    static func testInstallCodexHooksIfEnabled(defaults: UserDefaults = .standard) -> Bool {
+        installCodexHooksIfEnabled(fm: FileManager.default, bridgeInstalled: true, defaults: defaults)
     }
 
     /// internal: required by ConfigInstallerCodexConfigTomlHygieneTests via @testable.
@@ -413,8 +413,12 @@ struct ConfigInstaller {
         return ok
     }
 
-    private static func installCodexHooksIfEnabled(fm: FileManager, bridgeInstalled: Bool) -> Bool {
-        guard isEnabled(source: "codex") else { return true }
+    private static func installCodexHooksIfEnabled(
+        fm: FileManager,
+        bridgeInstalled: Bool,
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        guard isEnabled(source: "codex", defaults: defaults) else { return true }
         return installCodexHooks(fm: fm, bridgeInstalled: bridgeInstalled)
     }
 
@@ -499,15 +503,17 @@ struct ConfigInstaller {
     static func isCodexInstalled() -> Bool { isInstalled(source: "codex") }
 
     /// Whether a CLI is enabled by user (UserDefaults). Default: true.
-    static func isEnabled(source: String) -> Bool {
+    /// `defaults` is injectable so tests can use an isolated suite instead of
+    /// `.standard`, which is shared across `swift test --parallel` worker processes.
+    static func isEnabled(source: String, defaults: UserDefaults = .standard) -> Bool {
         let key = "cli_enabled_\(source)"
-        if UserDefaults.standard.object(forKey: key) == nil { return true }
-        return UserDefaults.standard.bool(forKey: key)
+        if defaults.object(forKey: key) == nil { return true }
+        return defaults.bool(forKey: key)
     }
 
     /// Toggle a single CLI on/off: installs or uninstalls its hooks.
     @discardableResult
-    static func setEnabled(source: String, enabled: Bool) -> Bool {
+    static func setEnabled(source: String, enabled: Bool, defaults: UserDefaults = .standard) -> Bool {
         let key = "cli_enabled_\(source)"
         let fm = FileManager.default
         if enabled {
@@ -526,7 +532,7 @@ struct ConfigInstaller {
                         && installTraecliHooks(fm: fm)
                         && isTraecliHooksInstalled(fm: fm)
                 } else if cli.source == "codex" {
-                    UserDefaults.standard.set(false, forKey: key)
+                    defaults.set(false, forKey: key)
                     ok = installCodexHooks(fm: fm, bridgeInstalled: bridgeInstalled)
                 } else {
                     ok = bridgeInstalled
@@ -536,10 +542,10 @@ struct ConfigInstaller {
             } else {
                 ok = false
             }
-            UserDefaults.standard.set(ok, forKey: key)
+            defaults.set(ok, forKey: key)
             return ok
         } else {
-            UserDefaults.standard.set(false, forKey: key)
+            defaults.set(false, forKey: key)
             if source == "opencode" {
                 uninstallOpencodePlugin(fm: fm)
             } else if let cli = allCLIs.first(where: { $0.source == source }) {

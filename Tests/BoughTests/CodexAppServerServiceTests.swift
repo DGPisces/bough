@@ -277,19 +277,42 @@ private enum CodexAppServerServiceTestsError: Error {
     case handshakeFailed
 }
 
-private final class ManualSleeper: CodexAppServerSleeping {
-    private var continuation: CheckedContinuation<Void, Never>?
+/// Parks every sleep until `complete()` is called. Stores ALL parked
+/// continuations: a single-continuation version dropped the first parked
+/// sleep when a second one arrived (e.g. the initialization-timeout sleep
+/// and a request-timeout sleep parked at once), leaking a CheckedContinuation
+/// ("SWIFT TASK CONTINUATION MISUSE" warnings, observed pointer-auth crash).
+private final class ManualSleeper: CodexAppServerSleeping, @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuations: [CheckedContinuation<Void, Never>] = []
     private var isComplete = false
+
     func sleep(seconds: TimeInterval) async {
         _ = seconds
-        if isComplete { return }
-        await withCheckedContinuation { continuation = $0 }
-        guard !isComplete else { return }
+        let shouldPark: Bool = {
+            lock.lock(); defer { lock.unlock() }
+            return !isComplete
+        }()
+        guard shouldPark else { return }
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if isComplete {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            continuations.append(continuation)
+            lock.unlock()
+        }
     }
+
     func complete() {
+        lock.lock()
         isComplete = true
-        continuation?.resume()
-        continuation = nil
+        let parked = continuations
+        continuations.removeAll()
+        lock.unlock()
+        for continuation in parked { continuation.resume() }
     }
 }
 
