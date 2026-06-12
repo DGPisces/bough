@@ -247,6 +247,8 @@ extension MusicNowPlayingPayload {
             playbackStateValue: playbackStateValue,
             playbackRate: playbackRate,
             timestamp: timestamp,
+            elapsedTime: elapsedTime,
+            duration: duration,
             lyricCandidates: lyricCandidates,
             commandAvailability: commandAvailability
         )
@@ -604,6 +606,8 @@ private extension MusicNowPlayingPayload {
             playbackStateValue: playbackStateValue,
             playbackRate: playbackRate,
             timestamp: timestamp,
+            elapsedTime: elapsedTime,
+            duration: duration,
             lyricCandidates: lyricCandidates,
             commandAvailability: commandAvailability
         )

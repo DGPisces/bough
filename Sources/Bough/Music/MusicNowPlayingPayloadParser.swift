@@ -12,6 +12,8 @@ struct MusicNowPlayingPayload: Equatable {
     let playbackStateValue: Int?
     let playbackRate: Double?
     let timestamp: Date?
+    let elapsedTime: Double?
+    let duration: Double?
     let lyricCandidates: [MusicLyricCandidate]
     let commandAvailability: MusicCommandAvailability?
 
@@ -26,6 +28,8 @@ struct MusicNowPlayingPayload: Equatable {
         playbackStateValue: Int?,
         playbackRate: Double?,
         timestamp: Date? = nil,
+        elapsedTime: Double? = nil,
+        duration: Double? = nil,
         lyricCandidates: [MusicLyricCandidate] = [],
         commandAvailability: MusicCommandAvailability? = nil
     ) {
@@ -39,6 +43,8 @@ struct MusicNowPlayingPayload: Equatable {
         self.playbackStateValue = playbackStateValue
         self.playbackRate = playbackRate
         self.timestamp = timestamp
+        self.elapsedTime = elapsedTime
+        self.duration = duration
         self.lyricCandidates = lyricCandidates
         self.commandAvailability = commandAvailability
     }
@@ -89,7 +95,13 @@ enum MusicNowPlayingPayloadParser {
             track: track,
             playbackState: playbackState,
             commands: payload.commandAvailability ?? defaultCommandAvailability,
-            capturedAt: capturedAt
+            capturedAt: capturedAt,
+            position: MusicPlaybackPosition(
+                elapsed: payload.elapsedTime,
+                duration: payload.duration,
+                rate: playbackState == .playing ? (payload.playbackRate ?? 1) : 0,
+                capturedAt: payload.timestamp ?? capturedAt
+            )
         )
     }
 

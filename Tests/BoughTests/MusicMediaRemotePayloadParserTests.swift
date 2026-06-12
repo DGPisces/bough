@@ -182,6 +182,41 @@ final class MusicMediaRemotePayloadParserTests: XCTestCase {
         XCTAssertNil(lyric)
     }
 
+    func testParserCapturesPlaybackPositionFromPayload() {
+        let captured = Date(timeIntervalSince1970: 500)
+        let payload = MusicNowPlayingPayload(
+            bundleIdentifier: "com.apple.Music",
+            displayName: "Music",
+            title: "Track",
+            artist: nil,
+            album: nil,
+            artworkData: nil,
+            artworkMimeType: nil,
+            playbackStateValue: 1,
+            playbackRate: 1,
+            timestamp: Date(timeIntervalSince1970: 480),
+            elapsedTime: 42,
+            duration: 240
+        )
+        let snapshot = MusicNowPlayingPayloadParser.parse(payload, capturedAt: captured)
+        XCTAssertEqual(snapshot?.position?.elapsed, 42)
+        XCTAssertEqual(snapshot?.position?.duration, 240)
+        XCTAssertEqual(snapshot?.position?.capturedAt, Date(timeIntervalSince1970: 480))
+    }
+
+    func testParserPositionRateIsZeroWhenPaused() {
+        let payload = MusicNowPlayingPayload(
+            bundleIdentifier: "com.apple.Music", displayName: "Music",
+            title: "Track", artist: nil, album: nil,
+            artworkData: nil, artworkMimeType: nil,
+            playbackStateValue: 2, playbackRate: 0,
+            timestamp: nil, elapsedTime: 42, duration: 240
+        )
+        let snapshot = MusicNowPlayingPayloadParser.parse(payload, capturedAt: Date(timeIntervalSince1970: 500))
+        XCTAssertEqual(snapshot?.position?.rate, 0)
+        XCTAssertEqual(snapshot?.position?.capturedAt, Date(timeIntervalSince1970: 500))
+    }
+
     private func payload(
         bundleIdentifier: String? = "com.tencent.QQMusicMac",
         displayName: String? = "QQ Music",

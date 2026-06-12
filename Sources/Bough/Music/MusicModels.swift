@@ -105,6 +105,31 @@ struct MusicSoftFailure: Equatable {
     let occurredAt: Date
 }
 
+struct MusicPlaybackPosition: Equatable {
+    let elapsed: TimeInterval
+    let duration: TimeInterval?
+    let rate: Double
+    let capturedAt: Date
+
+    init?(elapsed: TimeInterval?, duration: TimeInterval?, rate: Double?, capturedAt: Date) {
+        guard let elapsed, elapsed >= 0 else { return nil }
+        self.elapsed = elapsed
+        self.duration = (duration ?? 0) > 0 ? duration : nil
+        self.rate = max(0, rate ?? 0)
+        self.capturedAt = capturedAt
+    }
+
+    func elapsed(at date: Date) -> TimeInterval {
+        let value = elapsed + max(0, date.timeIntervalSince(capturedAt)) * rate
+        guard let duration else { return value }
+        return min(value, duration)
+    }
+
+    func withElapsed(_ newElapsed: TimeInterval, at date: Date) -> MusicPlaybackPosition {
+        MusicPlaybackPosition(elapsed: max(0, newElapsed), duration: duration, rate: rate, capturedAt: date)!
+    }
+}
+
 /// A single transient now-playing read from an eligible player.
 ///
 /// This is deliberately not `Codable`; downstream phases should keep music
@@ -115,6 +140,23 @@ struct MusicNowPlayingSnapshot: Equatable {
     let playbackState: MusicPlaybackState
     let commands: MusicCommandAvailability
     let capturedAt: Date
+    let position: MusicPlaybackPosition?
+
+    init(
+        player: MusicPlayerIdentity,
+        track: MusicTrackSnapshot?,
+        playbackState: MusicPlaybackState,
+        commands: MusicCommandAvailability,
+        capturedAt: Date,
+        position: MusicPlaybackPosition? = nil
+    ) {
+        self.player = player
+        self.track = track
+        self.playbackState = playbackState
+        self.commands = commands
+        self.capturedAt = capturedAt
+        self.position = position
+    }
 
     var hasCurrentVisibleTrack: Bool {
         playbackState.keepsCurrentTrackVisible && track?.hasDisplayableMetadata == true
