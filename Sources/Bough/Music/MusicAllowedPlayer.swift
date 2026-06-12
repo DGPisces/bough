@@ -1,6 +1,6 @@
 import Foundation
 
-enum MusicAllowedPlayer: CaseIterable, Equatable {
+enum MusicAllowedPlayer: CaseIterable, Equatable, Hashable {
     case appleMusic
     case spotify
     case qqMusic

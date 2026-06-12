@@ -114,6 +114,48 @@ final class MusicOnlineDataProviderTests: XCTestCase {
         let data = await provider.artworkData(for: makeKey(), player: .spotify, rawTitle: "Hello", rawArtist: "Adele", rawAlbum: "25", durationHint: 295)
         XCTAssertEqual(data, png)
     }
+
+    func testLyricsCacheIsKeyedByDuration() async {
+        let http = StubHTTP()
+        http.routes = [
+            ("client_search_cp", Self.qqSearchBody()),
+            ("fcg_query_lyric_new", Self.qqLyricBody(lrc: "[00:01.00]hello line")),
+        ]
+        let provider = MusicOnlineDataProvider(http: http, qqLocalLibrary: nonexistentLibrary())
+        _ = await provider.timedLyrics(for: makeKey(), durationHint: nil)
+        let firstCount = http.requestedURLs.count
+        _ = await provider.timedLyrics(for: makeKey(), durationHint: 295)
+        XCTAssertGreaterThan(http.requestedURLs.count, firstCount, "不同 duration 不应共用缓存")
+    }
+
+    func testArtworkCacheIsKeyedByPlayer() async {
+        let pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        let png = Data(base64Encoded: pngBase64)!
+        let http = StubHTTP()
+        http.routes = [
+            ("client_search_cp", Self.qqSearchBody(albummid: "ALB001ALB001AB")),
+            ("photo_new/T002R300x300M000ALB001ALB001AB", png),
+        ]
+        let provider = MusicOnlineDataProvider(http: http, qqLocalLibrary: nonexistentLibrary())
+        _ = await provider.artworkData(for: makeKey(), player: .spotify, rawTitle: "Hello", rawArtist: "Adele", rawAlbum: "25", durationHint: 295)
+        let firstCount = http.requestedURLs.count
+        _ = await provider.artworkData(for: makeKey(), player: .appleMusic, rawTitle: "Hello", rawArtist: "Adele", rawAlbum: "25", durationHint: 295)
+        XCTAssertGreaterThan(http.requestedURLs.count, firstCount, "不同 player 不应共用封面缓存")
+    }
+
+    func testRejectsArtworkFromNonAllowlistedHost() async {
+        let http = StubHTTP()
+        http.routes = [
+            ("api/search/get", Data("""
+            {"result":{"songs":[{"id":42,"name":"Hello","artists":[{"name":"Adele"}],"album":{"id":7,"name":"25"},"duration":295000}]}}
+            """.utf8)),
+            ("api/song/detail", Data(#"{"songs":[{"album":{"picUrl":"https://attacker.test/x.jpg"}}]}"#.utf8)),
+        ]
+        let provider = MusicOnlineDataProvider(http: http, qqLocalLibrary: nonexistentLibrary())
+        let data = await provider.artworkData(for: makeKey(), player: .spotify, rawTitle: "Hello", rawArtist: "Adele", rawAlbum: "25", durationHint: 295)
+        XCTAssertNil(data)
+        XCTAssertFalse(http.requestedURLs.contains { $0.contains("attacker.test") }, "不得对非白名单 host 发起请求")
+    }
 }
 
 private final class LockedClock: @unchecked Sendable {

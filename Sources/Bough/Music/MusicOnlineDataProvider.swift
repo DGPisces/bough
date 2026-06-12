@@ -34,19 +34,32 @@ actor MusicOnlineDataProvider: MusicOnlineDataProviding {
     static let maxArtworkBytes = 2 * 1024 * 1024
     static let durationTolerance: TimeInterval = 3
 
+    private struct LyricsCacheKey: Hashable {
+        let track: MusicTrackMatchKey
+        let durationBucket: Int?
+    }
+    private struct ArtworkCacheKey: Hashable {
+        let track: MusicTrackMatchKey
+        let player: MusicAllowedPlayer?
+        let durationBucket: Int?
+    }
+    private static func durationBucket(_ hint: TimeInterval?) -> Int? {
+        hint.map { Int($0.rounded()) }
+    }
+
     private let http: MusicOnlineHTTPRequesting
     private let qqLocalLibrary: QQMusicLocalLibrary
     private let now: () -> Date
 
-    private var lyricsCache: [MusicTrackMatchKey: MusicTimedLyrics] = [:]
-    private var lyricsCacheOrder: [MusicTrackMatchKey] = []
-    private var lyricsMissedAt: [MusicTrackMatchKey: Date] = [:]
-    private var inFlightLyrics: [MusicTrackMatchKey: Task<MusicTimedLyrics?, Never>] = [:]
+    private var lyricsCache: [LyricsCacheKey: MusicTimedLyrics] = [:]
+    private var lyricsCacheOrder: [LyricsCacheKey] = []
+    private var lyricsMissedAt: [LyricsCacheKey: Date] = [:]
+    private var inFlightLyrics: [LyricsCacheKey: Task<MusicTimedLyrics?, Never>] = [:]
 
-    private var artworkCache: [MusicTrackMatchKey: Data] = [:]
-    private var artworkCacheOrder: [MusicTrackMatchKey] = []
-    private var artworkMissedAt: [MusicTrackMatchKey: Date] = [:]
-    private var inFlightArtwork: [MusicTrackMatchKey: Task<Data?, Never>] = [:]
+    private var artworkCache: [ArtworkCacheKey: Data] = [:]
+    private var artworkCacheOrder: [ArtworkCacheKey] = []
+    private var artworkMissedAt: [ArtworkCacheKey: Date] = [:]
+    private var inFlightArtwork: [ArtworkCacheKey: Task<Data?, Never>] = [:]
 
     init(http: MusicOnlineHTTPRequesting = URLSessionMusicHTTPClient(),
          qqLocalLibrary: QQMusicLocalLibrary = QQMusicLocalLibrary(),
@@ -57,15 +70,16 @@ actor MusicOnlineDataProvider: MusicOnlineDataProviding {
     }
 
     func timedLyrics(for key: MusicTrackMatchKey, durationHint: TimeInterval?) async -> MusicTimedLyrics? {
-        if let cached = lyricsCache[key] { touch(key, in: &lyricsCacheOrder); return cached }
-        if let missedAt = lyricsMissedAt[key], now().timeIntervalSince(missedAt) < Self.negativeCacheInterval { return nil }
-        if let task = inFlightLyrics[key] { return await task.value }
+        let cacheKey = LyricsCacheKey(track: key, durationBucket: Self.durationBucket(durationHint))
+        if let cached = lyricsCache[cacheKey] { touch(cacheKey, in: &lyricsCacheOrder); return cached }
+        if let missedAt = lyricsMissedAt[cacheKey], now().timeIntervalSince(missedAt) < Self.negativeCacheInterval { return nil }
+        if let task = inFlightLyrics[cacheKey] { return await task.value }
         let task = Task { await self.fetchLyrics(for: key, durationHint: durationHint) }
-        inFlightLyrics[key] = task
+        inFlightLyrics[cacheKey] = task
         let result = await task.value
-        inFlightLyrics[key] = nil
-        if let result { insert(result, into: &lyricsCache, order: &lyricsCacheOrder, key: key); lyricsMissedAt[key] = nil }
-        else { lyricsMissedAt[key] = now() }
+        inFlightLyrics[cacheKey] = nil
+        if let result { insert(result, into: &lyricsCache, order: &lyricsCacheOrder, key: cacheKey); lyricsMissedAt[cacheKey] = nil }
+        else { lyricsMissedAt[cacheKey] = now() }
         return result
     }
 
@@ -84,15 +98,16 @@ actor MusicOnlineDataProvider: MusicOnlineDataProviding {
     }
 
     func artworkData(for key: MusicTrackMatchKey, player: MusicAllowedPlayer?, rawTitle: String?, rawArtist: String?, rawAlbum: String?, durationHint: TimeInterval?) async -> Data? {
-        if let cached = artworkCache[key] { touch(key, in: &artworkCacheOrder); return cached }
-        if let missedAt = artworkMissedAt[key], now().timeIntervalSince(missedAt) < Self.negativeCacheInterval { return nil }
-        if let task = inFlightArtwork[key] { return await task.value }
+        let cacheKey = ArtworkCacheKey(track: key, player: player, durationBucket: Self.durationBucket(durationHint))
+        if let cached = artworkCache[cacheKey] { touch(cacheKey, in: &artworkCacheOrder); return cached }
+        if let missedAt = artworkMissedAt[cacheKey], now().timeIntervalSince(missedAt) < Self.negativeCacheInterval { return nil }
+        if let task = inFlightArtwork[cacheKey] { return await task.value }
         let task = Task { await self.fetchArtwork(for: key, player: player, rawTitle: rawTitle, rawArtist: rawArtist, rawAlbum: rawAlbum, durationHint: durationHint) }
-        inFlightArtwork[key] = task
+        inFlightArtwork[cacheKey] = task
         let result = await task.value
-        inFlightArtwork[key] = nil
-        if let result { insert(result, into: &artworkCache, order: &artworkCacheOrder, key: key); artworkMissedAt[key] = nil }
-        else { artworkMissedAt[key] = now() }
+        inFlightArtwork[cacheKey] = nil
+        if let result { insert(result, into: &artworkCache, order: &artworkCacheOrder, key: cacheKey); artworkMissedAt[cacheKey] = nil }
+        else { artworkMissedAt[cacheKey] = now() }
         return result
     }
 
@@ -116,6 +131,9 @@ actor MusicOnlineDataProvider: MusicOnlineDataProviding {
     }
 
     private func downloadValidatedImage(from url: URL) async -> Data? {
+        guard url.scheme == "https", let host = url.host,
+              [".qq.com", ".gtimg.cn", ".music.126.net"].contains(where: { host.hasSuffix($0) })
+        else { return nil }
         guard let (data, response) = try? await http.data(for: URLRequest(url: url)),
               response.statusCode == 200, !data.isEmpty, data.count <= Self.maxArtworkBytes, NSImage(data: data) != nil
         else { return nil }
@@ -224,10 +242,10 @@ actor MusicOnlineDataProvider: MusicOnlineDataProviding {
         return true
     }
 
-    private func touch(_ key: MusicTrackMatchKey, in order: inout [MusicTrackMatchKey]) {
+    private func touch<K: Hashable>(_ key: K, in order: inout [K]) {
         if let index = order.firstIndex(of: key) { order.remove(at: index); order.append(key) }
     }
-    private func insert<Value>(_ value: Value, into cache: inout [MusicTrackMatchKey: Value], order: inout [MusicTrackMatchKey], key: MusicTrackMatchKey) {
+    private func insert<K: Hashable, Value>(_ value: Value, into cache: inout [K: Value], order: inout [K], key: K) {
         if cache[key] == nil { order.append(key) } else { touch(key, in: &order) }
         cache[key] = value
         while order.count > Self.maxCachedTracks { let evicted = order.removeFirst(); cache[evicted] = nil }
