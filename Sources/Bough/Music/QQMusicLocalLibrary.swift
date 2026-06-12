@@ -17,16 +17,32 @@ actor QQMusicArtworkResolver {
         """
 
     private let session: URLSession
+    private let databaseURL: URL
+    private let now: () -> Date
     private var artworkCache: [String: Data] = [:]
     private var albumMidCache: [AlbumLookupKey: String] = [:]
     private var albumMidMissCache: [AlbumLookupKey: AlbumLookupMiss] = [:]
     private var failedAlbumMids: Set<String> = []
 
-    init() {
+    init(
+        databaseURL: URL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(QQMusicArtworkResolver.databaseRelativePath),
+        now: @escaping () -> Date = Date.init
+    ) {
+        self.databaseURL = databaseURL
+        self.now = now
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 1.5
         configuration.timeoutIntervalForResource = 2.5
         session = URLSession(configuration: configuration)
+    }
+
+    /// Internal lookup used by tests (and later by the online provider).
+    func albumMid(title: String?, artist: String?, album: String?) -> String? {
+        guard let title = title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else {
+            return nil
+        }
+        return cachedAlbumMid(title: title, artist: artist, album: album)
     }
 
     func artworkData(for payload: MusicNowPlayingPayload) async -> Data? {
@@ -60,12 +76,11 @@ actor QQMusicArtworkResolver {
             return cached
         }
 
-        let databaseURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(Self.databaseRelativePath)
         let databaseModificationDate = Self.databaseModificationDate(for: databaseURL)
 
         if let miss = albumMidMissCache[key],
-           miss.databaseModificationDate == databaseModificationDate {
+           miss.databaseModificationDate == databaseModificationDate,
+           now().timeIntervalSince(miss.recordedAt) < Self.missRetryInterval {
             return nil
         }
 
@@ -75,7 +90,10 @@ actor QQMusicArtworkResolver {
             album: album,
             databaseURL: databaseURL
         ) else {
-            albumMidMissCache[key] = AlbumLookupMiss(databaseModificationDate: databaseModificationDate)
+            albumMidMissCache[key] = AlbumLookupMiss(
+                databaseModificationDate: databaseModificationDate,
+                recordedAt: now()
+            )
             return nil
         }
         albumMidMissCache[key] = nil
@@ -191,7 +209,10 @@ actor QQMusicArtworkResolver {
         }
     }
 
+    static let missRetryInterval: TimeInterval = 600
+
     private struct AlbumLookupMiss: Equatable {
         let databaseModificationDate: Date?
+        let recordedAt: Date
     }
 }

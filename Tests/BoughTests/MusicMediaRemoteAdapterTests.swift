@@ -98,8 +98,9 @@ final class MusicMediaRemoteAdapterTests: XCTestCase {
         let source = try sourceFile("Sources/Bough/Music/QQMusicLocalLibrary.swift")
 
         XCTAssertTrue(source.contains("private var albumMidMissCache: [AlbumLookupKey: AlbumLookupMiss] = [:]"))
-        XCTAssertTrue(source.contains("AlbumLookupMiss(databaseModificationDate: databaseModificationDate)"))
-        XCTAssertTrue(source.contains("miss.databaseModificationDate == databaseModificationDate"))
+        XCTAssertTrue(source.contains("static let missRetryInterval: TimeInterval = 600"))
+        XCTAssertTrue(source.contains("recordedAt: now()"))
+        XCTAssertTrue(source.contains("now().timeIntervalSince(miss.recordedAt) < Self.missRetryInterval"))
         XCTAssertTrue(source.contains("private static func databaseModificationDate(for url: URL) -> Date?"))
     }
 
