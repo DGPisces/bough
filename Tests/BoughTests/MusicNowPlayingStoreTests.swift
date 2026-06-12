@@ -405,6 +405,43 @@ final class MusicNowPlayingStoreTests: XCTestCase {
         )
     }
 
+    func testStaleRefreshResultIsDiscardedByNewerGeneration() async {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = GatedFakeService(results: [makeStoreSnapshot(title: "stale"), makeStoreSnapshot(title: "fresh")])
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler)
+        store.setPresentationNeeded(true)
+
+        async let firstRefresh: Void = store.refreshNow()   // gen1，挂起在 firstGate
+        await service.waitForFirstRead()
+
+        await store.refreshNow()                              // gen2，立即返回 fresh 并 apply
+        XCTAssertEqual(store.snapshot?.track?.title, "fresh")
+
+        service.releaseFirstRead()                            // gen1 现在返回 stale
+        await firstRefresh
+        XCTAssertEqual(store.snapshot?.track?.title, "fresh", "过期的 gen1 结果不得覆盖 fresh")
+    }
+
+    func testEveryOptimisticCommandTransitionPublishes() async {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        service.readResults = [.success(makeStoreSnapshot(title: "T", playbackState: .playing))]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler)
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+
+        let recorder = NotificationRecorder()
+        let token = NotificationCenter.default.addObserver(forName: MusicNowPlayingStore.didChangeNotification, object: store, queue: nil) { recorder.record($0) }
+        defer { NotificationCenter.default.removeObserver(token) }
+
+        let before = store.publishRevision
+        await store.send(.playPause)
+        await store.send(.playPause)
+
+        XCTAssertGreaterThanOrEqual(store.publishRevision - before, 2)
+        XCTAssertGreaterThanOrEqual(recorder.count, 2)
+    }
+
     func testSettingsSourceShowsOnlyAbnormalMusicMessage() throws {
         let source = try sourceFile("Sources/Bough/SettingsView.swift")
         let page = try XCTUnwrap(source.slice(from: "private struct MusicPage: View", to: "// MARK: - Session Display Page"))
@@ -554,5 +591,47 @@ private extension String {
             return nil
         }
         return String(self[lower..<upper])
+    }
+}
+
+// MARK: - GatedFakeService for concurrency tests
+
+private final class GatedFakeService: MusicNowPlayingServicing {
+    var pollingLikelyUseful = true
+    private var results: [MusicNowPlayingSnapshot?]
+    private var index = 0
+    private var readStarted: CheckedContinuation<Void, Never>?
+    private var firstGate: CheckedContinuation<Void, Never>?
+
+    init(results: [MusicNowPlayingSnapshot?]) { self.results = results }
+
+    var isNowPlayingPollingLikelyUseful: Bool { pollingLikelyUseful }
+    func setPollingAvailabilityDidChangeHandler(_ handler: (@MainActor () -> Void)?) {}
+    func send(_ command: MusicCommand) async throws {}
+    func seek(to seconds: TimeInterval) async throws {}
+    func currentSnapshot() async throws -> MusicNowPlayingSnapshot? { try await currentSnapshot(bypassingScriptBackoff: false) }
+    func currentSnapshot(bypassingScriptBackoff: Bool) async throws -> MusicNowPlayingSnapshot? {
+        let i = index; index += 1
+        if i == 0 {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                firstGate = cont
+                readStarted?.resume(); readStarted = nil
+            }
+        }
+        return results[min(i, results.count - 1)]
+    }
+    func waitForFirstRead() async { await withCheckedContinuation { readStarted = $0 } }
+    func releaseFirstRead() { firstGate?.resume(); firstGate = nil }
+}
+
+extension MusicNowPlayingStoreTests {
+    fileprivate func makeStoreSnapshot(title: String, playbackState: MusicPlaybackState = .playing) -> MusicNowPlayingSnapshot {
+        MusicNowPlayingSnapshot(
+            player: MusicPlayerIdentity(bundleIdentifier: "com.apple.Music", displayName: "Music"),
+            track: MusicTrackSnapshot(title: title, artist: "A", album: nil, lyricLine: nil, artwork: nil),
+            playbackState: playbackState,
+            commands: MusicCommandAvailability(canPlayPause: true, canSkipPrevious: true, canSkipNext: true),
+            capturedAt: Date()
+        )
     }
 }

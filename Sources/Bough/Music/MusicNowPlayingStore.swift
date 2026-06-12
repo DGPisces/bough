@@ -34,6 +34,9 @@ final class MusicNowPlayingStore {
     private var activePollingInterval: TimeInterval?
 
     @ObservationIgnored
+    private var refreshGeneration = 0
+
+    @ObservationIgnored
     private(set) var publishRevision = 0
 
     private(set) var state: MusicServiceState = .disabled
@@ -89,8 +92,12 @@ final class MusicNowPlayingStore {
             return
         }
 
+        refreshGeneration += 1
+        let generation = refreshGeneration
+
         do {
             let snapshot = try await service.currentSnapshot(bypassingScriptBackoff: bypassingScriptBackoff)
+            guard generation == refreshGeneration else { return }
             guard shouldPoll else {
                 clearStateForDisabledOrUnneeded()
                 return
@@ -104,6 +111,7 @@ final class MusicNowPlayingStore {
             applyAvailableSnapshot(snapshot)
             syncPolling()
         } catch {
+            guard generation == refreshGeneration else { return }
             guard shouldPoll else {
                 clearStateForDisabledOrUnneeded()
                 return
@@ -295,13 +303,11 @@ final class MusicNowPlayingStore {
 
     private func applyAvailableSnapshot(_ snapshot: MusicNowPlayingSnapshot?) {
         let next = MusicServiceState.available(snapshot)
-        guard !state.isDisplayEquivalent(to: next) else {
-            guard softFailure != nil else { return }
-            softFailure = nil
-            markPublished()
-            return
+        let displayEquivalent = state.isDisplayEquivalent(to: next)
+        state = next  // always refresh so the playback-position anchor stays current
+        if displayEquivalent && softFailure == nil {
+            return    // nothing display-affecting changed; skip the publish notification
         }
-        state = next
         softFailure = nil
         markPublished()
     }
