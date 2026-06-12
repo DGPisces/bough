@@ -108,7 +108,7 @@ final class MusicMediaRemoteSourceBoundaryTests: XCTestCase {
         XCTAssertTrue(reader.contains("URL(fileURLWithPath: \"/usr/bin/osascript\")"))
         XCTAssertTrue(reader.contains("JSONDecoder().decode(DecodedPayload.self"))
         XCTAssertTrue(reader.contains("playbackStateValue: numberFromValue(unwrap(request.localPlaybackState))"))
-        XCTAssertTrue(qqLibrary.contains("actor QQMusicArtworkResolver"))
+        XCTAssertTrue(qqLibrary.contains("actor QQMusicLocalLibrary"))
         XCTAssertTrue(qqLibrary.contains("albumMidCache"))
         XCTAssertFalse(adapter.contains("prefersScriptPayload"))
 

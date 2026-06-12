@@ -314,7 +314,6 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
     private let setElapsedTime: SetElapsedTimeFunction?
     private let keys: MediaRemoteNowPlayingKeys
     private let scriptPayloadReader = OSAScriptNowPlayingPayloadReader()
-    private let qqMusicArtworkResolver = QQMusicArtworkResolver()
     private let mediaRemoteQueue = DispatchQueue(label: "dev.dgpisces.bough.media-remote")
 
     static func load() throws -> DefaultMediaRemoteRuntime {
@@ -371,7 +370,7 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
 
         if let requestPayload = currentRequestPayload(playbackState: playbackState),
            requestPayload.hasDisplayableMediaRemoteMetadata {
-            return await payloadByResolvingArtworkIfNeeded(requestPayload)
+            return requestPayload
         }
 
         let dictionary = await currentInfoDictionary()
@@ -395,7 +394,7 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
         )
 
         if legacyPayload.hasDisplayableMediaRemoteMetadata {
-            return await payloadByResolvingArtworkIfNeeded(legacyPayload)
+            return legacyPayload
         }
 
         if let scriptPayload = await scriptPayloadReader.currentPayload(
@@ -404,19 +403,10 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
         ),
            scriptPayload.hasDisplayableMediaRemoteMetadata,
            legacyPayload.describesSameSource(as: scriptPayload) {
-            return await payloadByResolvingArtworkIfNeeded(scriptPayload)
+            return scriptPayload
         }
 
         return legacyPayload
-    }
-
-    private func payloadByResolvingArtworkIfNeeded(_ payload: MusicNowPlayingPayload) async -> MusicNowPlayingPayload {
-        guard payload.artworkData == nil,
-              let artworkData = await qqMusicArtworkResolver.artworkData(for: payload)
-        else {
-            return payload
-        }
-        return payload.withArtworkData(artworkData, mimeType: "image/jpeg")
     }
 
     private func currentRequestPayload(playbackState: Int?) -> MusicNowPlayingPayload? {
@@ -619,27 +609,6 @@ private final class MediaRemoteContinuationGate<T>: @unchecked Sendable {
         continuation = nil
         lock.unlock()
         continuationToResume?.resume(returning: value)
-    }
-}
-
-private extension MusicNowPlayingPayload {
-    func withArtworkData(_ data: Data, mimeType: String?) -> MusicNowPlayingPayload {
-        MusicNowPlayingPayload(
-            bundleIdentifier: bundleIdentifier,
-            displayName: displayName,
-            title: title,
-            artist: artist,
-            album: album,
-            artworkData: data,
-            artworkMimeType: mimeType ?? artworkMimeType,
-            playbackStateValue: playbackStateValue,
-            playbackRate: playbackRate,
-            timestamp: timestamp,
-            elapsedTime: elapsedTime,
-            duration: duration,
-            lyricCandidates: lyricCandidates,
-            commandAvailability: commandAvailability
-        )
     }
 }
 

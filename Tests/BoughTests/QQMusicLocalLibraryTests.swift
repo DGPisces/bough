@@ -21,7 +21,7 @@ final class QQMusicLocalLibraryTests: XCTestCase {
 
     func testAlbumMidResolvesFromLocalDatabase() async throws {
         let url = try makeDatabase(rows: [("Song A", "Artist A", "Album A", "001MVMWX3Trbpq")])
-        let resolver = QQMusicArtworkResolver(databaseURL: url)
+        let resolver = QQMusicLocalLibrary(databaseURL: url)
         let mid = await resolver.albumMid(title: "Song A", artist: "Artist A", album: "Album A")
         XCTAssertEqual(mid, "001MVMWX3Trbpq")
     }
@@ -34,7 +34,7 @@ final class QQMusicLocalLibraryTests: XCTestCase {
         try FileManager.default.setAttributes([.modificationDate: pinnedMtime], ofItemAtPath: url.path)
 
         var current = Date(timeIntervalSince1970: 1_000)
-        let resolver = QQMusicArtworkResolver(databaseURL: url, now: { current })
+        let resolver = QQMusicLocalLibrary(databaseURL: url, now: { current })
 
         let first = await resolver.albumMid(title: "Missing", artist: nil, album: nil)
         XCTAssertNil(first)
@@ -58,7 +58,7 @@ final class QQMusicLocalLibraryTests: XCTestCase {
     func testMissCacheInvalidatesImmediatelyWhenMtimeChanges() async throws {
         let url = try makeDatabase(rows: [])
         var current = Date(timeIntervalSince1970: 1_000)
-        let resolver = QQMusicArtworkResolver(databaseURL: url, now: { current })
+        let resolver = QQMusicLocalLibrary(databaseURL: url, now: { current })
         _ = await resolver.albumMid(title: "Missing", artist: nil, album: nil)
 
         var db: OpaquePointer?

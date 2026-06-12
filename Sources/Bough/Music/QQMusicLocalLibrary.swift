@@ -1,9 +1,7 @@
-import AppKit
 import Foundation
 import SQLite3
 
-actor QQMusicArtworkResolver {
-    private static let maxArtworkBytes = 2 * 1024 * 1024
+actor QQMusicLocalLibrary {
     private static let transientDestructor = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     private static let databaseRelativePath = "Library/Containers/com.tencent.QQMusicMac/Data/Library/Application Support/QQMusicMac/qqmusic.sqlite"
     private static let albumMidQuery = """
@@ -16,25 +14,18 @@ actor QQMusicArtworkResolver {
         LIMIT 25
         """
 
-    private let session: URLSession
     private let databaseURL: URL
     private let now: () -> Date
-    private var artworkCache: [String: Data] = [:]
     private var albumMidCache: [AlbumLookupKey: String] = [:]
     private var albumMidMissCache: [AlbumLookupKey: AlbumLookupMiss] = [:]
-    private var failedAlbumMids: Set<String> = []
 
     init(
         databaseURL: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(QQMusicArtworkResolver.databaseRelativePath),
+            .appendingPathComponent(QQMusicLocalLibrary.databaseRelativePath),
         now: @escaping () -> Date = Date.init
     ) {
         self.databaseURL = databaseURL
         self.now = now
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 1.5
-        configuration.timeoutIntervalForResource = 2.5
-        session = URLSession(configuration: configuration)
     }
 
     /// Internal lookup used by tests (and later by the online provider).
@@ -43,31 +34,6 @@ actor QQMusicArtworkResolver {
             return nil
         }
         return cachedAlbumMid(title: title, artist: artist, album: album)
-    }
-
-    func artworkData(for payload: MusicNowPlayingPayload) async -> Data? {
-        guard MusicAllowedPlayer.match(bundleIdentifier: payload.bundleIdentifier, displayName: payload.displayName) == .qqMusic,
-              let title = payload.title?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !title.isEmpty,
-              let albumMid = cachedAlbumMid(title: title, artist: payload.artist, album: payload.album),
-              !failedAlbumMids.contains(albumMid)
-        else {
-            return nil
-        }
-
-        if let cached = artworkCache[albumMid] {
-            return cached
-        }
-
-        for url in artworkURLs(albumMid: albumMid) {
-            if let data = await fetchArtwork(from: url) {
-                artworkCache[albumMid] = data
-                return data
-            }
-        }
-
-        failedAlbumMids.insert(albumMid)
-        return nil
     }
 
     private func cachedAlbumMid(title: String, artist: String?, album: String?) -> String? {
@@ -153,30 +119,6 @@ actor QQMusicArtworkResolver {
 
     private static func databaseModificationDate(for url: URL) -> Date? {
         (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]) as? Date
-    }
-
-    private func artworkURLs(albumMid: String) -> [URL] {
-        [
-            "https://y.qq.com/music/photo_new/T002R300x300M000\(albumMid).jpg?max_age=2592000",
-            "https://y.gtimg.cn/music/photo_new/T002R300x300M000\(albumMid).jpg?max_age=2592000",
-        ].compactMap(URL.init(string:))
-    }
-
-    private func fetchArtwork(from url: URL) async -> Data? {
-        do {
-            let (data, response) = try await session.data(from: url)
-            guard let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200,
-                  !data.isEmpty,
-                  data.count <= Self.maxArtworkBytes,
-                  NSImage(data: data) != nil
-            else {
-                return nil
-            }
-            return data
-        } catch {
-            return nil
-        }
     }
 
     private static func albumMatches(requestedAlbum: String?, storedAlbum: String?) -> Bool {
