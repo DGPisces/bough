@@ -131,6 +131,18 @@ final class MusicSettingsAndModelsTests: XCTestCase {
         }
     }
 
+    func testDisplayNamePrefixMatchingRecognizesLocalizedVariants() {
+        XCTAssertEqual(MusicAllowedPlayer.match(bundleIdentifier: nil, displayName: "Spotify Premium"), .spotify)
+        XCTAssertEqual(MusicAllowedPlayer.match(bundleIdentifier: nil, displayName: "QQ音乐 Mac"), .qqMusic)
+        XCTAssertEqual(MusicAllowedPlayer.match(bundleIdentifier: nil, displayName: "网易云音乐 8.0"), .netEaseCloudMusic)
+        XCTAssertEqual(MusicAllowedPlayer.match(bundleIdentifier: nil, displayName: "NetEase Music"), .netEaseCloudMusic)
+    }
+
+    func testGenericMusicNameDoesNotPrefixMatchOtherPlayers() {
+        XCTAssertEqual(MusicAllowedPlayer.match(bundleIdentifier: nil, displayName: "Music"), .appleMusic)
+        XCTAssertNil(MusicAllowedPlayer.match(bundleIdentifier: nil, displayName: "Music Player Pro"))
+    }
+
     func testMusicModelsStayTransientAndAppTargetLocal() throws {
         let source = try sourceFile("Sources/Bough/Music/MusicModels.swift")
         let appSources = try sources(under: "Sources/Bough")
