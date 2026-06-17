@@ -886,6 +886,7 @@ private struct AIMascotHandoffStack: View, Animatable {
 }
 
 /// Right side: project name + session count (detailed) or just count (simple)
+@MainActor
 private struct CompactRightWing: View {
     var appState: AppState
     let expanded: Bool
