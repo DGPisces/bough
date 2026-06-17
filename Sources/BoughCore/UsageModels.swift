@@ -798,14 +798,25 @@ private func claudeResetDate(from bucket: [String: AnyCodableLike]) -> Date? {
     if let unix = firstDouble(bucket, keys: ["resets_at", "resetsAt", "reset_at", "resetAt"]) {
         return Date(timeIntervalSince1970: unix)
     }
-    let formatter = ISO8601DateFormatter()
     for key in ["resets_at", "resetsAt", "reset_at", "resetAt"] {
         if let raw = bucket[key]?.asString,
-           let date = formatter.date(from: raw) {
+           let date = parseClaudeISO8601(raw) {
             return date
         }
     }
     return nil
+}
+
+/// The OAuth usage endpoint returns reset timestamps with microsecond
+/// fractional seconds (e.g. `2026-06-17T13:10:00.533198+00:00`), which a
+/// default `ISO8601DateFormatter` rejects — silently dropping the reset time
+/// and failing the whole Claude window ("Claude Code parse-failure"). Accept
+/// both whole-second and fractional forms, mirroring `CodexOAuthUsage.parseISO8601`.
+private func parseClaudeISO8601(_ raw: String) -> Date? {
+    if let date = ISO8601DateFormatter().date(from: raw) { return date }
+    let fractional = ISO8601DateFormatter()
+    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return fractional.date(from: raw)
 }
 
 private func claudeModelName(from value: AnyCodableLike?) -> String? {
