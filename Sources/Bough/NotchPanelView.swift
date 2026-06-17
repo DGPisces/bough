@@ -210,7 +210,8 @@ struct NotchPanelView: View {
                         notchW: notchW,
                         notchHeight: notchHeight,
                         hasNotch: hasNotch,
-                        hovered: idleIndicatorExpanded
+                        hovered: idleIndicatorExpanded,
+                        mascotHandoffPhase: topMascotHandoffPhase
                     )
                     .background(idleIndicatorExpanded ? Color.black : Color.clear)
                     .zIndex(1)
@@ -466,6 +467,7 @@ struct NotchPanelView: View {
             if hovering {
                 hoverTimer?.invalidate()
                 hoverTimer = nil
+                let wasCollapsed = appState.surface == .collapsed
                 withAnimation(NotchAnimation.open) {
                     idleHovered = true
                     if appState.surface == .collapsed {
@@ -473,6 +475,7 @@ struct NotchPanelView: View {
                         appState.cancelCompletionQueue()
                     }
                 }
+                if wasCollapsed { performHoverHaptic() }
             } else {
                 hoverTimer?.invalidate()
                 hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { _ in
@@ -523,20 +526,7 @@ struct NotchPanelView: View {
                 Task { @MainActor in
                     // Guard: mouse may have left during the delay
                     guard isHovered, !compactMusicControlHovered else { return }
-                    if hapticOnHover {
-                        let performer = NSHapticFeedbackManager.defaultPerformer
-                        switch hapticIntensity {
-                        case 3: // strong: two taps
-                            performer.perform(.levelChange, performanceTime: .now)
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                performer.perform(.levelChange, performanceTime: .now)
-                            }
-                        case 2: // medium
-                            performer.perform(.levelChange, performanceTime: .default)
-                        default: // light
-                            performer.perform(.alignment, performanceTime: .default)
-                        }
-                    }
+                    performHoverHaptic()
                     withAnimation(NotchAnimation.open) {
                         appState.surface = .sessionList
                         appState.cancelCompletionQueue()
@@ -566,6 +556,24 @@ struct NotchPanelView: View {
     private func collapsePanelSurface() {
         withAnimation(NotchAnimation.close) {
             appState.surface = .collapsed
+        }
+    }
+
+    /// Trackpad haptic on a collapsed→expanded transition. Shared by the active
+    /// compact bar and the no-session idle indicator so both expansions feel the same.
+    private func performHoverHaptic() {
+        guard hapticOnHover else { return }
+        let performer = NSHapticFeedbackManager.defaultPerformer
+        switch hapticIntensity {
+        case 3: // strong: two taps
+            performer.perform(.levelChange, performanceTime: .now)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                performer.perform(.levelChange, performanceTime: .now)
+            }
+        case 2: // medium
+            performer.perform(.levelChange, performanceTime: .default)
+        default: // light
+            performer.perform(.alignment, performanceTime: .default)
         }
     }
 }
@@ -1020,13 +1028,14 @@ private struct IdleIndicatorBar: View {
     let notchHeight: CGFloat
     let hasNotch: Bool
     let hovered: Bool
+    let mascotHandoffPhase: Double
     @ObservedObject private var l10n = L10n.shared
     @AppStorage(SettingsKey.soundEnabled) private var soundEnabled = SettingsDefaults.soundEnabled
     @AppStorage(SettingsKey.defaultSource) private var settingsDefaultSource = SettingsDefaults.defaultSource
 
     var body: some View {
         HStack(spacing: 0) {
-            // Left: mascot
+            // Left: mascot — hands off to the Bough brand when expanded, matching CompactLeftWing.
             HStack(spacing: 6) {
                 idleMascotView
             }
@@ -1062,10 +1071,12 @@ private struct IdleIndicatorBar: View {
     }
 
     private var idleMascotView: some View {
-        MascotView(
+        AIMascotHandoffStack(
             source: settingsDefaultSource,
             status: .idle,
-            size: mascotSize
+            compactSize: mascotSize,
+            expandedSize: 36,
+            phase: mascotHandoffPhase
         )
     }
 }

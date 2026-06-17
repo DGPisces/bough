@@ -576,7 +576,7 @@ final class NotchPanelViewTests: XCTestCase {
         XCTAssertFalse(musicBranch.contains("aiMascotView"))
     }
 
-    func testIdleIndicatorUsesNonCodingStaticMascot() throws {
+    func testIdleIndicatorHandsOffToBrandMascotAndFiresHaptic() throws {
         let source = try sourceFile("Sources/Bough/NotchPanelView.swift")
         let panel = try XCTUnwrap(source.slice(from: "struct NotchPanelView: View", to: "// MARK: - Compact Wings"))
         let hoverHandling = try XCTUnwrap(source.slice(from: "private func handlePanelHover(_ hovering: Bool)", to: "switch appState.surface"))
@@ -587,6 +587,11 @@ final class NotchPanelViewTests: XCTestCase {
         XCTAssertTrue(hoverHandling.contains("idleHovered = true"))
         XCTAssertTrue(hoverHandling.contains("withAnimation(NotchAnimation.close)"))
         XCTAssertTrue(hoverHandling.contains("idleHovered = false"))
+        // Haptic must fire on the idle collapsed→expanded transition, matching the active bar.
+        XCTAssertTrue(hoverHandling.contains("let wasCollapsed = appState.surface == .collapsed"))
+        XCTAssertTrue(hoverHandling.contains("if wasCollapsed { performHoverHaptic() }"))
+        XCTAssertTrue(source.contains("private func performHoverHaptic()"))
+
         XCTAssertTrue(idleBranch.contains("IdleIndicatorBar("))
         XCTAssertTrue(idleBranch.contains(".background(idleIndicatorExpanded ? Color.black : Color.clear)"))
         XCTAssertTrue(idleBranch.contains(".zIndex(1)"))
@@ -594,18 +599,19 @@ final class NotchPanelViewTests: XCTestCase {
         XCTAssertTrue(panel.contains("private var idleIndicatorExpanded: Bool"))
         XCTAssertTrue(panel.contains("showIdleIndicator && (idleHovered || appState.surface.isExpanded)"))
         XCTAssertTrue(panel.contains("showIdleIndicator ? idleIndicatorExpanded : shouldShowExpanded"))
-        XCTAssertFalse(idleBranch.contains("mascotHandoffPhase: topMascotHandoffPhase"))
+        // Idle expand now drives the same mascot→brand handoff as the active compact bar.
+        XCTAssertTrue(idleBranch.contains("mascotHandoffPhase: topMascotHandoffPhase"))
         XCTAssertTrue(idleIndicator.contains("@AppStorage(SettingsKey.defaultSource)"))
-        XCTAssertFalse(idleIndicator.contains("let mascotHandoffPhase: Double"))
+        XCTAssertTrue(idleIndicator.contains("let mascotHandoffPhase: Double"))
         XCTAssertTrue(idleIndicator.contains("private var idleMascotView: some View"))
-        XCTAssertTrue(idleIndicator.contains("MascotView("))
+        XCTAssertTrue(idleIndicator.contains("AIMascotHandoffStack("))
         XCTAssertTrue(idleIndicator.contains("source: settingsDefaultSource"))
         XCTAssertTrue(idleIndicator.contains("status: .idle"))
-        XCTAssertTrue(idleIndicator.contains("size: mascotSize"))
-        XCTAssertFalse(idleIndicator.contains("AIMascotHandoffStack("))
-        XCTAssertFalse(idleIndicator.contains("compactSize: mascotSize"))
-        XCTAssertFalse(idleIndicator.contains("expandedSize: 36"))
-        XCTAssertFalse(idleIndicator.contains("phase: mascotHandoffPhase"))
+        XCTAssertTrue(idleIndicator.contains("compactSize: mascotSize"))
+        XCTAssertTrue(idleIndicator.contains("expandedSize: 36"))
+        XCTAssertTrue(idleIndicator.contains("phase: mascotHandoffPhase"))
+        // The static coding-agent mascot that never reached the brand is gone.
+        XCTAssertFalse(idleIndicator.contains("MascotView("))
         XCTAssertFalse(idleIndicator.contains("@State private var mascotHandoffPhase"))
         XCTAssertFalse(idleIndicator.contains("withAnimation(AIMascotHandoff.animation(expanded: newValue))"))
         XCTAssertFalse(idleIndicator.contains("MascotView(source: \"claude\""))
