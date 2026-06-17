@@ -121,6 +121,19 @@ struct NotchPanelView: View {
     private var topMascotExpanded: Bool {
         showIdleIndicator ? idleIndicatorExpanded : shouldShowExpanded
     }
+    /// Which notch-height strip to show. Mirrors the former `if showBar / else if
+    /// showProductHome / else if showIdleIndicator / else` selection order.
+    private var compactBarMode: CompactBarMode {
+        if showBar { return .active }
+        if showProductHome { return .productHome }
+        if showIdleIndicator { return .idleIndicator }
+        return .shell
+    }
+    /// The idle strip expands on hover before the surface flips, so it uses
+    /// `idleIndicatorExpanded`; every other mode tracks `shouldShowExpanded`.
+    private var compactBarExpanded: Bool {
+        compactBarMode == .idleIndicator ? idleIndicatorExpanded : shouldShowExpanded
+    }
 
     /// Mascot size — fits within the menu bar height
     private var mascotSize: CGFloat { min(27, notchHeight - 6) }
@@ -161,65 +174,22 @@ struct NotchPanelView: View {
         let _ = musicRenderRevision
         VStack(spacing: 0) {
             VStack(spacing: 0) {
-                if showBar {
-                    // Active: compact bar — wider version when expanded
-                    HStack(spacing: 0) {
-                        CompactLeftWing(
-                            appState: appState,
-                            expanded: shouldShowExpanded,
-                            mascotSize: mascotSize,
-                            hasNotch: hasNotch,
-                            showToolStatus: showToolStatus,
-                            compactActivitySource: compactActivitySource,
-                            musicArtworkNamespace: musicArtworkNamespace,
-                            mascotTransitionNamespace: mascotTransitionNamespace,
-                            mascotHandoffPhase: topMascotHandoffPhase
-                        )
-                        if hasNotch && !shouldShowExpanded {
-                            Spacer(minLength: notchW)
-                        } else if !shouldShowExpanded && showToolStatus && compactActivitySource != .music {
-                            CompactToolStatus(appState: appState)
-                            Spacer(minLength: 0)
-                        } else {
-                            Spacer(minLength: 0)
-                        }
-                        CompactRightWing(
-                            appState: appState,
-                            expanded: shouldShowExpanded,
-                            hasNotch: hasNotch,
-                            compactActivitySource: compactActivitySource,
-                            musicArtworkNamespace: musicArtworkNamespace,
-                            onMusicControlHoverChanged: handleCompactMusicControlHover
-                        )
-                    }
-                    .frame(height: notchHeight)
-                    .background(shouldShowExpanded ? Color.black : Color.clear)
-                    .zIndex(1)
-                } else if showProductHome {
-                    ProductHomeCompactBar(
-                        mascotSize: mascotSize,
-                        notchW: notchW,
-                        notchHeight: notchHeight,
-                        hasNotch: hasNotch,
-                        expanded: shouldShowExpanded
-                    )
-                } else if showIdleIndicator {
-                    IdleIndicatorBar(
-                        mascotSize: mascotSize,
-                        compactWingWidth: compactWingWidth,
-                        notchW: notchW,
-                        notchHeight: notchHeight,
-                        hasNotch: hasNotch,
-                        hovered: idleIndicatorExpanded,
-                        mascotHandoffPhase: topMascotHandoffPhase
-                    )
-                    .background(idleIndicatorExpanded ? Color.black : Color.clear)
-                    .zIndex(1)
-                } else {
-                    // Idle: just the notch shell
-                    Spacer()
-                        .frame(height: notchHeight)
-                }
+                CompactBar(
+                    mode: compactBarMode,
+                    appState: appState,
+                    expanded: compactBarExpanded,
+                    mascotSize: mascotSize,
+                    notchW: notchW,
+                    notchHeight: notchHeight,
+                    hasNotch: hasNotch,
+                    showToolStatus: showToolStatus,
+                    compactActivitySource: compactActivitySource,
+                    musicArtworkNamespace: musicArtworkNamespace,
+                    mascotTransitionNamespace: mascotTransitionNamespace,
+                    mascotHandoffPhase: topMascotHandoffPhase,
+                    onMusicControlHoverChanged: handleCompactMusicControlHover
+                )
+                .zIndex(compactBarMode.sitsAboveExpandedContent ? 1 : 0)
 
                 // Below-notch expanded content
                 if shouldShowExpanded {
@@ -578,6 +548,155 @@ struct NotchPanelView: View {
     }
 }
 
+// MARK: - Compact Bar (unified notch-height strip)
+
+/// Which notch-height strip the panel shows. Replaces the former
+/// `showBar` / `showProductHome` / `showIdleIndicator` / shell branch trio.
+enum CompactBarMode: Equatable {
+    /// Active: sessions or music to monitor.
+    case active
+    /// Coding on, no session yet — first-launch marker that hands off to the brand.
+    case idleIndicator
+    /// Coding disabled — Bough as a product (brand-only).
+    case productHome
+    /// Hidden: bare notch shell, no content.
+    case shell
+
+    /// Active and idle strips paint above the collapsing below-notch content
+    /// (so session-card mascots never appear to drive the top mascot transition);
+    /// product-home and shell stayed at the default z-order.
+    var sitsAboveExpandedContent: Bool {
+        self == .active || self == .idleIndicator
+    }
+}
+
+/// The single notch-height strip. Each mode reproduces its former bar exactly
+/// (see `.planning/specs/2026-06-17-compact-bar-unification-design.md` §5); the
+/// `.id(mode)` keeps mode switches as view replacements, matching the old
+/// distinct-struct behavior. Shared leaves (`AIMascotHandoffStack`,
+/// `NotchActionButtons`) are reused across modes so they can't drift.
+@MainActor
+private struct CompactBar: View {
+    let mode: CompactBarMode
+    var appState: AppState
+    /// Per-mode expanded flag: `shouldShowExpanded` for active/product,
+    /// `idleIndicatorExpanded` for idle.
+    let expanded: Bool
+    let mascotSize: CGFloat
+    let notchW: CGFloat
+    let notchHeight: CGFloat
+    let hasNotch: Bool
+    let showToolStatus: Bool
+    let compactActivitySource: MusicPanelActivitySource?
+    let musicArtworkNamespace: Namespace.ID
+    let mascotTransitionNamespace: Namespace.ID
+    let mascotHandoffPhase: Double
+    var onMusicControlHoverChanged: ((Bool) -> Void)?
+    @AppStorage(SettingsKey.defaultSource) private var settingsDefaultSource = SettingsDefaults.defaultSource
+
+    var body: some View {
+        content.id(mode)
+    }
+
+    @ViewBuilder private var content: some View {
+        switch mode {
+        case .active: activeBar
+        case .idleIndicator: idleBar
+        case .productHome: productBar
+        case .shell:
+            Spacer().frame(height: notchHeight)
+        }
+    }
+
+    // Active: compact bar — wider version when expanded
+    private var activeBar: some View {
+        HStack(spacing: 0) {
+            CompactLeftWing(
+                appState: appState,
+                expanded: expanded,
+                mascotSize: mascotSize,
+                hasNotch: hasNotch,
+                showToolStatus: showToolStatus,
+                compactActivitySource: compactActivitySource,
+                musicArtworkNamespace: musicArtworkNamespace,
+                mascotTransitionNamespace: mascotTransitionNamespace,
+                mascotHandoffPhase: mascotHandoffPhase
+            )
+            if hasNotch && !expanded {
+                Spacer(minLength: notchW)
+            } else if !expanded && showToolStatus && compactActivitySource != .music {
+                CompactToolStatus(appState: appState)
+                Spacer(minLength: 0)
+            } else {
+                Spacer(minLength: 0)
+            }
+            CompactRightWing(
+                appState: appState,
+                expanded: expanded,
+                hasNotch: hasNotch,
+                compactActivitySource: compactActivitySource,
+                musicArtworkNamespace: musicArtworkNamespace,
+                onMusicControlHoverChanged: onMusicControlHoverChanged
+            )
+        }
+        .frame(height: notchHeight)
+        .background(expanded ? Color.black : Color.clear)
+    }
+
+    private var idleBar: some View {
+        HStack(spacing: 0) {
+            // Left: mascot — hands off to the Bough brand when expanded, matching the active wing.
+            HStack(spacing: 6) {
+                AIMascotHandoffStack(
+                    source: settingsDefaultSource,
+                    status: .idle,
+                    compactSize: mascotSize,
+                    expandedSize: 36,
+                    phase: mascotHandoffPhase
+                )
+            }
+            .padding(.leading, 6)
+            .clipped()
+
+            Spacer(minLength: hasNotch ? notchW : 0)
+
+            // Right: expanded shows text + buttons, collapsed shows nothing
+            if expanded {
+                HStack(spacing: 8) {
+                    Text("0")
+                        .font(.system(size: 13, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.4))
+                    NotchActionButtons(includeSound: true, spacing: 4)
+                }
+                .padding(.trailing, 6)
+                .transition(.opacity)
+            }
+        }
+        .frame(height: notchHeight)
+        .background(expanded ? Color.black : Color.clear)
+    }
+
+    private var productBar: some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 6) {
+                BoughMascotView(fixedFrame: 0, frameSize: mascotSize)
+                    .opacity(expanded ? 1 : 0.9)
+            }
+            .padding(.leading, 6)
+
+            Spacer(minLength: hasNotch ? notchW : 0)
+
+            if expanded {
+                NotchActionButtons(includeSound: false, spacing: 4)
+                    .padding(.trailing, 6)
+                    .transition(.opacity)
+            }
+        }
+        .frame(height: notchHeight)
+        .animation(NotchAnimation.micro, value: expanded)
+    }
+}
+
 // MARK: - Compact Wings (notch-level, 32px height)
 
 /// Left side: pixel character + status info
@@ -774,8 +893,6 @@ private struct CompactRightWing: View {
     let compactActivitySource: MusicPanelActivitySource?
     let musicArtworkNamespace: Namespace.ID
     var onMusicControlHoverChanged: ((Bool) -> Void)?
-    @ObservedObject private var l10n = L10n.shared
-    @AppStorage(SettingsKey.soundEnabled) private var soundEnabled = SettingsDefaults.soundEnabled
     @AppStorage(SettingsKey.showToolStatus) private var showToolStatus = SettingsDefaults.showToolStatus
 
     private var displaySessionId: String? {
@@ -789,15 +906,7 @@ private struct CompactRightWing: View {
     var body: some View {
         HStack(spacing: 6) {
             if expanded {
-                NotchIconButton(icon: soundEnabled ? "speaker.wave.2" : "speaker.slash", tooltip: soundEnabled ? l10n["mute"] : l10n["enable_sound_tooltip"]) {
-                    soundEnabled.toggle()
-                }
-                NotchIconButton(icon: "gearshape", tooltip: l10n["settings"]) {
-                    SettingsWindowController.shared.show()
-                }
-                NotchIconButton(icon: "power", tint: Color(red: 1.0, green: 0.4, blue: 0.4), tooltip: l10n["quit"]) {
-                    NSApplication.shared.terminate(nil)
-                }
+                NotchActionButtons(includeSound: true, spacing: 6)
             } else {
                 if compactActivitySource == .music {
                     CompactMusicPlayPauseControl(
@@ -816,39 +925,75 @@ private struct CompactRightWing: View {
 
                     if showToolStatus {
                         // Detailed mode: session count (project name is shown in center on non-notch)
-                        HStack(spacing: 1) {
-                            let active = appState.activeSessionCount
-                            let total = appState.totalSessionCount
-                            if active > 0 {
-                                Text("\(active)")
-                                    .foregroundStyle(Color(red: 0.4, green: 1.0, blue: 0.5))
-                                Text("/")
-                                    .foregroundStyle(.white.opacity(0.4))
-                            }
-                            Text("\(total)")
-                                .foregroundStyle(.white.opacity(0.9))
-                        }
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        SessionCountLabel(
+                            active: appState.activeSessionCount,
+                            total: appState.totalSessionCount,
+                            font: .system(size: 12, weight: .semibold, design: .monospaced)
+                        )
                     } else {
                         // Simple mode: original session count only
-                        HStack(spacing: 1) {
-                            let active = appState.activeSessionCount
-                            let total = appState.totalSessionCount
-                            if active > 0 {
-                                Text("\(active)")
-                                    .foregroundStyle(Color(red: 0.4, green: 1.0, blue: 0.5))
-                                Text("/")
-                                    .foregroundStyle(.white.opacity(0.4))
-                            }
-                            Text("\(total)")
-                                .foregroundStyle(.white.opacity(0.9))
-                        }
-                        .font(.system(size: 13, weight: .bold, design: .monospaced))
+                        SessionCountLabel(
+                            active: appState.activeSessionCount,
+                            total: appState.totalSessionCount,
+                            font: .system(size: 13, weight: .bold, design: .monospaced)
+                        )
                     }
                 }
             }
         }
         .padding(.trailing, 6)
+    }
+}
+
+// MARK: - Shared compact-bar leaves
+
+/// The sound/settings/quit action trio shown on the expanded compact bar.
+/// Shared by every bar mode so the buttons can't drift apart; `includeSound`
+/// drops the speaker (product-home has no sound toggle), `spacing` matches the
+/// originating site (active bar used 6, the resting bars used 4).
+private struct NotchActionButtons: View {
+    let includeSound: Bool
+    var spacing: CGFloat = 4
+    @ObservedObject private var l10n = L10n.shared
+    @AppStorage(SettingsKey.soundEnabled) private var soundEnabled = SettingsDefaults.soundEnabled
+
+    var body: some View {
+        HStack(spacing: spacing) {
+            if includeSound {
+                NotchIconButton(icon: soundEnabled ? "speaker.wave.2" : "speaker.slash", tooltip: soundEnabled ? l10n["mute"] : l10n["enable_sound_tooltip"]) {
+                    soundEnabled.toggle()
+                }
+            }
+            NotchIconButton(icon: "gearshape", tooltip: l10n["settings"]) {
+                SettingsWindowController.shared.show()
+            }
+            NotchIconButton(icon: "power", tint: Color(red: 1.0, green: 0.4, blue: 0.4), tooltip: l10n["quit"]) {
+                NSApplication.shared.terminate(nil)
+            }
+        }
+    }
+}
+
+/// `active/total` session count shown on the collapsed active bar. The font is
+/// passed in because the detailed (12/semibold) and simple (13/bold) modes
+/// differ only by font.
+private struct SessionCountLabel: View {
+    let active: Int
+    let total: Int
+    let font: Font
+
+    var body: some View {
+        HStack(spacing: 1) {
+            if active > 0 {
+                Text("\(active)")
+                    .foregroundStyle(Color(red: 0.4, green: 1.0, blue: 0.5))
+                Text("/")
+                    .foregroundStyle(.white.opacity(0.4))
+            }
+            Text("\(total)")
+                .foregroundStyle(.white.opacity(0.9))
+        }
+        .font(font)
     }
 }
 
@@ -1019,105 +1164,7 @@ private struct NotchIconButton: View {
     }
 }
 
-// MARK: - Idle Indicator Bar
-
-private struct IdleIndicatorBar: View {
-    let mascotSize: CGFloat
-    let compactWingWidth: CGFloat
-    let notchW: CGFloat
-    let notchHeight: CGFloat
-    let hasNotch: Bool
-    let hovered: Bool
-    let mascotHandoffPhase: Double
-    @ObservedObject private var l10n = L10n.shared
-    @AppStorage(SettingsKey.soundEnabled) private var soundEnabled = SettingsDefaults.soundEnabled
-    @AppStorage(SettingsKey.defaultSource) private var settingsDefaultSource = SettingsDefaults.defaultSource
-
-    var body: some View {
-        HStack(spacing: 0) {
-            // Left: mascot — hands off to the Bough brand when expanded, matching CompactLeftWing.
-            HStack(spacing: 6) {
-                idleMascotView
-            }
-            .padding(.leading, 6)
-            .clipped()
-
-            Spacer(minLength: hasNotch ? notchW : 0)
-
-            // Right: expanded shows text + buttons, collapsed shows nothing
-            if hovered {
-                HStack(spacing: 8) {
-                    Text("0")
-                        .font(.system(size: 13, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.4))
-
-                    HStack(spacing: 4) {
-                        NotchIconButton(icon: soundEnabled ? "speaker.wave.2" : "speaker.slash", tooltip: soundEnabled ? l10n["mute"] : l10n["enable_sound_tooltip"]) {
-                            soundEnabled.toggle()
-                        }
-                        NotchIconButton(icon: "gearshape", tooltip: l10n["settings"]) {
-                            SettingsWindowController.shared.show()
-                        }
-                        NotchIconButton(icon: "power", tint: Color(red: 1.0, green: 0.4, blue: 0.4), tooltip: l10n["quit"]) {
-                            NSApplication.shared.terminate(nil)
-                        }
-                    }
-                }
-                .padding(.trailing, 6)
-                .transition(.opacity)
-            }
-        }
-        .frame(height: notchHeight)
-    }
-
-    private var idleMascotView: some View {
-        AIMascotHandoffStack(
-            source: settingsDefaultSource,
-            status: .idle,
-            compactSize: mascotSize,
-            expandedSize: 36,
-            phase: mascotHandoffPhase
-        )
-    }
-}
-
 // MARK: - Product Home
-
-private struct ProductHomeCompactBar: View {
-    let mascotSize: CGFloat
-    let notchW: CGFloat
-    let notchHeight: CGFloat
-    let hasNotch: Bool
-    let expanded: Bool
-    @ObservedObject private var l10n = L10n.shared
-
-    var body: some View {
-        HStack(spacing: 0) {
-            HStack(spacing: 6) {
-                BoughMascotView(fixedFrame: 0, frameSize: mascotSize)
-                    .opacity(expanded ? 1 : 0.9)
-            }
-            .padding(.leading, 6)
-
-            Spacer(minLength: hasNotch ? notchW : 0)
-
-            if expanded {
-                HStack(spacing: 4) {
-                    NotchIconButton(icon: "gearshape", tooltip: l10n["settings"]) {
-                        SettingsWindowController.shared.show()
-                    }
-                    NotchIconButton(icon: "power", tint: Color(red: 1.0, green: 0.4, blue: 0.4), tooltip: l10n["quit"]) {
-                        NSApplication.shared.terminate(nil)
-                    }
-                }
-                .padding(.trailing, 6)
-                .transition(.opacity)
-            }
-        }
-        .frame(height: notchHeight)
-        .animation(NotchAnimation.micro, value: expanded)
-    }
-}
 
 private struct BoughHomePanel: View {
     var appState: AppState

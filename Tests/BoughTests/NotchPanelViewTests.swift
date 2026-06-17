@@ -182,45 +182,43 @@ final class NotchPanelViewTests: XCTestCase {
     func testOffModePanelRoutesToProductHomeInsteadOfSessionList() throws {
         let source = try sourceFile("Sources/Bough/NotchPanelView.swift")
         let expandedContent = try XCTUnwrap(source.slice(from: "// Below-notch expanded content", to: ".frame(width: panelWidth)"))
-        let productHome = try XCTUnwrap(source.slice(from: "private struct ProductHomeCompactBar: View", to: "// MARK: - Approval Bar"))
-        let productHomeCompactBar = try XCTUnwrap(source.slice(from: "private struct ProductHomeCompactBar: View", to: "private struct BoughHomePanel: View"))
+        let productBar = try XCTUnwrap(source.slice(from: "private var productBar: some View", to: "// MARK: - Compact Wings"))
         let boughHomePanel = try XCTUnwrap(source.slice(from: "private struct BoughHomePanel: View", to: "private struct ProductModeMusicPanel: View"))
         let productModeMusicPanel = try XCTUnwrap(source.slice(from: "private struct ProductModeMusicPanel: View", to: "// MARK: - Approval Bar"))
 
+        // Routing: coding-off selects the productHome bar mode and the BoughHome below-notch panel.
         XCTAssertTrue(source.contains("private var showProductHome"))
         XCTAssertTrue(source.contains("!codingSessionsEnabled && !hasVisibleMusicActivity && !hideWhenNoSession"))
-        XCTAssertTrue(source.contains("ProductHomeCompactBar("))
+        XCTAssertTrue(source.contains("if showProductHome { return .productHome }"))
         XCTAssertTrue(expandedContent.contains("if !codingSessionsEnabled"))
         XCTAssertTrue(expandedContent.contains("ProductModeMusicPanel("))
         XCTAssertTrue(expandedContent.contains("BoughHomePanel(appState: appState)"))
-        XCTAssertTrue(productHome.contains("BoughMascotView(fixedFrame: 0"))
-        XCTAssertTrue(productHome.contains("BoughMascotView(frameSize: 56)"))
-        XCTAssertTrue(productHome.contains("MusicStrip(appState: appState, musicArtworkNamespace: musicArtworkNamespace)"))
-        XCTAssertTrue(productHome.contains("AirDropEntryButton(layout: .row)"))
-        XCTAssertTrue(productHomeCompactBar.contains("HStack(spacing: 6)"))
-        XCTAssertTrue(productHomeCompactBar.contains(".padding(.leading, 6)"))
-        XCTAssertTrue(productHomeCompactBar.contains("SettingsWindowController.shared.show()"))
-        XCTAssertTrue(productHomeCompactBar.contains("NSApplication.shared.terminate(nil)"))
-        XCTAssertFalse(boughHomePanel.contains("NotchIconButton("))
+
+        // productHome compact bar: brand mascot + settings/quit (no sound), micro-animated, no session UI.
+        XCTAssertTrue(productBar.contains("BoughMascotView(fixedFrame: 0, frameSize: mascotSize)"))
+        XCTAssertTrue(productBar.contains(".opacity(expanded ? 1 : 0.9)"))
+        XCTAssertTrue(productBar.contains("NotchActionButtons(includeSound: false, spacing: 4)"))
+        XCTAssertTrue(productBar.contains(".animation(NotchAnimation.micro, value: expanded)"))
+        XCTAssertFalse(productBar.contains("includeSound: true"))
+        XCTAssertFalse(productBar.contains("SessionListView("))
+        XCTAssertFalse(productBar.contains("UsageStrip("))
+        XCTAssertFalse(productBar.contains("SessionCountLabel("))
+
+        // The below-notch home panel is brand-only; action buttons live on the bar, not the panel.
+        XCTAssertTrue(boughHomePanel.contains("BoughMascotView(frameSize: 56)"))
+        XCTAssertFalse(boughHomePanel.contains("NotchActionButtons("))
         XCTAssertFalse(boughHomePanel.contains("SettingsWindowController.shared.show()"))
         XCTAssertFalse(boughHomePanel.contains("NSApplication.shared.terminate(nil)"))
-        XCTAssertFalse(productModeMusicPanel.contains("NotchIconButton("))
+        XCTAssertFalse(productModeMusicPanel.contains("NotchActionButtons("))
         XCTAssertFalse(productModeMusicPanel.contains("SettingsWindowController.shared.show()"))
-        XCTAssertFalse(productModeMusicPanel.contains("NSApplication.shared.terminate(nil)"))
-        XCTAssertFalse(productHome.contains("SessionListView("))
-        XCTAssertFalse(productHome.contains("UsageStrip("))
-        XCTAssertFalse(productHome.contains("ApprovalBar("))
-        XCTAssertFalse(productHome.contains("QuestionBar("))
-        XCTAssertFalse(productHome.contains("0\""))
-        XCTAssertFalse(productHome.contains("soundEnabled"))
     }
 
     func testCompactMascotPlacementMatchesOriginalAndAllSourcesHaveStableFrames() throws {
         let source = try sourceFile("Sources/Bough/NotchPanelView.swift")
         let mascotRouter = try sourceFile("Sources/Bough/MascotView.swift")
         let leftWing = try XCTUnwrap(source.slice(from: "private struct CompactLeftWing: View", to: "/// Right side: project name"))
-        let idleIndicator = try XCTUnwrap(source.slice(from: "private struct IdleIndicatorBar: View", to: "// MARK: - Product Home"))
-        let productHomeCompactBar = try XCTUnwrap(source.slice(from: "private struct ProductHomeCompactBar: View", to: "private struct BoughHomePanel: View"))
+        let idleBar = try XCTUnwrap(source.slice(from: "private var idleBar: some View", to: "private var productBar"))
+        let productBar = try XCTUnwrap(source.slice(from: "private var productBar: some View", to: "// MARK: - Compact Wings"))
 
         XCTAssertFalse(source.contains("CompactMascotSlot"))
         XCTAssertTrue(leftWing.contains("HStack(spacing: 6)"))
@@ -229,10 +227,10 @@ final class NotchPanelViewTests: XCTestCase {
         XCTAssertTrue(leftWing.contains("MusicFigureView(snapshot: appState.musicStore.snapshot, size: mascotSize, onlineArtwork: appState.musicStore.onlineArtwork)"))
         XCTAssertTrue(leftWing.contains("CompactToolActivityDot(tool: shownTool)"))
 
-        XCTAssertTrue(idleIndicator.contains("HStack(spacing: 6)"))
-        XCTAssertTrue(idleIndicator.contains(".padding(.leading, 6)"))
-        XCTAssertTrue(productHomeCompactBar.contains("HStack(spacing: 6)"))
-        XCTAssertTrue(productHomeCompactBar.contains(".padding(.leading, 6)"))
+        XCTAssertTrue(idleBar.contains("HStack(spacing: 6)"))
+        XCTAssertTrue(idleBar.contains(".padding(.leading, 6)"))
+        XCTAssertTrue(productBar.contains("HStack(spacing: 6)"))
+        XCTAssertTrue(productBar.contains(".padding(.leading, 6)"))
         XCTAssertTrue(mascotRouter.contains(".frame(width: size, height: size, alignment: .center)"))
         XCTAssertFalse(mascotRouter.contains("TimelineView"))
         XCTAssertFalse(mascotRouter.contains("Timer"))
@@ -245,7 +243,7 @@ final class NotchPanelViewTests: XCTestCase {
         XCTAssertTrue(mascotRouter.contains("SpriteMascotView(spec: spec, size: size, mascotSpeed: speed)"))
         XCTAssertFalse(mascotRouter.contains("LayerBackedMascotView"))
         XCTAssertTrue(leftWing.contains("MascotView(source: source, status: status, size: compactSize)"))
-        XCTAssertTrue(idleIndicator.contains("source: settingsDefaultSource"))
+        XCTAssertTrue(idleBar.contains("source: settingsDefaultSource"))
     }
 
     func testCollapsedNotchToolStatusUsesFixedDotInsteadOfToolText() throws {
@@ -271,21 +269,22 @@ final class NotchPanelViewTests: XCTestCase {
 
     func testExpandedPanelShellKeepsContentHeight() throws {
         let source = try sourceFile("Sources/Bough/NotchPanelView.swift")
-        let panel = try XCTUnwrap(source.slice(from: "struct NotchPanelView: View", to: "// MARK: - Compact Wings"))
-        let shell = try XCTUnwrap(source.slice(from: "// Active: compact bar", to: ".frame(width: panelWidth)"))
+        let panel = try XCTUnwrap(source.slice(from: "struct NotchPanelView: View", to: "// MARK: - Compact Bar"))
+        let shell = try XCTUnwrap(source.slice(from: "CompactBar(", to: ".frame(width: panelWidth)"))
         let expandedContent = try XCTUnwrap(source.slice(from: "// Below-notch expanded content", to: ".fixedSize(horizontal: false, vertical: true)"))
-        let compactBar = try XCTUnwrap(source.slice(from: "// Active: compact bar", to: "} else if showProductHome"))
+        let activeBar = try XCTUnwrap(source.slice(from: "private var activeBar: some View", to: "private var idleBar"))
         let sessionSurfaces = try XCTUnwrap(source.slice(from: "case .completionCard:", to: "case .collapsed, .airDrop:"))
 
         XCTAssertTrue(
             shell.contains(".fixedSize(horizontal: false, vertical: true)"),
             "The panel window reserves scroll capacity, but the visible notch shell should stay content-height so a single session does not fill the whole window."
         )
-        XCTAssertTrue(compactBar.contains(".background(shouldShowExpanded ? Color.black : Color.clear)"))
+        XCTAssertTrue(activeBar.contains(".background(expanded ? Color.black : Color.clear)"))
         XCTAssertTrue(
-            compactBar.contains(".zIndex(1)"),
+            source.contains(".zIndex(compactBarMode.sitsAboveExpandedContent ? 1 : 0)"),
             "The compact bar should stay above collapsing expanded content so session-card mascots never appear to drive the top mascot transition."
         )
+        XCTAssertTrue(source.contains("self == .active || self == .idleIndicator"))
         XCTAssertEqual(sessionSurfaces.occurrences(of: ".transition(expandedContentTransition)"), 2)
         XCTAssertFalse(sessionSurfaces.contains("if sessionSurfaceContentShouldBeVisible"))
         XCTAssertTrue(panel.contains(".animation(NotchAnimation.open, value: appState.surface)"))
@@ -374,7 +373,7 @@ final class NotchPanelViewTests: XCTestCase {
         XCTAssertFalse(source.contains("startCompactMusicFigureRevealOnCollapseIfNeeded()"))
         XCTAssertTrue(source.contains("handleCompactMusicControlHover"))
         XCTAssertTrue(source.contains("guard isHovered, !compactMusicControlHovered else { return }"))
-        XCTAssertTrue(source.contains("!shouldShowExpanded && showToolStatus && compactActivitySource != .music"))
+        XCTAssertTrue(source.contains("!expanded && showToolStatus && compactActivitySource != .music"))
         XCTAssertFalse(rightWing.contains("backward.fill"))
         XCTAssertFalse(rightWing.contains("forward.fill"))
     }
@@ -578,10 +577,9 @@ final class NotchPanelViewTests: XCTestCase {
 
     func testIdleIndicatorHandsOffToBrandMascotAndFiresHaptic() throws {
         let source = try sourceFile("Sources/Bough/NotchPanelView.swift")
-        let panel = try XCTUnwrap(source.slice(from: "struct NotchPanelView: View", to: "// MARK: - Compact Wings"))
+        let panel = try XCTUnwrap(source.slice(from: "struct NotchPanelView: View", to: "// MARK: - Compact Bar"))
         let hoverHandling = try XCTUnwrap(source.slice(from: "private func handlePanelHover(_ hovering: Bool)", to: "switch appState.surface"))
-        let idleIndicator = try XCTUnwrap(source.slice(from: "private struct IdleIndicatorBar: View", to: "// MARK: - Product Home"))
-        let idleBranch = try XCTUnwrap(source.slice(from: "} else if showIdleIndicator {", to: "} else {\n                    // Idle: just the notch shell"))
+        let idleBar = try XCTUnwrap(source.slice(from: "private var idleBar: some View", to: "private var productBar"))
 
         XCTAssertTrue(hoverHandling.contains("withAnimation(NotchAnimation.open)"))
         XCTAssertTrue(hoverHandling.contains("idleHovered = true"))
@@ -592,50 +590,93 @@ final class NotchPanelViewTests: XCTestCase {
         XCTAssertTrue(hoverHandling.contains("if wasCollapsed { performHoverHaptic() }"))
         XCTAssertTrue(source.contains("private func performHoverHaptic()"))
 
-        XCTAssertTrue(idleBranch.contains("IdleIndicatorBar("))
-        XCTAssertTrue(idleBranch.contains(".background(idleIndicatorExpanded ? Color.black : Color.clear)"))
-        XCTAssertTrue(idleBranch.contains(".zIndex(1)"))
+        // Idle maps to the idleIndicator bar mode and expands on hover via idleIndicatorExpanded.
+        XCTAssertTrue(source.contains("if showIdleIndicator { return .idleIndicator }"))
+        XCTAssertTrue(panel.contains("compactBarMode == .idleIndicator ? idleIndicatorExpanded : shouldShowExpanded"))
         XCTAssertTrue(panel.contains("private var topMascotExpanded: Bool"))
         XCTAssertTrue(panel.contains("private var idleIndicatorExpanded: Bool"))
         XCTAssertTrue(panel.contains("showIdleIndicator && (idleHovered || appState.surface.isExpanded)"))
         XCTAssertTrue(panel.contains("showIdleIndicator ? idleIndicatorExpanded : shouldShowExpanded"))
-        // Idle expand now drives the same mascot→brand handoff as the active compact bar.
-        XCTAssertTrue(idleBranch.contains("mascotHandoffPhase: topMascotHandoffPhase"))
-        XCTAssertTrue(idleIndicator.contains("@AppStorage(SettingsKey.defaultSource)"))
-        XCTAssertTrue(idleIndicator.contains("let mascotHandoffPhase: Double"))
-        XCTAssertTrue(idleIndicator.contains("private var idleMascotView: some View"))
-        XCTAssertTrue(idleIndicator.contains("AIMascotHandoffStack("))
-        XCTAssertTrue(idleIndicator.contains("source: settingsDefaultSource"))
-        XCTAssertTrue(idleIndicator.contains("status: .idle"))
-        XCTAssertTrue(idleIndicator.contains("compactSize: mascotSize"))
-        XCTAssertTrue(idleIndicator.contains("expandedSize: 36"))
-        XCTAssertTrue(idleIndicator.contains("phase: mascotHandoffPhase"))
-        // The static coding-agent mascot that never reached the brand is gone.
-        XCTAssertFalse(idleIndicator.contains("MascotView("))
-        XCTAssertFalse(idleIndicator.contains("@State private var mascotHandoffPhase"))
-        XCTAssertFalse(idleIndicator.contains("withAnimation(AIMascotHandoff.animation(expanded: newValue))"))
-        XCTAssertFalse(idleIndicator.contains("MascotView(source: \"claude\""))
-        XCTAssertFalse(idleIndicator.contains(".opacity(hovered ? 0.9 : 0.5)"))
-        XCTAssertFalse(idleIndicator.contains(".animation(NotchAnimation.micro, value: hovered)"))
-        XCTAssertFalse(idleIndicator.contains("hovered ? 36 : mascotSize"))
+
+        // Idle bar hands the default-source mascot off to the Bough brand, with 0 + actions on expand.
+        XCTAssertTrue(idleBar.contains("AIMascotHandoffStack("))
+        XCTAssertTrue(idleBar.contains("source: settingsDefaultSource"))
+        XCTAssertTrue(idleBar.contains("status: .idle"))
+        XCTAssertTrue(idleBar.contains("compactSize: mascotSize"))
+        XCTAssertTrue(idleBar.contains("expandedSize: 36"))
+        XCTAssertTrue(idleBar.contains("phase: mascotHandoffPhase"))
+        XCTAssertTrue(idleBar.contains("NotchActionButtons(includeSound: true, spacing: 4)"))
+        XCTAssertTrue(idleBar.contains(".background(expanded ? Color.black : Color.clear)"))
+        XCTAssertTrue(idleBar.contains(".transition(.opacity)"))
+        // No static coding-agent mascot that never reaches the brand; the old struct is gone.
+        XCTAssertFalse(idleBar.contains("MascotView("))
+        XCTAssertFalse(source.contains("private struct IdleIndicatorBar"))
+        XCTAssertFalse(source.contains("private struct ProductHomeCompactBar"))
     }
 
     func testIdleExpandedPanelShowsUsageAndAirDropContent() throws {
         let source = try sourceFile("Sources/Bough/NotchPanelView.swift")
-        let panel = try XCTUnwrap(source.slice(from: "struct NotchPanelView: View", to: "// MARK: - Compact Wings"))
+        let panel = try XCTUnwrap(source.slice(from: "struct NotchPanelView: View", to: "// MARK: - Compact Bar"))
         let width = try XCTUnwrap(source.slice(from: "private var panelWidth: CGFloat", to: "var body: some View"))
         let hoverHandling = try XCTUnwrap(source.slice(from: "private func handlePanelHover(_ hovering: Bool)", to: "switch appState.surface"))
-        let idleBranch = try XCTUnwrap(source.slice(from: "} else if showIdleIndicator {", to: "} else {\n                    // Idle: just the notch shell"))
         let sessionList = try XCTUnwrap(source.slice(from: "private struct SessionListView: View", to: "/// Thin overlay scrollbar"))
 
         XCTAssertTrue(panel.contains("(showBar || showProductHome || showIdleIndicator) && appState.surface.isExpanded"))
         XCTAssertTrue(width.contains("if showIdleIndicator {"))
         XCTAssertTrue(width.contains("if shouldShowExpanded { return min(max(nw + 200, 580), maxWidth) }"))
-        XCTAssertTrue(idleBranch.contains("hovered: idleIndicatorExpanded"))
+        XCTAssertTrue(panel.contains("compactBarMode == .idleIndicator ? idleIndicatorExpanded : shouldShowExpanded"))
         XCTAssertTrue(hoverHandling.contains("appState.surface = .sessionList"))
         XCTAssertTrue(hoverHandling.contains("appState.surface = .collapsed"))
         XCTAssertTrue(sessionList.contains("UsageStrip(appState: appState)"))
         XCTAssertTrue(sessionList.contains("AirDropEntryButton(layout: .row)"))
+    }
+
+    /// Locks the per-mode chrome/animation equivalence matrix the bar unification must preserve
+    /// (spec `.planning/specs/2026-06-17-compact-bar-unification-design.md` §5).
+    func testCompactBarPreservesPerModeChromeAndAnimations() throws {
+        let source = try sourceFile("Sources/Bough/NotchPanelView.swift")
+        let compactBar = try XCTUnwrap(source.slice(from: "private struct CompactBar: View", to: "// MARK: - Compact Wings"))
+        let activeBar = try XCTUnwrap(source.slice(from: "private var activeBar: some View", to: "private var idleBar"))
+        let idleBar = try XCTUnwrap(source.slice(from: "private var idleBar: some View", to: "private var productBar"))
+        let productBar = try XCTUnwrap(source.slice(from: "private var productBar: some View", to: "// MARK: - Compact Wings"))
+        let rightWing = try XCTUnwrap(source.slice(from: "private struct CompactRightWing: View", to: "// MARK: - Tool Status Helpers"))
+
+        // Mode switches are view replacements (matching the old distinct-struct behavior), and the
+        // shell mode renders only the bare notch-height spacer.
+        XCTAssertTrue(source.contains("enum CompactBarMode"))
+        XCTAssertTrue(compactBar.contains("content.id(mode)"))
+        XCTAssertTrue(compactBar.contains("case .shell:"))
+        XCTAssertTrue(compactBar.contains("Spacer().frame(height: notchHeight)"))
+
+        // Background black on expand: active + idle yes; product-home + shell no.
+        XCTAssertTrue(activeBar.contains(".background(expanded ? Color.black : Color.clear)"))
+        XCTAssertTrue(idleBar.contains(".background(expanded ? Color.black : Color.clear)"))
+        XCTAssertFalse(productBar.contains("Color.black"))
+
+        // The micro animation belongs to product-home only.
+        XCTAssertTrue(productBar.contains(".animation(NotchAnimation.micro, value: expanded)"))
+        XCTAssertFalse(activeBar.contains("NotchAnimation.micro"))
+        XCTAssertFalse(idleBar.contains("NotchAnimation.micro"))
+
+        // The opacity transition belongs to the resting modes' right content; the active bar relies
+        // on the container animation and must NOT gain one.
+        XCTAssertTrue(idleBar.contains(".transition(.opacity)"))
+        XCTAssertTrue(productBar.contains(".transition(.opacity)"))
+        XCTAssertFalse(activeBar.contains(".transition(.opacity)"))
+
+        // Leading mascot slot is clipped on idle, not on product-home (matches the originals).
+        XCTAssertTrue(idleBar.contains(".clipped()"))
+        XCTAssertFalse(productBar.contains(".clipped()"))
+
+        // Shared action trio: sound on active (spacing 6) and idle (spacing 4), dropped on product-home.
+        XCTAssertTrue(rightWing.contains("NotchActionButtons(includeSound: true, spacing: 6)"))
+        XCTAssertTrue(idleBar.contains("NotchActionButtons(includeSound: true, spacing: 4)"))
+        XCTAssertTrue(productBar.contains("NotchActionButtons(includeSound: false, spacing: 4)"))
+
+        // Shared leaves exist and the active count label is parameterized by font, not duplicated.
+        XCTAssertTrue(source.contains("private struct NotchActionButtons: View"))
+        XCTAssertTrue(source.contains("private struct SessionCountLabel: View"))
+        XCTAssertTrue(rightWing.contains("SessionCountLabel("))
     }
 
     func testSessionGroupingDefaultsToStatusAndNormalizesLegacyValues() {
