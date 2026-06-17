@@ -19,6 +19,17 @@ OAuth usage channels: direct API reads for Claude Code and Codex, statusLine ret
 - First Claude usage fetch may show a one-time macOS Keychain prompt for "Claude Code-credentials" — choose "Always Allow". Denying falls back to an explanatory unavailable state; everything else keeps working.
 - With the background monitor enabled, Bough mirrors the Claude access token (never the refresh token) to `~/.bough/claude-oauth-credentials.json` (0600) so sampling continues while the app is closed; the file is deleted when the monitor is disabled or uninstalled.
 
+Music strip: synced lyrics, a seekable progress bar, and online metadata backfill.
+
+**Music — Added:**
+
+- The music strip now shows synced, line-by-line lyrics and a seekable progress bar.
+- Online lyrics and artwork are backfilled (QQ Music + NetEase search) for all supported players — Apple Music, Spotify, QQ Music, and NetEase Cloud Music.
+
+**Music — Fixed:**
+
+- Player-identity race during rapid app switching; cross-source metadata mixing in the script fallback; QQ artwork negative-cache now retries after a TTL instead of relying on mtime alone; the OSAScript backoff is now a single state machine; stale poll results are no longer published (generation token); localized player display names now match correctly.
+
 ### 简体中文
 
 OAuth 用量通道：直接读取 Claude Code 和 Codex 的 API、退役 statusLine wrapper 及节奏预测。
@@ -33,6 +44,17 @@ OAuth 用量通道：直接读取 Claude Code 和 Codex 的 API、退役 statusL
 
 - 首次获取 Claude 用量时，可能会出现一次性的 macOS Keychain 提示，请求访问"Claude Code-credentials"——请选择"始终允许"。拒绝后会回退到说明性的不可用状态，其他功能不受影响。
 - 启用后台监控后，Bough 会将 Claude access token（不包括 refresh token）镜像到 `~/.bough/claude-oauth-credentials.json`（权限 0600），以便应用关闭时仍能持续采样；禁用监控或卸载应用时，该文件会被删除。
+
+音乐条：同步歌词、可拖动进度条与在线元数据补全。
+
+**音乐 — 新增：**
+
+- 音乐条现在显示逐行同步歌词和可拖动的播放进度条。
+- 为所有支持的播放器（Apple Music、Spotify、QQ 音乐、网易云音乐）在线补全歌词与封面（QQ 音乐 + 网易云搜索）。
+
+**音乐 — 修复：**
+
+- 快速切换播放器时的身份竞态；脚本兜底的跨源元数据混淆；QQ 封面负缓存改为 TTL 重试而非仅依赖 mtime；OSAScript 退避合并为单一状态机；过期轮询结果不再发布（generation token）；本地化播放器显示名现在能正确匹配。
 
 ## [v1.0.6] - 2026-06-10
 

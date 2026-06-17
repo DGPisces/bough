@@ -13,6 +13,7 @@ struct MusicStripModel: Equatable {
     static let controlSize: CGFloat = 26
     static let compactControlSize: CGFloat = 24
     static let lyricLineHeight: CGFloat = 14
+    static let progressBarHeight: CGFloat = 2
 
     let title: String
     let subtitle: String
@@ -22,8 +23,15 @@ struct MusicStripModel: Equatable {
     let commands: MusicCommandAvailability
     let failedCommand: MusicCommand?
     let playerBundleIdentifier: String?
+    let timedLyrics: MusicTimedLyrics?
+    let position: MusicPlaybackPosition?
 
-    init?(snapshot: MusicNowPlayingSnapshot?, softFailure: MusicSoftFailure? = nil) {
+    init?(
+        snapshot: MusicNowPlayingSnapshot?,
+        softFailure: MusicSoftFailure? = nil,
+        timedLyrics: MusicTimedLyrics? = nil,
+        onlineArtwork: MusicArtworkSnapshot? = nil
+    ) {
         guard let snapshot, snapshot.hasCurrentVisibleTrack else {
             return nil
         }
@@ -40,11 +48,26 @@ struct MusicStripModel: Equatable {
         }
 
         lyricLine = track?.lyricLine
-        artwork = track?.artwork
+        artwork = track?.artwork ?? onlineArtwork
         playbackState = snapshot.playbackState
         commands = snapshot.commands
         failedCommand = softFailure?.command
         playerBundleIdentifier = snapshot.player.bundleIdentifier
+        self.timedLyrics = timedLyrics
+        self.position = snapshot.position
+    }
+
+    func displayedLyricLine(at date: Date) -> String? {
+        if let lyricLine { return lyricLine }
+        if let timedLyrics, let position {
+            if let line = timedLyrics.currentLine(at: position.elapsed(at: date)) { return line }
+        }
+        return timedLyrics?.lines.first?.text
+    }
+
+    func progressFraction(at date: Date) -> Double? {
+        guard let position, let duration = position.duration, duration > 0 else { return nil }
+        return min(1, max(0, position.elapsed(at: date) / duration))
     }
 
     var isPlaying: Bool {
@@ -96,7 +119,9 @@ struct MusicStrip: View {
     var body: some View {
         if let model = MusicStripModel(
             snapshot: appState.musicStore.snapshot,
-            softFailure: appState.musicStore.softFailure
+            softFailure: appState.musicStore.softFailure,
+            timedLyrics: appState.musicStore.onlineLyrics,
+            onlineArtwork: appState.musicStore.onlineArtwork
         ) {
             HStack(spacing: 10) {
                 if let musicArtworkNamespace {
@@ -130,13 +155,26 @@ struct MusicStrip: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
 
-                    Text(model.reservedLyricText)
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.68))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(height: MusicStripModel.lyricLineHeight, alignment: .leading)
-                        .opacity(model.lyricOpacity)
+                    TimelineView(.periodic(from: .now, by: 0.5)) { context in
+                        VStack(alignment: .leading, spacing: 3) {
+                            let lyric = model.displayedLyricLine(at: context.date)
+                            Text(lyric ?? " ")
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.68))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .frame(height: MusicStripModel.lyricLineHeight, alignment: .leading)
+                                .opacity(lyric == nil ? 0 : 1)
+                                .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: lyric)
+
+                            if let fraction = model.progressFraction(at: context.date) {
+                                MusicProgressBar(fraction: fraction) { targetFraction in
+                                    guard let duration = model.position?.duration else { return }
+                                    Task { await appState.musicStore.seek(to: targetFraction * duration) }
+                                }
+                            }
+                        }
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .clipped()
@@ -261,10 +299,11 @@ struct CompactMusicPlayPauseControl: View {
 struct MusicFigureView: View {
     let snapshot: MusicNowPlayingSnapshot?
     var size: CGFloat = MusicStripModel.compactFigureSize
+    var onlineArtwork: MusicArtworkSnapshot? = nil
     @ObservedObject private var l10n = L10n.shared
 
     private var model: MusicStripModel? {
-        MusicStripModel(snapshot: snapshot)
+        MusicStripModel(snapshot: snapshot, onlineArtwork: onlineArtwork)
     }
 
     private var isPlaying: Bool {
@@ -402,5 +441,31 @@ private struct MusicControlButton: View {
         }
         .help(label)
         .accessibilityLabel(label)
+    }
+}
+
+private struct MusicProgressBar: View {
+    let fraction: Double
+    let onSeek: (Double) -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule().fill(.white.opacity(hovering ? 0.18 : 0.10))
+                Capsule().fill(.white.opacity(hovering ? 0.85 : 0.55))
+                    .frame(width: max(0, proxy.size.width * fraction))
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0).onEnded { value in
+                    let target = min(1, max(0, value.location.x / proxy.size.width))
+                    onSeek(target)
+                }
+            )
+        }
+        .frame(height: MusicStripModel.progressBarHeight + 4)
+        .onHover { hovering = $0 }
+        .accessibilityLabel("music_progress")
     }
 }

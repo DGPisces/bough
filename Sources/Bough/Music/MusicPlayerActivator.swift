@@ -28,7 +28,8 @@ extension MusicNowPlayingSnapshot {
             track: track,
             playbackState: playbackState,
             commands: commands,
-            capturedAt: capturedAt
+            capturedAt: capturedAt,
+            position: position
         )
     }
 }

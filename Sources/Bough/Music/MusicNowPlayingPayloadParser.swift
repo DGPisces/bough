@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-struct MusicNowPlayingPayload: Equatable {
+struct MusicNowPlayingPayload: Equatable, Sendable {
     let bundleIdentifier: String?
     let displayName: String?
     let title: String?
@@ -12,6 +12,8 @@ struct MusicNowPlayingPayload: Equatable {
     let playbackStateValue: Int?
     let playbackRate: Double?
     let timestamp: Date?
+    let elapsedTime: Double?
+    let duration: Double?
     let lyricCandidates: [MusicLyricCandidate]
     let commandAvailability: MusicCommandAvailability?
 
@@ -26,6 +28,8 @@ struct MusicNowPlayingPayload: Equatable {
         playbackStateValue: Int?,
         playbackRate: Double?,
         timestamp: Date? = nil,
+        elapsedTime: Double? = nil,
+        duration: Double? = nil,
         lyricCandidates: [MusicLyricCandidate] = [],
         commandAvailability: MusicCommandAvailability? = nil
     ) {
@@ -39,6 +43,8 @@ struct MusicNowPlayingPayload: Equatable {
         self.playbackStateValue = playbackStateValue
         self.playbackRate = playbackRate
         self.timestamp = timestamp
+        self.elapsedTime = elapsedTime
+        self.duration = duration
         self.lyricCandidates = lyricCandidates
         self.commandAvailability = commandAvailability
     }
@@ -89,7 +95,13 @@ enum MusicNowPlayingPayloadParser {
             track: track,
             playbackState: playbackState,
             commands: payload.commandAvailability ?? defaultCommandAvailability,
-            capturedAt: capturedAt
+            capturedAt: capturedAt,
+            position: MusicPlaybackPosition(
+                elapsed: payload.elapsedTime,
+                duration: payload.duration,
+                rate: playbackState == .playing ? (payload.playbackRate ?? 1) : 0,
+                capturedAt: payload.timestamp ?? capturedAt
+            )
         )
     }
 
@@ -140,5 +152,29 @@ enum MusicNowPlayingPayloadParser {
             return nil
         }
         return MusicArtworkSnapshot(data: artworkData, mimeType: payload.artworkMimeType)
+    }
+}
+
+extension MusicNowPlayingPayload {
+    /// Two payloads may be substituted for each other only if they cannot be
+    /// from different players. The first dimension present on BOTH sides decides:
+    /// bundle id (must be equal) → display name (must mutually contain) →
+    /// title (normalized must be equal). A dimension missing on either side is
+    /// skipped; if all dimensions are skipped the payloads are allowed.
+    func describesSameSource(as other: MusicNowPlayingPayload) -> Bool {
+        func clean(_ value: String?) -> String? {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed?.isEmpty == false ? trimmed : nil
+        }
+        if let lhs = clean(bundleIdentifier), let rhs = clean(other.bundleIdentifier) {
+            return lhs == rhs
+        }
+        if let lhs = clean(displayName)?.lowercased(), let rhs = clean(other.displayName)?.lowercased() {
+            return lhs.contains(rhs) || rhs.contains(lhs)
+        }
+        if let lhs = clean(title)?.lowercased(), let rhs = clean(other.title)?.lowercased() {
+            return lhs == rhs
+        }
+        return true
     }
 }

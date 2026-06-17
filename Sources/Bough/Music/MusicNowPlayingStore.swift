@@ -19,6 +19,15 @@ final class MusicNowPlayingStore {
     private let now: () -> Date
 
     @ObservationIgnored
+    private let onlineProvider: MusicOnlineDataProviding?
+
+    @ObservationIgnored
+    private var currentMatchKey: MusicTrackMatchKey?
+
+    @ObservationIgnored
+    private var onlineFetchTask: Task<Void, Never>?
+
+    @ObservationIgnored
     private var presentationNeeded = false
 
     @ObservationIgnored
@@ -34,10 +43,19 @@ final class MusicNowPlayingStore {
     private var activePollingInterval: TimeInterval?
 
     @ObservationIgnored
+    private var refreshGeneration = 0
+
+    @ObservationIgnored
     private(set) var publishRevision = 0
 
     private(set) var state: MusicServiceState = .disabled
     private(set) var softFailure: MusicSoftFailure?
+    private(set) var onlineLyrics: MusicTimedLyrics?
+    private(set) var onlineArtwork: MusicArtworkSnapshot?
+
+    #if DEBUG
+    var onlineFetchTaskForTesting: Task<Void, Never>? { onlineFetchTask }
+    #endif
 
     var snapshot: MusicNowPlayingSnapshot? {
         state.snapshot
@@ -54,11 +72,13 @@ final class MusicNowPlayingStore {
         defaults: UserDefaults = .standard,
         service: MusicNowPlayingServicing = NoopMusicNowPlayingService(),
         scheduler: MusicPollingScheduling? = nil,
+        onlineProvider: MusicOnlineDataProviding? = nil,
         now: @escaping () -> Date = Date.init
     ) {
         self.defaults = defaults
         self.service = service
         self.scheduler = scheduler ?? TimerMusicPollingScheduler()
+        self.onlineProvider = onlineProvider
         self.now = now
         self.service.setPollingAvailabilityDidChangeHandler { [weak self] in
             self?.handlePollingAvailabilityChanged()
@@ -89,8 +109,12 @@ final class MusicNowPlayingStore {
             return
         }
 
+        refreshGeneration += 1
+        let generation = refreshGeneration
+
         do {
             let snapshot = try await service.currentSnapshot(bypassingScriptBackoff: bypassingScriptBackoff)
+            guard generation == refreshGeneration else { return }
             guard shouldPoll else {
                 clearStateForDisabledOrUnneeded()
                 return
@@ -104,6 +128,7 @@ final class MusicNowPlayingStore {
             applyAvailableSnapshot(snapshot)
             syncPolling()
         } catch {
+            guard generation == refreshGeneration else { return }
             guard shouldPoll else {
                 clearStateForDisabledOrUnneeded()
                 return
@@ -141,6 +166,26 @@ final class MusicNowPlayingStore {
                 state = stateBeforeCommand
             }
             applySoftFailure(message: musicErrorMessage(error), command: command)
+        }
+    }
+
+    func seek(to target: TimeInterval) async {
+        guard controlsEnabled else {
+            applySoftFailure(message: "Music controls are off", command: nil)
+            return
+        }
+        guard case let .available(snapshot?) = state, let position = snapshot.position else { return }
+        let stateBeforeSeek = state
+        let clamped = position.duration.map { min(max(0, target), $0) } ?? max(0, target)
+        state = .available(snapshot.withPosition(position.withElapsed(clamped, at: now())))
+        markPublished()
+        do {
+            try await service.seek(to: clamped)
+            softFailure = nil
+            schedulePostCommandRefresh()
+        } catch {
+            state = stateBeforeSeek
+            applySoftFailure(message: musicErrorMessage(error), command: nil)
         }
     }
 
@@ -201,6 +246,7 @@ final class MusicNowPlayingStore {
     deinit {
         postCommandRefreshTask?.cancel()
         inFlightRefreshTask?.cancel()
+        onlineFetchTask?.cancel()
     }
 
     private var controlsEnabled: Bool {
@@ -265,6 +311,7 @@ final class MusicNowPlayingStore {
     }
 
     private func clearStateForDisabledOrUnneeded() {
+        resetOnlineData(publish: false)
         consecutiveFailures = 0
         softFailure = nil
         let target: MusicServiceState = controlsEnabled ? .available(nil) : .disabled
@@ -274,14 +321,13 @@ final class MusicNowPlayingStore {
     }
 
     private func applyAvailableSnapshot(_ snapshot: MusicNowPlayingSnapshot?) {
+        updateOnlineData(for: snapshot)
         let next = MusicServiceState.available(snapshot)
-        guard !state.isDisplayEquivalent(to: next) else {
-            guard softFailure != nil else { return }
-            softFailure = nil
-            markPublished()
-            return
+        let displayEquivalent = state.isDisplayEquivalent(to: next)
+        state = next  // always refresh so the playback-position anchor stays current
+        if displayEquivalent && softFailure == nil {
+            return    // nothing display-affecting changed; skip the publish notification
         }
-        state = next
         softFailure = nil
         markPublished()
     }
@@ -290,6 +336,64 @@ final class MusicNowPlayingStore {
         let next = MusicServiceState.unavailable(reason: reason)
         guard !state.isDisplayEquivalent(to: next) else { return }
         state = next
+        markPublished()
+    }
+
+    private func updateOnlineData(for snapshot: MusicNowPlayingSnapshot?) {
+        let key = snapshot?.track.flatMap {
+            MusicTrackMatchKey(title: $0.title, artist: $0.artist, album: $0.album)
+        }
+        if key != currentMatchKey {
+            currentMatchKey = key
+            onlineFetchTask?.cancel()
+            onlineFetchTask = nil
+            let hadOnlineData = onlineLyrics != nil || onlineArtwork != nil
+            onlineLyrics = nil
+            onlineArtwork = nil
+            if hadOnlineData { markPublished() }
+        }
+        guard let onlineProvider, let key, let snapshot, let track = snapshot.track else { return }
+        if track.artwork != nil, onlineArtwork != nil { onlineArtwork = nil }
+        if track.lyricLine != nil, onlineLyrics != nil { onlineLyrics = nil }
+        let needsLyrics = onlineLyrics == nil && track.lyricLine == nil
+        let needsArtwork = track.artwork == nil && onlineArtwork == nil
+        guard needsLyrics || needsArtwork, onlineFetchTask == nil else { return }
+
+        let player = MusicAllowedPlayer.match(
+            bundleIdentifier: snapshot.player.bundleIdentifier,
+            displayName: snapshot.player.displayName
+        )
+        let duration = snapshot.position?.duration
+        onlineFetchTask = Task { @MainActor [weak self] in
+            if needsLyrics, let lyrics = await onlineProvider.timedLyrics(for: key, durationHint: duration) {
+                guard let self, !Task.isCancelled, self.currentMatchKey == key else { return }
+                self.onlineLyrics = lyrics
+                self.markPublished()
+            }
+            if needsArtwork {
+                if Task.isCancelled { self?.onlineFetchTask = nil; return }
+                if let data = await onlineProvider.artworkData(for: key, player: player, rawTitle: track.title, rawArtist: track.artist, rawAlbum: track.album, durationHint: duration) {
+                    guard let self, !Task.isCancelled, self.currentMatchKey == key else { return }
+                    self.applyOnlineArtwork(data)
+                }
+            }
+            self?.onlineFetchTask = nil
+        }
+    }
+
+    private func resetOnlineData(publish: Bool) {
+        currentMatchKey = nil
+        onlineFetchTask?.cancel()
+        onlineFetchTask = nil
+        let hadOnlineData = onlineLyrics != nil || onlineArtwork != nil
+        onlineLyrics = nil
+        onlineArtwork = nil
+        if publish && hadOnlineData { markPublished() }
+    }
+
+    private func applyOnlineArtwork(_ data: Data) {
+        guard onlineArtwork == nil else { return }
+        onlineArtwork = MusicArtworkSnapshot(data: data, mimeType: nil)
         markPublished()
     }
 

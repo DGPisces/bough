@@ -1,12 +1,24 @@
 import Darwin
 import AppKit
 import Foundation
-import SQLite3
+
+// MediaRemote private-framework boundary.
+//
+// ABI fragility (documented-only by design): every MR* symbol used below is
+// resolved at runtime via dlsym from the MediaRemote private framework. A macOS
+// update may rename or remove them; load() then throws .unavailable and the
+// music strip simply stays hidden — no crash, no fallback chain.
+//
+// Command identifiers (documented-only by design): the Int32 values in
+// commandIdentifier(for:) mirror MediaRemote's command enum as observed on
+// macOS 13–26: 2 = toggle play/pause, 4 = next track, 5 = previous track. If the
+// transport buttons stop working after an OS update, re-verify these values.
 
 protocol MediaRemoteNowPlayingRuntime: AnyObject {
     func currentPayload() async throws -> MusicNowPlayingPayload
     func currentPayload(bypassingScriptBackoff: Bool) async throws -> MusicNowPlayingPayload
     func send(_ command: MusicCommand) async throws
+    func seek(to seconds: TimeInterval) async throws
 }
 
 protocol MusicAllowedPlayerRuntimeMonitoring: AnyObject {
@@ -127,6 +139,10 @@ extension MediaRemoteNowPlayingRuntime {
     func currentPayload(bypassingScriptBackoff _: Bool) async throws -> MusicNowPlayingPayload {
         try await currentPayload()
     }
+
+    func seek(to _: TimeInterval) async throws {
+        throw MusicNowPlayingServiceError.commandUnavailable
+    }
 }
 
 final class MediaRemoteNowPlayingService: MusicNowPlayingServicing {
@@ -170,6 +186,9 @@ final class MediaRemoteNowPlayingService: MusicNowPlayingServicing {
             return nil
         }
 
+        // Running-player identity is sampled at most once per snapshot, inside the
+        // resolver and only when an identity substitution is actually needed, so a
+        // player launching/terminating mid-read cannot flip this snapshot's identity.
         let payload = try await loadRuntime().currentPayload(bypassingScriptBackoff: bypassingScriptBackoff)
             .resolvingMismatchedNonMusicIdentity {
                 runningAllowedPlayerProvider()
@@ -179,6 +198,10 @@ final class MediaRemoteNowPlayingService: MusicNowPlayingServicing {
 
     func send(_ command: MusicCommand) async throws {
         try await loadRuntime().send(command)
+    }
+
+    func seek(to seconds: TimeInterval) async throws {
+        try await loadRuntime().seek(to: seconds)
     }
 
     static func commandIdentifier(for command: MusicCommand) -> Int32 {
@@ -221,7 +244,7 @@ final class MediaRemoteNowPlayingService: MusicNowPlayingServicing {
     }
 }
 
-private extension MusicNowPlayingPayload {
+extension MusicNowPlayingPayload {
     func resolvingMismatchedNonMusicIdentity(
         runningAllowedPlayer: () -> MusicPlayerIdentity?
     ) -> MusicNowPlayingPayload {
@@ -248,6 +271,8 @@ private extension MusicNowPlayingPayload {
             playbackStateValue: playbackStateValue,
             playbackRate: playbackRate,
             timestamp: timestamp,
+            elapsedTime: elapsedTime,
+            duration: duration,
             lyricCandidates: lyricCandidates,
             commandAvailability: commandAvailability
         )
@@ -275,7 +300,10 @@ private extension MusicNowPlayingPayload {
 
 extension MusicNowPlayingStore {
     static func live() -> MusicNowPlayingStore {
-        MusicNowPlayingStore(service: MediaRemoteNowPlayingService())
+        MusicNowPlayingStore(
+            service: MediaRemoteNowPlayingService(),
+            onlineProvider: MusicOnlineDataProvider()
+        )
     }
 }
 
@@ -287,6 +315,7 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
     private typealias GetNowPlayingStringFunction = @convention(c) (DispatchQueue, @escaping NowPlayingStringBlock) -> Void
     private typealias GetNowPlayingPlaybackStateFunction = @convention(c) (DispatchQueue, @escaping NowPlayingPlaybackStateBlock) -> Void
     private typealias SendCommandFunction = @convention(c) (Int32, CFDictionary?) -> DarwinBoolean
+    private typealias SetElapsedTimeFunction = @convention(c) (Double) -> Void
 
     private static let frameworkBundlePath = "/System/Library/PrivateFrameworks/MediaRemote.framework/"
     private static let frameworkPath = "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote"
@@ -297,9 +326,9 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
     private let getApplicationDisplayID: GetNowPlayingStringFunction?
     private let getApplicationPlaybackState: GetNowPlayingPlaybackStateFunction?
     private let sendCommand: SendCommandFunction?
+    private let setElapsedTime: SetElapsedTimeFunction?
     private let keys: MediaRemoteNowPlayingKeys
     private let scriptPayloadReader = OSAScriptNowPlayingPayloadReader()
-    private let qqMusicArtworkResolver = QQMusicArtworkResolver()
     private let mediaRemoteQueue = DispatchQueue(label: "dev.dgpisces.bough.media-remote")
 
     static func load() throws -> DefaultMediaRemoteRuntime {
@@ -320,6 +349,7 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
             getApplicationDisplayID: resolve("MRMediaRemoteGetNowPlayingApplicationDisplayID", from: handle),
             getApplicationPlaybackState: resolve("MRMediaRemoteGetNowPlayingApplicationPlaybackState", from: handle),
             sendCommand: resolve("MRMediaRemoteSendCommand", from: handle),
+            setElapsedTime: resolve("MRMediaRemoteSetElapsedTime", from: handle),
             keys: MediaRemoteNowPlayingKeys(handle: handle)
         )
     }
@@ -330,6 +360,7 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
         getApplicationDisplayID: GetNowPlayingStringFunction?,
         getApplicationPlaybackState: GetNowPlayingPlaybackStateFunction?,
         sendCommand: SendCommandFunction?,
+        setElapsedTime: SetElapsedTimeFunction?,
         keys: MediaRemoteNowPlayingKeys
     ) {
         self.handle = handle
@@ -337,6 +368,7 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
         self.getApplicationDisplayID = getApplicationDisplayID
         self.getApplicationPlaybackState = getApplicationPlaybackState
         self.sendCommand = sendCommand
+        self.setElapsedTime = setElapsedTime
         self.keys = keys
     }
 
@@ -353,7 +385,7 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
 
         if let requestPayload = currentRequestPayload(playbackState: playbackState),
            requestPayload.hasDisplayableMediaRemoteMetadata {
-            return await payloadByResolvingArtworkIfNeeded(requestPayload)
+            return requestPayload
         }
 
         let dictionary = await currentInfoDictionary()
@@ -370,32 +402,26 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
             playbackStateValue: playbackState,
             playbackRate: numberValue(for: keys.playbackRate, in: dictionary),
             timestamp: dateValue(for: keys.timestamp, in: dictionary),
+            elapsedTime: numberValue(for: keys.elapsedTime, in: dictionary),
+            duration: numberValue(for: keys.duration, in: dictionary),
             lyricCandidates: lyricCandidates(from: dictionary),
             commandAvailability: nil
         )
 
         if legacyPayload.hasDisplayableMediaRemoteMetadata {
-            return await payloadByResolvingArtworkIfNeeded(legacyPayload)
+            return legacyPayload
         }
 
         if let scriptPayload = await scriptPayloadReader.currentPayload(
             bypassingBackoff: bypassingScriptBackoff,
             probingActivePlayback: legacyPayload.isPlaybackLikelyActive
         ),
-           scriptPayload.hasDisplayableMediaRemoteMetadata {
-            return await payloadByResolvingArtworkIfNeeded(scriptPayload)
+           scriptPayload.hasDisplayableMediaRemoteMetadata,
+           legacyPayload.describesSameSource(as: scriptPayload) {
+            return scriptPayload
         }
 
         return legacyPayload
-    }
-
-    private func payloadByResolvingArtworkIfNeeded(_ payload: MusicNowPlayingPayload) async -> MusicNowPlayingPayload {
-        guard payload.artworkData == nil,
-              let artworkData = await qqMusicArtworkResolver.artworkData(for: payload)
-        else {
-            return payload
-        }
-        return payload.withArtworkData(artworkData, mimeType: "image/jpeg")
     }
 
     private func currentRequestPayload(playbackState: Int?) -> MusicNowPlayingPayload? {
@@ -420,6 +446,8 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
             playbackStateValue: playbackState,
             playbackRate: numberValue(for: keys.playbackRate, in: dictionary),
             timestamp: dateValue(for: keys.timestamp, in: dictionary),
+            elapsedTime: numberValue(for: keys.elapsedTime, in: dictionary),
+            duration: numberValue(for: keys.duration, in: dictionary),
             lyricCandidates: lyricCandidates(from: dictionary),
             commandAvailability: nil
         )
@@ -432,6 +460,13 @@ private final class DefaultMediaRemoteRuntime: MediaRemoteNowPlayingRuntime {
         guard sendCommand(MediaRemoteNowPlayingService.commandIdentifier(for: command), nil).boolValue else {
             throw MusicNowPlayingServiceError.commandUnavailable
         }
+    }
+
+    func seek(to seconds: TimeInterval) async throws {
+        guard let setElapsedTime else {
+            throw MusicNowPlayingServiceError.commandUnavailable
+        }
+        setElapsedTime(max(0, seconds))
     }
 
     private func currentInfoDictionary() async -> NSDictionary {
@@ -592,414 +627,6 @@ private final class MediaRemoteContinuationGate<T>: @unchecked Sendable {
     }
 }
 
-private actor OSAScriptNowPlayingPayloadReader {
-    private struct DecodedPayload: Decodable {
-        let bundleIdentifier: String?
-        let displayName: String?
-        let title: String?
-        let artist: String?
-        let album: String?
-        let artworkDataBase64: String?
-        let artworkMimeType: String?
-        let playbackStateValue: Int?
-        let playbackRate: Double?
-        let lyrics: String?
-    }
-
-    private static let executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-    private static let emptyOrFailureBackoffIntervals: [TimeInterval] = [10, 30, 60]
-    private static let activePlaybackProbeInterval: TimeInterval = 2
-    private static let maxOutputBytes = 2 * 1024 * 1024
-    private static let timeout: TimeInterval = 1.5
-    private var emptyOrFailureBackoffUntil: Date?
-    private var activePlaybackProbeBackoffUntil: Date?
-    private var consecutiveEmptyOrFailureCount = 0
-    private var inFlightReadTask: Task<MusicNowPlayingPayload?, Never>?
-    private static let script = """
-    function run() {
-        ObjC.import('Foundation');
-
-        var bundle = $.NSBundle.bundleWithPath('/System/Library/PrivateFrameworks/MediaRemote.framework/');
-        if (!bundle || !bundle.load) {
-            return '{}';
-        }
-
-        var request = $.NSClassFromString('MRNowPlayingRequest');
-        if (!request) {
-            return '{}';
-        }
-
-        var playerPath = request.localNowPlayingPlayerPath;
-        var item = request.localNowPlayingItem;
-        var info = item ? item.nowPlayingInfo : null;
-        var client = playerPath ? playerPath.client : null;
-
-        function unwrap(value) {
-            if (!value) {
-                return null;
-            }
-            var unwrapped = ObjC.unwrap(value);
-            return unwrapped === undefined ? null : unwrapped;
-        }
-
-        function objectForKey(key) {
-            return info ? info.objectForKey(key) : null;
-        }
-
-        function stringForKey(key) {
-            var value = unwrap(objectForKey(key));
-            return value === null ? null : String(value);
-        }
-
-        function numberForKey(key) {
-            var value = unwrap(objectForKey(key));
-            if (value === null) {
-                return null;
-            }
-            return numberFromValue(value);
-        }
-
-        function numberFromValue(value) {
-            if (value === null) {
-                return null;
-            }
-            var number = Number(value);
-            return isNaN(number) ? null : number;
-        }
-
-        var payload = {
-            bundleIdentifier: unwrap(client ? client.bundleIdentifier : null),
-            displayName: unwrap(client ? client.displayName : null),
-            title: stringForKey('kMRMediaRemoteNowPlayingInfoTitle'),
-            artist: stringForKey('kMRMediaRemoteNowPlayingInfoArtist'),
-            album: stringForKey('kMRMediaRemoteNowPlayingInfoAlbum'),
-            artworkMimeType: stringForKey('kMRMediaRemoteNowPlayingInfoArtworkMIMEType'),
-            playbackStateValue: numberFromValue(unwrap(request.localPlaybackState)),
-            playbackRate: numberForKey('kMRMediaRemoteNowPlayingInfoPlaybackRate'),
-            lyrics: stringForKey('kMRMediaRemoteNowPlayingInfoLyrics')
-        };
-
-        var artworkData = objectForKey('kMRMediaRemoteNowPlayingInfoArtworkData');
-        if (artworkData && unwrap(artworkData) !== null) {
-            payload.artworkDataBase64 = unwrap(artworkData.base64EncodedStringWithOptions(0));
-        }
-
-        return JSON.stringify(payload);
-    }
-    """
-
-    func currentPayload(
-        bypassingBackoff: Bool,
-        probingActivePlayback: Bool = false
-    ) async -> MusicNowPlayingPayload? {
-        let now = Date()
-        if !bypassingBackoff {
-            if probingActivePlayback {
-                if let activePlaybackProbeBackoffUntil, now < activePlaybackProbeBackoffUntil {
-                    return nil
-                }
-            } else if let emptyOrFailureBackoffUntil, now < emptyOrFailureBackoffUntil {
-                return nil
-            }
-        }
-
-        if let inFlightReadTask {
-            return await inFlightReadTask.value
-        }
-
-        let readTask = Task.detached(priority: .utility) {
-            Self.readPayload()
-        }
-        inFlightReadTask = readTask
-        let payload = await readTask.value
-        inFlightReadTask = nil
-
-        if payload?.hasDisplayableMediaRemoteMetadata == true {
-            emptyOrFailureBackoffUntil = nil
-            activePlaybackProbeBackoffUntil = nil
-            consecutiveEmptyOrFailureCount = 0
-        } else {
-            if probingActivePlayback {
-                activePlaybackProbeBackoffUntil = now.addingTimeInterval(Self.activePlaybackProbeInterval)
-            }
-            emptyOrFailureBackoffUntil = now.addingTimeInterval(nextBackoffInterval())
-            consecutiveEmptyOrFailureCount += 1
-        }
-
-        return payload
-    }
-
-    private func nextBackoffInterval() -> TimeInterval {
-        Self.emptyOrFailureBackoffIntervals[
-            min(consecutiveEmptyOrFailureCount, Self.emptyOrFailureBackoffIntervals.count - 1)
-        ]
-    }
-
-    private static func readPayload() -> MusicNowPlayingPayload? {
-        guard let data = ProcessRunner.run(
-            path: executableURL.path,
-            args: ["-l", "JavaScript", "-e", script],
-            timeout: timeout
-        ) else {
-            return nil
-        }
-        guard !data.isEmpty, data.count <= maxOutputBytes else {
-            return nil
-        }
-
-        guard let decoded = try? JSONDecoder().decode(DecodedPayload.self, from: data) else {
-            return nil
-        }
-
-        return MusicNowPlayingPayload(
-            bundleIdentifier: decoded.bundleIdentifier,
-            displayName: decoded.displayName,
-            title: decoded.title,
-            artist: decoded.artist,
-            album: decoded.album,
-            artworkData: artworkData(from: decoded.artworkDataBase64),
-            artworkMimeType: decoded.artworkMimeType,
-            playbackStateValue: decoded.playbackStateValue,
-            playbackRate: decoded.playbackRate,
-            lyricCandidates: lyricCandidates(from: decoded.lyrics),
-            commandAvailability: nil
-        )
-    }
-
-    private static func artworkData(from base64: String?) -> Data? {
-        guard let base64,
-              !base64.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else {
-            return nil
-        }
-        return Data(base64Encoded: base64)
-    }
-
-    private static func lyricCandidates(from lyrics: String?) -> [MusicLyricCandidate] {
-        guard let lyrics,
-              !lyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else {
-            return []
-        }
-        return [
-            MusicLyricCandidate(text: lyrics, source: .mediaRemotePayload),
-        ]
-    }
-}
-
-private extension MusicNowPlayingPayload {
-    func withArtworkData(_ data: Data, mimeType: String?) -> MusicNowPlayingPayload {
-        MusicNowPlayingPayload(
-            bundleIdentifier: bundleIdentifier,
-            displayName: displayName,
-            title: title,
-            artist: artist,
-            album: album,
-            artworkData: data,
-            artworkMimeType: mimeType ?? artworkMimeType,
-            playbackStateValue: playbackStateValue,
-            playbackRate: playbackRate,
-            timestamp: timestamp,
-            lyricCandidates: lyricCandidates,
-            commandAvailability: commandAvailability
-        )
-    }
-}
-
-private actor QQMusicArtworkResolver {
-    private static let maxArtworkBytes = 2 * 1024 * 1024
-    private static let transientDestructor = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-    private static let databaseRelativePath = "Library/Containers/com.tencent.QQMusicMac/Data/Library/Application Support/QQMusicMac/qqmusic.sqlite"
-    private static let albumMidQuery = """
-        SELECT K_SONG_RESERVE9, album
-        FROM SONGS
-        WHERE K_SONG_RESERVE9 <> ''
-          AND name = ? COLLATE NOCASE
-          AND (? = '' OR singer = ? COLLATE NOCASE)
-        ORDER BY id DESC
-        LIMIT 25
-        """
-
-    private let session: URLSession
-    private var artworkCache: [String: Data] = [:]
-    private var albumMidCache: [AlbumLookupKey: String] = [:]
-    private var albumMidMissCache: [AlbumLookupKey: AlbumLookupMiss] = [:]
-    private var failedAlbumMids: Set<String> = []
-
-    init() {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 1.5
-        configuration.timeoutIntervalForResource = 2.5
-        session = URLSession(configuration: configuration)
-    }
-
-    func artworkData(for payload: MusicNowPlayingPayload) async -> Data? {
-        guard MusicAllowedPlayer.match(bundleIdentifier: payload.bundleIdentifier, displayName: payload.displayName) == .qqMusic,
-              let title = payload.title?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !title.isEmpty,
-              let albumMid = cachedAlbumMid(title: title, artist: payload.artist, album: payload.album),
-              !failedAlbumMids.contains(albumMid)
-        else {
-            return nil
-        }
-
-        if let cached = artworkCache[albumMid] {
-            return cached
-        }
-
-        for url in artworkURLs(albumMid: albumMid) {
-            if let data = await fetchArtwork(from: url) {
-                artworkCache[albumMid] = data
-                return data
-            }
-        }
-
-        failedAlbumMids.insert(albumMid)
-        return nil
-    }
-
-    private func cachedAlbumMid(title: String, artist: String?, album: String?) -> String? {
-        let key = AlbumLookupKey(title: title, artist: artist, album: album)
-        if let cached = albumMidCache[key] {
-            return cached
-        }
-
-        let databaseURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(Self.databaseRelativePath)
-        let databaseModificationDate = Self.databaseModificationDate(for: databaseURL)
-
-        if let miss = albumMidMissCache[key],
-           miss.databaseModificationDate == databaseModificationDate {
-            return nil
-        }
-
-        guard let resolved = albumMid(
-            title: title,
-            artist: artist,
-            album: album,
-            databaseURL: databaseURL
-        ) else {
-            albumMidMissCache[key] = AlbumLookupMiss(databaseModificationDate: databaseModificationDate)
-            return nil
-        }
-        albumMidMissCache[key] = nil
-        albumMidCache[key] = resolved
-        return resolved
-    }
-
-    private func albumMid(title: String, artist: String?, album: String?, databaseURL: URL) -> String? {
-        guard FileManager.default.fileExists(atPath: databaseURL.path) else {
-            return nil
-        }
-
-        var database: OpaquePointer?
-        guard sqlite3_open_v2(databaseURL.path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
-              let database
-        else {
-            return nil
-        }
-        defer { sqlite3_close(database) }
-
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(database, Self.albumMidQuery, -1, &statement, nil) == SQLITE_OK,
-              let statement
-        else {
-            return nil
-        }
-        defer { sqlite3_finalize(statement) }
-
-        let artistValue = artist?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        sqlite3_bind_text(statement, 1, title, -1, Self.transientDestructor)
-        sqlite3_bind_text(statement, 2, artistValue, -1, Self.transientDestructor)
-        sqlite3_bind_text(statement, 3, artistValue, -1, Self.transientDestructor)
-
-        let requestedAlbum = album?.trimmingCharacters(in: .whitespacesAndNewlines)
-        var firstAlbumMid: String?
-        var stepStatus = sqlite3_step(statement)
-        while stepStatus == SQLITE_ROW {
-            if let albumMidPointer = sqlite3_column_text(statement, 0) {
-                let candidateAlbumMid = String(cString: albumMidPointer)
-                if Self.isValidAlbumMid(candidateAlbumMid) {
-                    if firstAlbumMid == nil {
-                        firstAlbumMid = candidateAlbumMid
-                    }
-
-                    let storedAlbum = sqlite3_column_text(statement, 1).map { String(cString: $0) }
-                    if Self.albumMatches(requestedAlbum: requestedAlbum, storedAlbum: storedAlbum) {
-                        return candidateAlbumMid
-                    }
-                }
-            }
-            stepStatus = sqlite3_step(statement)
-        }
-
-        guard stepStatus == SQLITE_DONE else { return nil }
-        return firstAlbumMid
-    }
-
-    private static func databaseModificationDate(for url: URL) -> Date? {
-        (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]) as? Date
-    }
-
-    private func artworkURLs(albumMid: String) -> [URL] {
-        [
-            "https://y.qq.com/music/photo_new/T002R300x300M000\(albumMid).jpg?max_age=2592000",
-            "https://y.gtimg.cn/music/photo_new/T002R300x300M000\(albumMid).jpg?max_age=2592000",
-        ].compactMap(URL.init(string:))
-    }
-
-    private func fetchArtwork(from url: URL) async -> Data? {
-        do {
-            let (data, response) = try await session.data(from: url)
-            guard let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200,
-                  !data.isEmpty,
-                  data.count <= Self.maxArtworkBytes,
-                  NSImage(data: data) != nil
-            else {
-                return nil
-            }
-            return data
-        } catch {
-            return nil
-        }
-    }
-
-    private static func albumMatches(requestedAlbum: String?, storedAlbum: String?) -> Bool {
-        guard let requestedAlbum,
-              !requestedAlbum.isEmpty,
-              let storedAlbum,
-              !storedAlbum.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else {
-            return true
-        }
-
-        let requested = requestedAlbum.lowercased()
-        let stored = storedAlbum.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return requested == stored || requested.contains(stored) || stored.contains(requested)
-    }
-
-    private static func isValidAlbumMid(_ value: String) -> Bool {
-        value.range(of: #"^[A-Za-z0-9]{14}$"#, options: .regularExpression) != nil
-    }
-
-    private struct AlbumLookupKey: Hashable {
-        let title: String
-        let artist: String
-        let album: String
-
-        init(title: String, artist: String?, album: String?) {
-            self.title = title.trimmingCharacters(in: .whitespacesAndNewlines)
-            self.artist = artist?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            self.album = album?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        }
-    }
-
-    private struct AlbumLookupMiss: Equatable {
-        let databaseModificationDate: Date?
-    }
-}
-
 private struct MediaRemoteNowPlayingKeys {
     let title: String
     let artist: String
@@ -1009,6 +636,8 @@ private struct MediaRemoteNowPlayingKeys {
     let playbackRate: String
     let timestamp: String
     let lyrics: String?
+    let elapsedTime: String
+    let duration: String
 
     init(handle: UnsafeMutableRawPointer) {
         title = Self.constant("kMRMediaRemoteNowPlayingInfoTitle", handle: handle)
@@ -1019,6 +648,8 @@ private struct MediaRemoteNowPlayingKeys {
         playbackRate = Self.constant("kMRMediaRemoteNowPlayingInfoPlaybackRate", handle: handle)
         timestamp = Self.constant("kMRMediaRemoteNowPlayingInfoTimestamp", handle: handle)
         lyrics = Self.optionalConstant("kMRMediaRemoteNowPlayingInfoLyrics", handle: handle)
+        elapsedTime = Self.constant("kMRMediaRemoteNowPlayingInfoElapsedTime", handle: handle)
+        duration = Self.constant("kMRMediaRemoteNowPlayingInfoDuration", handle: handle)
     }
 
     private static func constant(_ symbol: String, handle: UnsafeMutableRawPointer) -> String {

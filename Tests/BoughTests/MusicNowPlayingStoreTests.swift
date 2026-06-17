@@ -359,6 +359,89 @@ final class MusicNowPlayingStoreTests: XCTestCase {
         XCTAssertNil(store.settingsAbnormalMessage)
     }
 
+    func testSeekAppliesOptimisticPositionThenSchedulesRefresh() async {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        let captured = Date(timeIntervalSince1970: 100)
+        service.readResults = [.success(makeSeekSnapshot(
+            position: MusicPlaybackPosition(elapsed: 10, duration: 60, rate: 1, capturedAt: captured)
+        ))]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler)
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+
+        await store.seek(to: 45)
+
+        XCTAssertEqual(service.seekTargets, [45])
+        XCTAssertEqual(store.snapshot?.position?.elapsed, 45)
+    }
+
+    func testSeekFailureRollsBackOptimisticPositionAndRaisesSoftFailure() async {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        let captured = Date(timeIntervalSince1970: 100)
+        service.readResults = [.success(makeSeekSnapshot(
+            position: MusicPlaybackPosition(elapsed: 10, duration: 60, rate: 1, capturedAt: captured)
+        ))]
+        service.seekError = MusicNowPlayingServiceError.commandUnavailable
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler)
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+
+        await store.seek(to: 45)
+
+        XCTAssertEqual(store.settingsAbnormalMessage, "Music command unavailable")
+        XCTAssertEqual(store.snapshot?.position?.elapsed, 10)
+    }
+
+    private func makeSeekSnapshot(position: MusicPlaybackPosition?) -> MusicNowPlayingSnapshot {
+        MusicNowPlayingSnapshot(
+            player: MusicPlayerIdentity(bundleIdentifier: "com.apple.Music", displayName: "Music"),
+            track: MusicTrackSnapshot(title: "Song", artist: "A", album: nil, lyricLine: nil, artwork: nil),
+            playbackState: .playing,
+            commands: MusicCommandAvailability(canPlayPause: true, canSkipPrevious: true, canSkipNext: true),
+            capturedAt: position?.capturedAt ?? Date(),
+            position: position
+        )
+    }
+
+    func testStaleRefreshResultIsDiscardedByNewerGeneration() async {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = GatedFakeService(results: [makeStoreSnapshot(title: "stale"), makeStoreSnapshot(title: "fresh")])
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler)
+        store.setPresentationNeeded(true)
+
+        async let firstRefresh: Void = store.refreshNow()   // gen1，挂起在 firstGate
+        await service.waitForFirstRead()
+
+        await store.refreshNow()                              // gen2，立即返回 fresh 并 apply
+        XCTAssertEqual(store.snapshot?.track?.title, "fresh")
+
+        service.releaseFirstRead()                            // gen1 现在返回 stale
+        await firstRefresh
+        XCTAssertEqual(store.snapshot?.track?.title, "fresh", "过期的 gen1 结果不得覆盖 fresh")
+    }
+
+    func testEveryOptimisticCommandTransitionPublishes() async {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        service.readResults = [.success(makeStoreSnapshot(title: "T", playbackState: .playing))]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler)
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+
+        let recorder = NotificationRecorder()
+        let token = NotificationCenter.default.addObserver(forName: MusicNowPlayingStore.didChangeNotification, object: store, queue: nil) { recorder.record($0) }
+        defer { NotificationCenter.default.removeObserver(token) }
+
+        let before = store.publishRevision
+        await store.send(.playPause)
+        await store.send(.playPause)
+
+        XCTAssertGreaterThanOrEqual(store.publishRevision - before, 2)
+        XCTAssertGreaterThanOrEqual(recorder.count, 2)
+    }
+
     func testSettingsSourceShowsOnlyAbnormalMusicMessage() throws {
         let source = try sourceFile("Sources/Bough/SettingsView.swift")
         let page = try XCTUnwrap(source.slice(from: "private struct MusicPage: View", to: "// MARK: - Session Display Page"))
@@ -467,6 +550,13 @@ private final class FakeMusicNowPlayingService: MusicNowPlayingServicing {
             throw commandError
         }
     }
+
+    private(set) var seekTargets: [TimeInterval] = []
+    var seekError: Error?
+    func seek(to seconds: TimeInterval) async throws {
+        if let seekError { throw seekError }
+        seekTargets.append(seconds)
+    }
 }
 
 private final class NotificationRecorder: @unchecked Sendable {
@@ -501,5 +591,103 @@ private extension String {
             return nil
         }
         return String(self[lower..<upper])
+    }
+}
+
+// MARK: - GatedFakeService for concurrency tests
+
+private final class GatedFakeService: MusicNowPlayingServicing {
+    var pollingLikelyUseful = true
+    private var results: [MusicNowPlayingSnapshot?]
+    private var index = 0
+    private var readStarted: CheckedContinuation<Void, Never>?
+    private var firstGate: CheckedContinuation<Void, Never>?
+
+    init(results: [MusicNowPlayingSnapshot?]) { self.results = results }
+
+    var isNowPlayingPollingLikelyUseful: Bool { pollingLikelyUseful }
+    func setPollingAvailabilityDidChangeHandler(_ handler: (@MainActor () -> Void)?) {}
+    func send(_ command: MusicCommand) async throws {}
+    func seek(to seconds: TimeInterval) async throws {}
+    func currentSnapshot() async throws -> MusicNowPlayingSnapshot? { try await currentSnapshot(bypassingScriptBackoff: false) }
+    func currentSnapshot(bypassingScriptBackoff: Bool) async throws -> MusicNowPlayingSnapshot? {
+        let i = index; index += 1
+        if i == 0 {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                firstGate = cont
+                readStarted?.resume(); readStarted = nil
+            }
+        }
+        return results[min(i, results.count - 1)]
+    }
+    func waitForFirstRead() async { await withCheckedContinuation { readStarted = $0 } }
+    func releaseFirstRead() { firstGate?.resume(); firstGate = nil }
+}
+
+extension MusicNowPlayingStoreTests {
+    fileprivate func makeStoreSnapshot(title: String, playbackState: MusicPlaybackState = .playing) -> MusicNowPlayingSnapshot {
+        MusicNowPlayingSnapshot(
+            player: MusicPlayerIdentity(bundleIdentifier: "com.apple.Music", displayName: "Music"),
+            track: MusicTrackSnapshot(title: title, artist: "A", album: nil, lyricLine: nil, artwork: nil),
+            playbackState: playbackState,
+            commands: MusicCommandAvailability(canPlayPause: true, canSkipPrevious: true, canSkipNext: true),
+            capturedAt: Date()
+        )
+    }
+}
+
+// MARK: - FakeOnlineProvider
+
+private final class FakeOnlineProvider: MusicOnlineDataProviding, @unchecked Sendable {
+    var lyrics: MusicTimedLyrics?
+    var artwork: Data?
+    func timedLyrics(for key: MusicTrackMatchKey, durationHint: TimeInterval?) async -> MusicTimedLyrics? { lyrics }
+    func artworkData(for key: MusicTrackMatchKey, player: MusicAllowedPlayer?, rawTitle: String?, rawArtist: String?, rawAlbum: String?, durationHint: TimeInterval?) async -> Data? { artwork }
+}
+
+// MARK: - Online data tests
+
+extension MusicNowPlayingStoreTests {
+    func testOnlineLyricsAreFetchedAndPublishedWhenSnapshotLacksLyrics() async {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        let provider = FakeOnlineProvider()
+        provider.lyrics = MusicTimedLyrics.parsingLRC("[00:01]online")
+        service.readResults = [.success(makeStoreSnapshot(title: "Song"))]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler, onlineProvider: provider)
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+        await store.onlineFetchTaskForTesting?.value
+        XCTAssertEqual(store.onlineLyrics?.currentLine(at: 2), "online")
+    }
+
+    func testOnlineDataClearsWhenTrackChanges() async {
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        let provider = FakeOnlineProvider()
+        provider.lyrics = MusicTimedLyrics.parsingLRC("[00:01]online")
+        service.readResults = [.success(makeStoreSnapshot(title: "Song A")), .success(makeStoreSnapshot(title: "Song B"))]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler, onlineProvider: provider)
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+        await store.onlineFetchTaskForTesting?.value
+        XCTAssertNotNil(store.onlineLyrics)
+        provider.lyrics = nil
+        await store.refreshNow()
+        XCTAssertNil(store.onlineLyrics, "换曲必须立即清空在线歌词")
+    }
+
+    func testOnlineArtworkFetchedIntoDedicatedField() async {
+        let pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        let scheduler = RecordingMusicPollingScheduler()
+        let service = FakeMusicNowPlayingService()
+        let provider = FakeOnlineProvider()
+        provider.artwork = Data(base64Encoded: pngBase64)!
+        service.readResults = [.success(makeStoreSnapshot(title: "Song"))]
+        let store = MusicNowPlayingStore(defaults: defaults, service: service, scheduler: scheduler, onlineProvider: provider)
+        store.setPresentationNeeded(true)
+        await store.refreshNow()
+        await store.onlineFetchTaskForTesting?.value
+        XCTAssertNotNil(store.onlineArtwork, "在线封面应进入独立的 onlineArtwork 字段")
     }
 }

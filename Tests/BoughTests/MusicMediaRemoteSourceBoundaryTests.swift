@@ -7,6 +7,7 @@ final class MusicMediaRemoteSourceBoundaryTests: XCTestCase {
         let repoRoot = TestHelpers.repoRoot(from: #filePath)
         let allowedFiles: Set<String> = [
             "Sources/Bough/Music/MediaRemoteNowPlayingService.swift",
+            "Sources/Bough/Music/OSAScriptNowPlayingPayloadReader.swift",
         ]
         let forbiddenTokens = ["MediaRemote", "MRMediaRemote", "dlopen", "dlsym"]
 
@@ -61,7 +62,8 @@ final class MusicMediaRemoteSourceBoundaryTests: XCTestCase {
 
         XCTAssertTrue(appState.contains("var musicStore = MusicNowPlayingStore.live()"))
         XCTAssertTrue(adapter.contains("static func live() -> MusicNowPlayingStore"))
-        XCTAssertTrue(adapter.contains("MusicNowPlayingStore(service: MediaRemoteNowPlayingService())"))
+        XCTAssertTrue(adapter.contains("service: MediaRemoteNowPlayingService()"))
+        XCTAssertTrue(adapter.contains("onlineProvider: MusicOnlineDataProvider()"))
     }
 
     func testAdapterDoesNotCallUnsafeMediaRemoteDisplayNameABI() throws {
@@ -89,14 +91,26 @@ final class MusicMediaRemoteSourceBoundaryTests: XCTestCase {
 
     func testAdapterFallsBackThroughOSAScriptWhenBundledProcessIsDeniedMetadata() throws {
         let repoRoot = TestHelpers.repoRoot(from: #filePath)
-        let adapter = try String(contentsOf: repoRoot.appendingPathComponent("Sources/Bough/Music/MediaRemoteNowPlayingService.swift"), encoding: .utf8)
+        let adapter = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/Bough/Music/MediaRemoteNowPlayingService.swift"),
+            encoding: .utf8
+        )
+        let reader = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/Bough/Music/OSAScriptNowPlayingPayloadReader.swift"),
+            encoding: .utf8
+        )
+
+        let qqLibrary = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/Bough/Music/QQMusicLocalLibrary.swift"),
+            encoding: .utf8
+        )
 
         XCTAssertTrue(adapter.contains("OSAScriptNowPlayingPayloadReader"))
-        XCTAssertTrue(adapter.contains("URL(fileURLWithPath: \"/usr/bin/osascript\")"))
-        XCTAssertTrue(adapter.contains("JSONDecoder().decode(DecodedPayload.self"))
-        XCTAssertTrue(adapter.contains("playbackStateValue: numberFromValue(unwrap(request.localPlaybackState))"))
-        XCTAssertTrue(adapter.contains("QQMusicArtworkResolver"))
-        XCTAssertTrue(adapter.contains("albumMidCache"))
+        XCTAssertTrue(reader.contains("URL(fileURLWithPath: \"/usr/bin/osascript\")"))
+        XCTAssertTrue(reader.contains("JSONDecoder().decode(DecodedPayload.self"))
+        XCTAssertTrue(reader.contains("playbackStateValue: numberFromValue(unwrap(request.localPlaybackState))"))
+        XCTAssertTrue(qqLibrary.contains("actor QQMusicLocalLibrary"))
+        XCTAssertTrue(qqLibrary.contains("albumMidCache"))
         XCTAssertFalse(adapter.contains("prefersScriptPayload"))
 
         let nativeRange = try XCTUnwrap(adapter.range(of: "if let requestPayload = currentRequestPayload(playbackState: playbackState)"))
@@ -144,6 +158,18 @@ final class MusicMediaRemoteSourceBoundaryTests: XCTestCase {
             for token in forbidden {
                 XCTAssertFalse(source.contains(token), "\(token) in \(relativePath)")
             }
+        }
+    }
+
+    func testMusicNetworkAccessIsConfinedToOnlineDataProvider() throws {
+        let repoRoot = TestHelpers.repoRoot(from: #filePath)
+        let allowedFile = "Sources/Bough/Music/MusicOnlineDataProvider.swift"
+        let networkTokens = ["URLSession", "URLRequest", "dataTask"]
+        for path in try swiftFiles(under: repoRoot.appendingPathComponent("Sources/Bough/Music")) {
+            let relativePath = path.path.replacingOccurrences(of: repoRoot.path + "/", with: "")
+            let source = try String(contentsOf: path, encoding: .utf8)
+            guard networkTokens.contains(where: source.contains) else { continue }
+            XCTAssertEqual(relativePath, allowedFile, "Unexpected network token in \(relativePath)")
         }
     }
 

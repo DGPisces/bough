@@ -188,6 +188,73 @@ final class MusicStripTests: XCTestCase {
         XCTAssertTrue(control.contains("if reduceMotion"))
     }
 
+    func testModelDisplaysTimedLyricLineForCurrentPosition() {
+        let captured = Date(timeIntervalSince1970: 100)
+        let snapshot = makeStripSnapshot(position: MusicPlaybackPosition(elapsed: 15, duration: 60, rate: 1, capturedAt: captured))
+        let lyrics = MusicTimedLyrics.parsingLRC("[00:10]ten\n[00:20]twenty")
+        let model = MusicStripModel(snapshot: snapshot, timedLyrics: lyrics)!
+        XCTAssertEqual(model.displayedLyricLine(at: captured), "ten")
+        XCTAssertEqual(model.displayedLyricLine(at: captured.addingTimeInterval(5)), "twenty")
+    }
+
+    func testModelFallsBackToStaticLyricLineWithoutTimedLyrics() {
+        let snapshot = makeStripSnapshot(lyricLine: "static line")
+        let model = MusicStripModel(snapshot: snapshot)!
+        XCTAssertEqual(model.displayedLyricLine(at: Date()), "static line")
+    }
+
+    func testModelProgressFractionClampsToUnitRange() {
+        let captured = Date(timeIntervalSince1970: 100)
+        let snapshot = makeStripSnapshot(position: MusicPlaybackPosition(elapsed: 30, duration: 60, rate: 1, capturedAt: captured))
+        let model = MusicStripModel(snapshot: snapshot)!
+        XCTAssertEqual(model.progressFraction(at: captured)!, 0.5, accuracy: 0.001)
+        XCTAssertEqual(model.progressFraction(at: captured.addingTimeInterval(120))!, 1.0, accuracy: 0.001)
+    }
+
+    func testModelProgressFractionNilWithoutDuration() {
+        let snapshot = makeStripSnapshot(position: nil)
+        let model = MusicStripModel(snapshot: snapshot)!
+        XCTAssertNil(model.progressFraction(at: Date()))
+    }
+
+    func testLocalArtworkAndLyricsTakePriorityOverOnline() {
+        let pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        let localArtwork = MusicArtworkSnapshot(data: Data(base64Encoded: pngBase64)!, mimeType: nil)
+        let onlineArtwork = MusicArtworkSnapshot(data: Data([0x01, 0x02]), mimeType: nil)
+        let onlineLyrics = MusicTimedLyrics.parsingLRC("[00:01.00]online lyric")
+
+        let snapshot = MusicNowPlayingSnapshot(
+            player: MusicPlayerIdentity(bundleIdentifier: "com.apple.Music", displayName: "Music"),
+            track: MusicTrackSnapshot(title: "Song", artist: "Artist", album: nil, lyricLine: "local lyric", artwork: localArtwork),
+            playbackState: .playing,
+            commands: MusicCommandAvailability(canPlayPause: true, canSkipPrevious: true, canSkipNext: true),
+            capturedAt: Date()
+        )
+        let model = MusicStripModel(snapshot: snapshot, timedLyrics: onlineLyrics, onlineArtwork: onlineArtwork)!
+
+        XCTAssertEqual(model.artwork, localArtwork, "本地 artwork 应优先于在线 artwork")
+        XCTAssertEqual(model.displayedLyricLine(at: Date()), "local lyric", "本地 lyricLine 应优先于 timedLyrics")
+    }
+
+    func testModelUsesOnlineArtworkWhenLocalMissing() {
+        let pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        let online = MusicArtworkSnapshot(data: Data(base64Encoded: pngBase64)!, mimeType: nil)
+        let snapshot = makeStripSnapshot(lyricLine: "x")   // 本地无 artwork
+        let model = MusicStripModel(snapshot: snapshot, onlineArtwork: online)!
+        XCTAssertEqual(model.artwork, online)
+    }
+
+    private func makeStripSnapshot(lyricLine: String? = nil, position: MusicPlaybackPosition? = nil) -> MusicNowPlayingSnapshot {
+        MusicNowPlayingSnapshot(
+            player: MusicPlayerIdentity(bundleIdentifier: "com.apple.Music", displayName: "Music"),
+            track: MusicTrackSnapshot(title: "Song", artist: "Artist", album: nil, lyricLine: lyricLine, artwork: nil),
+            playbackState: .playing,
+            commands: MusicCommandAvailability(canPlayPause: true, canSkipPrevious: true, canSkipNext: true),
+            capturedAt: position?.capturedAt ?? Date(),
+            position: position
+        )
+    }
+
     private static func snapshot(
         title: String? = "Track",
         artist: String? = "Artist",

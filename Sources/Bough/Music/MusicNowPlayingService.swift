@@ -6,6 +6,7 @@ protocol MusicNowPlayingServicing: AnyObject {
     func currentSnapshot(bypassingScriptBackoff: Bool) async throws -> MusicNowPlayingSnapshot?
     func setPollingAvailabilityDidChangeHandler(_ handler: (@MainActor () -> Void)?)
     func send(_ command: MusicCommand) async throws
+    func seek(to seconds: TimeInterval) async throws
 }
 
 extension MusicNowPlayingServicing {
@@ -18,6 +19,10 @@ extension MusicNowPlayingServicing {
     }
 
     func setPollingAvailabilityDidChangeHandler(_: (@MainActor () -> Void)?) {}
+
+    func seek(to _: TimeInterval) async throws {
+        throw MusicNowPlayingServiceError.commandUnavailable
+    }
 }
 
 final class NoopMusicNowPlayingService: MusicNowPlayingServicing {
