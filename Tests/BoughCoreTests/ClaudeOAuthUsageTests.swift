@@ -151,6 +151,30 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         XCTAssertNil(ClaudeOAuthUsageMapper.statusLinePayloadData(fromOAuthBody: body))
     }
 
+    func testParserAcceptsFractionalSecondResetTimestamps() throws {
+        // The live /api/oauth/usage returns resets_at with microsecond
+        // fractional seconds, e.g. "2026-06-17T13:10:00.533198+00:00". A default
+        // ISO8601 formatter rejects those, which dropped the reset time, failed
+        // the window, and surfaced as "Claude Code parse-failure".
+        let oauthBody = """
+        {"five_hour":{"utilization":3.0,"resets_at":"2026-06-17T13:10:00.533198+00:00"},
+         "seven_day":{"utilization":4.0,"resets_at":"2026-06-21T03:00:00.533221+00:00"}}
+        """.data(using: .utf8)!
+        let payload = try XCTUnwrap(ClaudeOAuthUsageMapper.statusLinePayloadData(fromOAuthBody: oauthBody))
+        let snapshot = try XCTUnwrap(ClaudeCodeRateLimitParser.parse(
+            data: payload, receivedAt: Date(timeIntervalSince1970: 1_000)))
+        guard case .available(let fiveHour) = snapshot.fiveHour,
+              case .available(let weekly) = snapshot.weekly else {
+            return XCTFail("expected both windows available")
+        }
+        XCTAssertEqual(fiveHour.usedPercent, 3.0, accuracy: 0.001)
+        XCTAssertEqual(weekly.usedPercent, 4.0, accuracy: 0.001)
+        let frac = ISO8601DateFormatter()
+        frac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        XCTAssertEqual(fiveHour.resetsAt, frac.date(from: "2026-06-17T13:10:00.533198+00:00"))
+        XCTAssertEqual(weekly.resetsAt, frac.date(from: "2026-06-21T03:00:00.533221+00:00"))
+    }
+
     // MARK: 客户端状态机
 
     private func makeClient(
