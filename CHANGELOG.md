@@ -4,6 +4,8 @@ All notable changes to Bough are documented here.
 
 ## [Unreleased]
 
+## [v1.1.0] - 2026-07-01
+
 ### English
 
 OAuth usage channels: direct API reads for Claude Code and Codex, statusLine retirement, and pace forecasting.
@@ -19,6 +21,10 @@ OAuth usage channels: direct API reads for Claude Code and Codex, statusLine ret
 - First Claude usage fetch may show a one-time macOS Keychain prompt for "Claude Code-credentials" — choose "Always Allow". Denying falls back to an explanatory unavailable state; everything else keeps working.
 - With the background monitor enabled, Bough mirrors the Claude access token (never the refresh token) to `~/.bough/claude-oauth-credentials.json` (0600) so sampling continues while the app is closed; the file is deleted when the monitor is disabled or uninstalled.
 
+**Usage — Fixed:**
+
+- Claude Code usage no longer fails with "Claude Code parse-failure": reset timestamps the OAuth usage API returns with fractional seconds are now parsed correctly, so 5-hour and weekly windows populate again (the background monitor, which shares the parser, recovers too).
+
 Music strip: synced lyrics, a seekable progress bar, and online metadata backfill.
 
 **Music — Added:**
@@ -29,6 +35,10 @@ Music strip: synced lyrics, a seekable progress bar, and online metadata backfil
 **Music — Fixed:**
 
 - Player-identity race during rapid app switching; cross-source metadata mixing in the script fallback; QQ artwork negative-cache now retries after a TTL instead of relying on mtime alone; the OSAScript backoff is now a single state machine; stale poll results are no longer published (generation token); localized player display names now match correctly.
+
+**Interface — Fixed:**
+
+- The no-session notch indicator now morphs to the Bough brand icon and gives haptic feedback when it expands, matching the active bar (it previously showed a coding-agent mascot and skipped the haptic). Internally, the three notch compact bars were unified into one, with no other visual or animation changes.
 
 ### 简体中文
 
@@ -45,6 +55,10 @@ OAuth 用量通道：直接读取 Claude Code 和 Codex 的 API、退役 statusL
 - 首次获取 Claude 用量时，可能会出现一次性的 macOS Keychain 提示，请求访问"Claude Code-credentials"——请选择"始终允许"。拒绝后会回退到说明性的不可用状态，其他功能不受影响。
 - 启用后台监控后，Bough 会将 Claude access token（不包括 refresh token）镜像到 `~/.bough/claude-oauth-credentials.json`（权限 0600），以便应用关闭时仍能持续采样；禁用监控或卸载应用时，该文件会被删除。
 
+**用量 — 修复：**
+
+- Claude Code 用量不再出现"解析失败"：OAuth 用量 API 返回的带小数秒的重置时间戳现在能正确解析，5 小时与每周窗口重新正常显示（共用同一解析器的后台监控也随之恢复）。
+
 音乐条：同步歌词、可拖动进度条与在线元数据补全。
 
 **音乐 — 新增：**
@@ -55,6 +69,10 @@ OAuth 用量通道：直接读取 Claude Code 和 Codex 的 API、退役 statusL
 **音乐 — 修复：**
 
 - 快速切换播放器时的身份竞态；脚本兜底的跨源元数据混淆；QQ 封面负缓存改为 TTL 重试而非仅依赖 mtime；OSAScript 退避合并为单一状态机；过期轮询结果不再发布（generation token）；本地化播放器显示名现在能正确匹配。
+
+**界面 — 修复：**
+
+- 无会话时的刘海指示器现在会在展开时变为 Bough 品牌图标并触发触控板震动，与活跃状态栏一致（此前显示的是编程助手 mascot 且没有震动）。内部将三套刘海紧凑栏合并为一套，无其它视觉或动画变化。
 
 ## [v1.0.6] - 2026-06-10
 
