@@ -167,7 +167,7 @@ struct NotchPanelView: View {
     }
 
     private var expandedContentTransition: AnyTransition {
-        .blurFade.combined(with: .move(edge: .top))
+        reduceMotion ? .opacity : .expandedContent
     }
 
     var body: some View {
@@ -197,6 +197,7 @@ struct NotchPanelView: View {
                         .stroke(.white.opacity(0.15), style: StrokeStyle(lineWidth: 0.5, dash: [4, 3]))
                         .frame(height: 0.5)
                         .padding(.horizontal, 12)
+                        .transition(expandedContentTransition)
 
                     if case .airDrop = appState.surface {
                         AirDropPanelView(appState: appState)
@@ -615,6 +616,7 @@ private struct CompactBar: View {
                 appState: appState,
                 expanded: expanded,
                 mascotSize: mascotSize,
+                mascotExpandedSize: min(36, notchHeight),
                 hasNotch: hasNotch,
                 showToolStatus: showToolStatus,
                 compactActivitySource: compactActivitySource,
@@ -651,7 +653,7 @@ private struct CompactBar: View {
                     source: settingsDefaultSource,
                     status: .idle,
                     compactSize: mascotSize,
-                    expandedSize: 36,
+                    expandedSize: min(36, notchHeight),
                     phase: mascotHandoffPhase
                 )
             }
@@ -705,6 +707,9 @@ private struct CompactLeftWing: View {
     var appState: AppState
     let expanded: Bool
     let mascotSize: CGFloat
+    /// Brand-mascot size at phase 1 — capped at notchHeight so the expanded
+    /// brand isn't flat-topped by the panel-level .clipped() on notch screens.
+    let mascotExpandedSize: CGFloat
     let hasNotch: Bool
     let showToolStatus: Bool
     let compactActivitySource: MusicPanelActivitySource?
@@ -747,34 +752,41 @@ private struct CompactLeftWing: View {
             } else {
                 aiMascotView
 
-                if expanded, !isShowingAirDrop {
-                    if appState.sessions.count > 1 {
-                        HStack(spacing: 1) {
-                            ForEach([("status", "STA"), ("cli", "CLI")], id: \.0) { tag, label in
-                                let selected = SessionGroupingMode.normalized(groupingMode) == tag
-                                Button {
-                                    withAnimation(.easeInOut(duration: 0.15)) { groupingMode = tag }
-                                } label: {
-                                    PixelText(
-                                        text: label,
-                                        color: selected ? Color(red: 0.3, green: 0.85, blue: 0.4) : .white.opacity(0.3),
-                                        pixelSize: 1.3
-                                    )
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 4)
-                                    .background(
-                                        Rectangle().fill(selected ? .white.opacity(0.1) : .clear)
-                                    )
+                // ZStack overlap: mirrors CompactRightWing — a plain if/else
+                // lets both branches occupy HStack slots side by side during
+                // the expand spring, shifting neighbors at settle.
+                ZStack(alignment: .leading) {
+                    if expanded, !isShowingAirDrop {
+                        if appState.sessions.count > 1 {
+                            HStack(spacing: 1) {
+                                ForEach([("status", "STA"), ("cli", "CLI")], id: \.0) { tag, label in
+                                    let selected = SessionGroupingMode.normalized(groupingMode) == tag
+                                    Button {
+                                        withAnimation(.easeInOut(duration: 0.15)) { groupingMode = tag }
+                                    } label: {
+                                        PixelText(
+                                            text: label,
+                                            color: selected ? Color(red: 0.3, green: 0.85, blue: 0.4) : .white.opacity(0.3),
+                                            pixelSize: 1.3
+                                        )
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 4)
+                                        .background(
+                                            Rectangle().fill(selected ? .white.opacity(0.1) : .clear)
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
                                 }
-                                .buttonStyle(.plain)
                             }
+                            .background(Rectangle().fill(.white.opacity(0.05)))
+                            .overlay(Rectangle().stroke(.white.opacity(0.1), lineWidth: 1))
+                            .transition(.opacity.animation(NotchAnimation.micro))
                         }
-                        .background(Rectangle().fill(.white.opacity(0.05)))
-                        .overlay(Rectangle().stroke(.white.opacity(0.1), lineWidth: 1))
-                    }
-                } else {
-                    if hasNotch, showToolStatus {
-                        CompactToolActivityDot(tool: shownTool)
+                    } else {
+                        if hasNotch, showToolStatus {
+                            CompactToolActivityDot(tool: shownTool)
+                                .transition(.opacity.animation(NotchAnimation.micro))
+                        }
                     }
                 }
             }
@@ -813,7 +825,7 @@ private struct CompactLeftWing: View {
             source: displaySource,
             status: displayStatus,
             compactSize: mascotSize,
-            expandedSize: 36,
+            expandedSize: mascotExpandedSize,
             phase: mascotHandoffPhase
         )
         .matchedGeometryEffect(
@@ -833,20 +845,41 @@ private enum AIMascotTransitionID {
 private enum AIMascotHandoff {
     static let travelAnimation = NotchAnimation.open
 
+    /// Sequential fade windows around the midpoint: traveling mascot out,
+    /// brief dark gap (<1 frame at spring midpoint speed), brand in. The
+    /// windows must not overlap — a full-range crossfade double-exposes the
+    /// sprites ("muddy", reverted once already). The former step functions at
+    /// exactly 0.5 swapped sprite AND container size in a single mid-spring
+    /// frame, which read as a flicker on every expand.
+    static let travelingFadeWindow = (start: 0.38, end: 0.50)
+    static let brandFadeWindow = (start: 0.55, end: 0.72)
+
     static func animation(expanded _: Bool) -> Animation {
         travelAnimation
     }
 
+    /// Container size follows phase continuously so the wing layout never
+    /// jumps. Only the ZStack frame animates — the sprites keep fixed native
+    /// sizes (an animated size fed into SpriteMascotView would re-rasterize
+    /// the frame cache every frame, and .scaleEffect on pixel art shimmers —
+    /// both variants were tried and reverted).
     static func size(forPhase phase: Double, compactSize: CGFloat, expandedSize: CGFloat) -> CGFloat {
-        clampedPhase(phase) < 0.5 ? compactSize : expandedSize
+        let progress = clampedPhase(phase)
+        return compactSize + (expandedSize - compactSize) * CGFloat(progress)
     }
 
     static func travelingOpacity(forPhase phase: Double) -> Double {
-        clampedPhase(phase) < 0.5 ? 1 : 0
+        1 - fadeProgress(clampedPhase(phase), window: travelingFadeWindow)
     }
 
     static func brandOpacity(forPhase phase: Double) -> Double {
-        clampedPhase(phase) >= 0.5 ? 1 : 0
+        fadeProgress(clampedPhase(phase), window: brandFadeWindow)
+    }
+
+    private static func fadeProgress(_ phase: Double, window: (start: Double, end: Double)) -> Double {
+        guard phase > window.start else { return 0 }
+        guard phase < window.end else { return 1 }
+        return (phase - window.start) / (window.end - window.start)
     }
 
     private static func clampedPhase(_ phase: Double) -> Double {
@@ -905,44 +938,56 @@ private struct CompactRightWing: View {
     }
 
     var body: some View {
-        HStack(spacing: 6) {
+        // ZStack overlap: with a plain if/else the outgoing and incoming
+        // branches coexist SIDE BY SIDE in the trailing HStack during the
+        // expand spring, then the old branch is removed un-animated at the
+        // end — the action buttons visibly teleported ~40px at settle.
+        ZStack(alignment: .trailing) {
             if expanded {
                 NotchActionButtons(includeSound: true, spacing: 6)
+                    .transition(.opacity.animation(NotchAnimation.micro))
             } else {
-                if compactActivitySource == .music {
-                    CompactMusicPlayPauseControl(
-                        appState: appState,
-                        musicArtworkNamespace: musicArtworkNamespace,
-                        onHoverChanged: onMusicControlHoverChanged
-                    )
-                } else {
-                    // Pending approval/question badge
-                    if appState.status == .waitingApproval || appState.status == .waitingQuestion {
-                        Image(systemName: "bell.fill")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(Color(red: 1.0, green: 0.7, blue: 0.28))
-                            .symbolEffect(.pulse, options: .repeating)
-                    }
-
-                    if showToolStatus {
-                        // Detailed mode: session count (project name is shown in center on non-notch)
-                        SessionCountLabel(
-                            active: appState.activeSessionCount,
-                            total: appState.totalSessionCount,
-                            font: .system(size: 12, weight: .semibold, design: .monospaced)
-                        )
-                    } else {
-                        // Simple mode: original session count only
-                        SessionCountLabel(
-                            active: appState.activeSessionCount,
-                            total: appState.totalSessionCount,
-                            font: .system(size: 13, weight: .bold, design: .monospaced)
-                        )
-                    }
-                }
+                collapsedContent
+                    .transition(.opacity.animation(NotchAnimation.micro))
             }
         }
         .padding(.trailing, 6)
+    }
+
+    @ViewBuilder private var collapsedContent: some View {
+        HStack(spacing: 6) {
+            if compactActivitySource == .music {
+                CompactMusicPlayPauseControl(
+                    appState: appState,
+                    musicArtworkNamespace: musicArtworkNamespace,
+                    onHoverChanged: onMusicControlHoverChanged
+                )
+            } else {
+                // Pending approval/question badge
+                if appState.status == .waitingApproval || appState.status == .waitingQuestion {
+                    Image(systemName: "bell.fill")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Color(red: 1.0, green: 0.7, blue: 0.28))
+                        .symbolEffect(.pulse, options: .repeating)
+                }
+
+                if showToolStatus {
+                    // Detailed mode: session count (project name is shown in center on non-notch)
+                    SessionCountLabel(
+                        active: appState.activeSessionCount,
+                        total: appState.totalSessionCount,
+                        font: .system(size: 12, weight: .semibold, design: .monospaced)
+                    )
+                } else {
+                    // Simple mode: original session count only
+                    SessionCountLabel(
+                        active: appState.activeSessionCount,
+                        total: appState.totalSessionCount,
+                        font: .system(size: 13, weight: .bold, design: .monospaced)
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -2269,7 +2314,7 @@ private struct SessionListView: View {
             }
 
             if usageStripLayout.sessionContentPlacement == .scrollable {
-                ThinScrollView(maxHeight: scrollMaxHeight) {
+                SessionScrollView(maxHeight: scrollMaxHeight) {
                     sessionContent
                 }
                 .clipShape(
@@ -2286,80 +2331,29 @@ private struct SessionListView: View {
     }
 }
 
-/// Thin overlay scrollbar via NSScrollView — ignores system "show scrollbar" preference.
-/// NSScrollView exposes no intrinsic height to SwiftUI, so inside the panel's fixedSize
-/// layout it would collapse to zero and hide every session; size it to the measured
-/// document height instead, capped at maxHeight.
-private struct ThinScrollView<Content: View>: View {
+/// Pure-SwiftUI scroll container for the session list, sized to the measured
+/// content height and capped at maxHeight. Replaces the former
+/// NSScrollView-backed ThinScrollView: inserting an NSScrollView with a nested
+/// NSHostingView mid-expand made the ENTIRE panel window render blank for 1-2
+/// frames on macOS 26 — the visible "island vanishes, then pops expanded"
+/// flicker (verified by frame-by-frame screen capture; the blank disappears
+/// with this container). Scroll indicators are hidden to match the previous
+/// thin-overlay look.
+private struct SessionScrollView<Content: View>: View {
     let maxHeight: CGFloat
     @ViewBuilder let content: Content
-    /// Starts large so the first frame opens at maxHeight — content stays visible
-    /// (and the failure mode stays safe) until the first measurement lands.
-    @State private var contentHeight: CGFloat = .greatestFiniteMagnitude
 
     var body: some View {
-        ThinScrollSurface(contentHeight: $contentHeight, content: content)
-            .frame(height: min(contentHeight, maxHeight))
-    }
-}
-
-private struct ThinScrollSurface<Content: View>: NSViewRepresentable {
-    @Binding var contentHeight: CGFloat
-    let content: Content
-
-    func makeCoordinator() -> Coordinator { Coordinator() }
-
-    final class Coordinator {
-        var frameObserver: NSObjectProtocol?
-        deinit {
-            if let frameObserver { NotificationCenter.default.removeObserver(frameObserver) }
+        // Inside the panel's fixedSize(vertical) layout the ScrollView adopts
+        // its content's ideal height, so maxHeight alone caps it — no measure-
+        // and-write-back pass. (A geometry-preference height feedback loop
+        // here re-triggered the macOS 26 whole-window blank on insertion,
+        // same as the NSScrollView it replaced.)
+        ScrollView(.vertical) {
+            content
         }
-    }
-
-    func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
-        scrollView.hasVerticalScroller = true
-        scrollView.scrollerStyle = .overlay
-        scrollView.verticalScroller?.controlSize = .mini
-        scrollView.drawsBackground = false
-        scrollView.scrollerKnobStyle = .light
-
-        let hosting = NSHostingView(rootView: content)
-        hosting.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.documentView = hosting
-
-        NSLayoutConstraint.activate([
-            hosting.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
-            hosting.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
-        ])
-
-        hosting.postsFrameChangedNotifications = true
-        let height = $contentHeight
-        context.coordinator.frameObserver = NotificationCenter.default.addObserver(
-            forName: NSView.frameDidChangeNotification,
-            object: hosting,
-            queue: .main
-        ) { [weak hosting] _ in
-            Task { @MainActor in
-                guard let hosting else { return }
-                let measured = hosting.frame.height
-                // Ignore transient zero-height frames during initial layout —
-                // adopting one would re-collapse the list to nothing.
-                guard measured > 0.5, measured.isFinite else { return }
-                if abs(height.wrappedValue - measured) > 0.5 {
-                    height.wrappedValue = measured
-                }
-            }
-        }
-        return scrollView
-    }
-
-    func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        if let hosting = scrollView.documentView as? NSHostingView<Content> {
-            hosting.rootView = content
-        }
-        scrollView.scrollerStyle = .overlay
-        scrollView.verticalScroller?.controlSize = .mini
+        .scrollIndicators(.never)
+        .frame(maxHeight: maxHeight)
     }
 }
 

@@ -111,6 +111,304 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         XCTAssertEqual(keychainCalls.value, 2)
     }
 
+    // MARK: Keychain 读取抑制（弹窗最小化）
+
+    func testReaderCachesKeychainCredentialsUntilExpiry() throws {
+        // expiresAt 8000s；60s leeway → 7940s 前有效。
+        let keychainCalls = Counter()
+        let nowBox = MutableBox(Date(timeIntervalSince1970: 5000))
+        let mdatBox = MutableBox(Date(timeIntervalSince1970: 100))
+        let tokenBox = MutableBox(#"{"claudeAiOauth":{"accessToken":"kc1","expiresAt":8000000}}"#)
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: {
+                keychainCalls.increment()
+                return .success(tokenBox.value.data(using: .utf8)!)
+            },
+            keychainProbeModificationDate: { mdatBox.value },
+            now: { nowBox.value },
+            gate: OAuthCooldownGate()
+        )
+        XCTAssertEqual(try reader.read().accessToken, "kc1")
+        // 缓存期内不再触碰 Keychain
+        nowBox.value = Date(timeIntervalSince1970: 6000)
+        XCTAssertEqual(try reader.read().accessToken, "kc1")
+        XCTAssertEqual(keychainCalls.value, 1)
+        // 缓存过期 + 条目已更新（mdat 变化）→ 重新读取
+        nowBox.value = Date(timeIntervalSince1970: 7990)
+        mdatBox.value = Date(timeIntervalSince1970: 200)
+        tokenBox.value = #"{"claudeAiOauth":{"accessToken":"kc2","expiresAt":9000000000000}}"#
+        XCTAssertEqual(try reader.read().accessToken, "kc2")
+        XCTAssertEqual(keychainCalls.value, 2)
+    }
+
+    func testKeychainDataReadSkippedWhenModificationDateUnchanged() {
+        // Keychain 里是过期 token 且条目未变（CLI 空闲）→ 不做需要授权的
+        // 数据读取（否则每个轮询周期都会弹授权框）。
+        let keychainCalls = Counter()
+        let mdatBox = MutableBox(Date(timeIntervalSince1970: 100))
+        let tokenBox = MutableBox(#"{"claudeAiOauth":{"accessToken":"old","expiresAt":1000}}"#)
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: {
+                keychainCalls.increment()
+                return .success(tokenBox.value.data(using: .utf8)!)
+            },
+            keychainProbeModificationDate: { mdatBox.value },
+            now: { Date(timeIntervalSince1970: 5000) },
+            gate: OAuthCooldownGate()
+        )
+        XCTAssertThrowsError(try reader.read()) { error in
+            XCTAssertEqual(error as? OAuthUsageError, .tokenExpired)
+        }
+        XCTAssertEqual(keychainCalls.value, 1)
+        // mdat 未变 → 跳过数据读取，仍报 tokenExpired
+        XCTAssertThrowsError(try reader.read()) { error in
+            XCTAssertEqual(error as? OAuthUsageError, .tokenExpired)
+        }
+        XCTAssertEqual(keychainCalls.value, 1)
+        // CLI 刷新了 token（mdat 变化）→ 恢复读取
+        mdatBox.value = Date(timeIntervalSince1970: 200)
+        tokenBox.value = #"{"claudeAiOauth":{"accessToken":"fresh","expiresAt":9000000000000}}"#
+        XCTAssertEqual(try reader.read().accessToken, "fresh")
+        XCTAssertEqual(keychainCalls.value, 2)
+    }
+
+    func testKeychainSuccessRecordsMdatAndSkipsRereadAfterCacheExpiry() {
+        // 成功读取后缓存过期，但条目未变 → 重新读取只会拿到同一个过期
+        // token，因此跳过数据读取直接报 tokenExpired。
+        let keychainCalls = Counter()
+        let nowBox = MutableBox(Date(timeIntervalSince1970: 5000))
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: {
+                keychainCalls.increment()
+                return .success(#"{"claudeAiOauth":{"accessToken":"kc","expiresAt":8000000}}"#.data(using: .utf8)!)
+            },
+            keychainProbeModificationDate: { Date(timeIntervalSince1970: 100) },
+            now: { nowBox.value },
+            gate: OAuthCooldownGate()
+        )
+        XCTAssertEqual(try reader.read().accessToken, "kc")
+        nowBox.value = Date(timeIntervalSince1970: 7990)  // 过了 leeway 边界
+        XCTAssertThrowsError(try reader.read()) { error in
+            XCTAssertEqual(error as? OAuthUsageError, .tokenExpired)
+        }
+        XCTAssertEqual(keychainCalls.value, 1)
+    }
+
+    func testResetKeychainCooldownForcesDataReadDespiteUnchangedMdat() {
+        // 手动刷新（force）清除抑制状态：即使条目未变也允许一次数据读取。
+        let keychainCalls = Counter()
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: {
+                keychainCalls.increment()
+                return .success(#"{"claudeAiOauth":{"accessToken":"old","expiresAt":1000}}"#.data(using: .utf8)!)
+            },
+            keychainProbeModificationDate: { Date(timeIntervalSince1970: 100) },
+            now: { Date(timeIntervalSince1970: 5000) },
+            gate: OAuthCooldownGate()
+        )
+        XCTAssertThrowsError(try reader.read())
+        XCTAssertThrowsError(try reader.read())
+        XCTAssertEqual(keychainCalls.value, 1)
+        reader.resetKeychainCooldown()
+        XCTAssertThrowsError(try reader.read())
+        XCTAssertEqual(keychainCalls.value, 2)
+    }
+
+    func testConcurrentReadAfterDenialDoesNotTriggerSecondDataRead() {
+        // 线程 A 的数据读取挂起（授权弹窗打开），用户点 Deny；此时排队
+        // 等待的线程 B 必须看到刚设置的拒绝冷却，而不是紧接着再做一次
+        // 数据读取（= 立刻再弹一个窗）。
+        let keychainCalls = Counter()
+        let readStarted = DispatchSemaphore(value: 0)
+        let denyClicked = DispatchSemaphore(value: 0)
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: {
+                keychainCalls.increment()
+                readStarted.signal()
+                denyClicked.wait()
+                return .failure(.denied(status: -128))
+            },
+            keychainProbeModificationDate: { Date(timeIntervalSince1970: 100) },
+            now: { Date(timeIntervalSince1970: 5000) },
+            gate: OAuthCooldownGate()
+        )
+        let firstDone = expectation(description: "first read")
+        let secondDone = expectation(description: "second read")
+        let firstError = MutableBox<Error?>(nil)
+        let secondError = MutableBox<Error?>(nil)
+        DispatchQueue.global().async {
+            if case .failure(let error) = Result(catching: { try reader.read() }) {
+                firstError.value = error
+            }
+            firstDone.fulfill()
+        }
+        readStarted.wait()
+        DispatchQueue.global().async {
+            if case .failure(let error) = Result(catching: { try reader.read() }) {
+                secondError.value = error
+            }
+            secondDone.fulfill()
+        }
+        // 让 B 抵达 keychainLock 等待点，再"点 Deny"。
+        Thread.sleep(forTimeInterval: 0.05)
+        denyClicked.signal()
+        wait(for: [firstDone, secondDone], timeout: 5)
+        XCTAssertEqual(firstError.value as? OAuthUsageError, .keychainDenied)
+        XCTAssertEqual(secondError.value as? OAuthUsageError, .keychainDenied)
+        XCTAssertEqual(keychainCalls.value, 1)
+    }
+
+    func testUnauthorizedRetriesSameTokenThenPicksUpRotatedToken() {
+        // 401 只把缓存标记为可疑，不清空：条目未变 → 用原 token 重试
+        // （瞬时 401 必须能自愈，且不读 Keychain）；条目变化（CLI 重新
+        // 登录写入新 token）→ 做一次数据读取换用新 token。
+        let keychainCalls = Counter()
+        let nowBox = MutableBox(Date(timeIntervalSince1970: 10_000))
+        let mdatBox = MutableBox(Date(timeIntervalSince1970: 100))
+        let tokenBox = MutableBox(#"{"claudeAiOauth":{"accessToken":"stale","expiresAt":9000000000000}}"#)
+        let authHeaders = MutableBox<[String]>([])
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: {
+                keychainCalls.increment()
+                return .success(tokenBox.value.data(using: .utf8)!)
+            },
+            keychainProbeModificationDate: { mdatBox.value },
+            now: { nowBox.value },
+            gate: OAuthCooldownGate()
+        )
+        let client = ClaudeOAuthUsageClient(
+            credentialsReader: reader,
+            transport: { request in
+                let token = request.value(forHTTPHeaderField: "Authorization") ?? ""
+                authHeaders.value = authHeaders.value + [token]
+                if token == "Bearer stale" {
+                    return OAuthHTTPResponse(statusCode: 401, headers: [:], body: Data())
+                }
+                return OAuthHTTPResponse(statusCode: 200, headers: [:], body: """
+                {"five_hour":{"utilization":10,"resets_at":1781205600},
+                 "seven_day":{"utilization":40,"resets_at":1781406000}}
+                """.data(using: .utf8)!)
+            },
+            userAgentVersion: { "9.9.9" },
+            now: { nowBox.value },
+            gate: OAuthCooldownGate()
+        )
+        XCTAssertThrowsError(try client.fetchStatusLinePayload()) {
+            XCTAssertEqual($0 as? OAuthUsageError, .unauthorized(statusCode: 401))
+        }
+        XCTAssertEqual(keychainCalls.value, 1)
+        // 冷却过后、条目未变：重试同一 token（不读 Keychain）→ 仍 401
+        nowBox.value = nowBox.value.addingTimeInterval(16 * 60)
+        XCTAssertThrowsError(try client.fetchStatusLinePayload()) {
+            XCTAssertEqual($0 as? OAuthUsageError, .unauthorized(statusCode: 401))
+        }
+        XCTAssertEqual(keychainCalls.value, 1)
+        XCTAssertEqual(authHeaders.value, ["Bearer stale", "Bearer stale"])
+        // CLI 重新登录写入新 token（mdat 变化）→ 一次数据读取后恢复
+        nowBox.value = nowBox.value.addingTimeInterval(16 * 60)
+        mdatBox.value = Date(timeIntervalSince1970: 200)
+        tokenBox.value = #"{"claudeAiOauth":{"accessToken":"fresh2","expiresAt":9000000000000}}"#
+        XCTAssertNoThrow(try client.fetchStatusLinePayload())
+        XCTAssertEqual(keychainCalls.value, 2)
+        XCTAssertEqual(authHeaders.value.last, "Bearer fresh2")
+    }
+
+    func testTransient401RecoversAutomaticallyWithSameToken() {
+        // 服务器抖动误报 401：token 实际仍有效。冷却过后必须自动恢复，
+        // 不需要人工刷新、也不需要条目变化。
+        let nowBox = MutableBox(Date(timeIntervalSince1970: 10_000))
+        let responses = MutableBox([401, 200])
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: {
+                .success(#"{"claudeAiOauth":{"accessToken":"tok","expiresAt":9000000000000}}"#.data(using: .utf8)!)
+            },
+            keychainProbeModificationDate: { Date(timeIntervalSince1970: 100) },
+            now: { nowBox.value },
+            gate: OAuthCooldownGate()
+        )
+        let client = ClaudeOAuthUsageClient(
+            credentialsReader: reader,
+            transport: { _ in
+                let status = responses.value.removeFirst()
+                if status == 401 {
+                    return OAuthHTTPResponse(statusCode: 401, headers: [:], body: Data())
+                }
+                return OAuthHTTPResponse(statusCode: 200, headers: [:], body: """
+                {"five_hour":{"utilization":10,"resets_at":1781205600},
+                 "seven_day":{"utilization":40,"resets_at":1781406000}}
+                """.data(using: .utf8)!)
+            },
+            userAgentVersion: { "9.9.9" },
+            now: { nowBox.value },
+            gate: OAuthCooldownGate()
+        )
+        XCTAssertThrowsError(try client.fetchStatusLinePayload())
+        nowBox.value = nowBox.value.addingTimeInterval(16 * 60)
+        XCTAssertNoThrow(try client.fetchStatusLinePayload())
+    }
+
+    func testShortCircuitKeepsTokenExpiredWhenFileSourceSawExpired() {
+        // 过期的文件 token + 无法解析的 Keychain 条目：第一次和后续轮询
+        // 必须报同一种错误（tokenExpired），徽标不能在两种状态间跳变。
+        let expired = writeCredentials(
+            #"{"claudeAiOauth":{"accessToken":"old","expiresAt":1000}}"#, to: "real.json")
+        let keychainCalls = Counter()
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [expired],
+            keychainRead: {
+                keychainCalls.increment()
+                return .success(#"{"not-oauth":{}}"#.data(using: .utf8)!)
+            },
+            keychainProbeModificationDate: { Date(timeIntervalSince1970: 100) },
+            now: { Date(timeIntervalSince1970: 5000) },
+            gate: OAuthCooldownGate()
+        )
+        XCTAssertThrowsError(try reader.read()) { error in
+            XCTAssertEqual(error as? OAuthUsageError, .tokenExpired)
+        }
+        XCTAssertThrowsError(try reader.read()) { error in
+            XCTAssertEqual(error as? OAuthUsageError, .tokenExpired)
+        }
+        XCTAssertEqual(keychainCalls.value, 1)
+    }
+
+    func testFreshlyModifiedItemMdatIsNotRecordedForSuppression() {
+        // Keychain 的 mdat 只有秒级精度：条目刚被写过（<2s）时同一秒内
+        // 可能还有第二次写入，此时记录 mdat 会漏掉后续变化 —— 不记录，
+        // 下次轮询重新读取。
+        let keychainCalls = Counter()
+        let nowBox = MutableBox(Date(timeIntervalSince1970: 5000))
+        let mdatBox = MutableBox(Date(timeIntervalSince1970: 4999))  // 1s 前，热写
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: {
+                keychainCalls.increment()
+                return .success(#"{"claudeAiOauth":{"accessToken":"old","expiresAt":1000}}"#.data(using: .utf8)!)
+            },
+            keychainProbeModificationDate: { mdatBox.value },
+            now: { nowBox.value },
+            gate: OAuthCooldownGate()
+        )
+        XCTAssertThrowsError(try reader.read())
+        // mdat 属于热写窗口 → 未记录 → 下次仍然做数据读取
+        XCTAssertThrowsError(try reader.read())
+        XCTAssertEqual(keychainCalls.value, 2)
+        // 条目冷却（mdat 距今 ≥2s）→ 记录后开始抑制
+        nowBox.value = Date(timeIntervalSince1970: 5010)
+        mdatBox.value = Date(timeIntervalSince1970: 5000)
+        XCTAssertThrowsError(try reader.read())
+        XCTAssertEqual(keychainCalls.value, 3)
+        XCTAssertThrowsError(try reader.read())
+        XCTAssertEqual(keychainCalls.value, 3)
+    }
+
     func testAllSourcesExpiredThrowsTokenExpired() {
         let expired = writeCredentials(
             #"{"claudeAiOauth":{"accessToken":"old","expiresAt":1000}}"#, to: "real.json")

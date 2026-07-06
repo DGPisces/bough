@@ -147,7 +147,11 @@ final class AppState {
         }
         let claude = ClaudeOAuthUsageClient(
             credentialsReader: ClaudeOAuthCredentialsReader(
-                keychainRead: ClaudeKeychainReader.readCredentialsData
+                // NOT mirror-first: the app must see rotated CLI credentials
+                // promptly (it WRITES the mirror); an unexpired stale mirror
+                // would shadow the keychain until expiry.
+                keychainRead: ClaudeKeychainReader.readCredentialsData,
+                keychainProbeModificationDate: ClaudeKeychainReader.readModificationDate
             ),
             tokenMirrorWriter: mirrorWriter
         )
