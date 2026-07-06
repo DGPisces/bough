@@ -286,6 +286,8 @@ final class NotchPanelViewTests: XCTestCase {
         )
         XCTAssertTrue(source.contains("self == .active || self == .idleIndicator"))
         XCTAssertEqual(sessionSurfaces.occurrences(of: ".transition(expandedContentTransition)"), 2)
+        // 8 content sites + the Line() divider (which lagged behind the
+        // fast-insertion content when it rode the slow-start open spring).
         XCTAssertFalse(sessionSurfaces.contains("if sessionSurfaceContentShouldBeVisible"))
         XCTAssertTrue(panel.contains(".animation(NotchAnimation.open, value: appState.surface)"))
         XCTAssertTrue(panel.contains(".frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)"))
@@ -293,8 +295,16 @@ final class NotchPanelViewTests: XCTestCase {
         XCTAssertFalse(panel.contains(".animation(panelShellAnimation, value: panelShellAnimationState)"))
         XCTAssertFalse(source.contains("private struct PanelShellAnimationState: Equatable"))
         XCTAssertTrue(source.contains("private var expandedContentTransition: AnyTransition"))
-        XCTAssertEqual(expandedContent.occurrences(of: ".transition(expandedContentTransition)"), 8)
-        XCTAssertTrue(source.contains(".blurFade.combined(with: .move(edge: .top))"))
+        XCTAssertEqual(expandedContent.occurrences(of: ".transition(expandedContentTransition)"), 9)
+        // The shared .expandedContent transition (NotchAnimation.swift) keeps
+        // blurFade + move(edge: .top), with a fast insertion curve so incoming
+        // content is visible while the open spring is still growing the panel.
+        XCTAssertTrue(source.contains(".expandedContent"))
+        let animationSource = try sourceFile("Sources/Bough/NotchAnimation.swift")
+        XCTAssertTrue(animationSource.contains("static var expandedContent: AnyTransition"))
+        XCTAssertTrue(animationSource.contains(
+            "insertion: AnyTransition.blurFade.animation(.easeOut(duration: 0.18))"))
+        XCTAssertTrue(animationSource.contains("removal: .blurFade.combined(with: .move(edge: .top))"))
         XCTAssertFalse(expandedContent.contains(".move(edge: .top)"))
         XCTAssertFalse(expandedContent.contains(".scale(scale: 0.96, anchor: .top)"))
         XCTAssertFalse(source.contains("@State private var sessionSurfaceContentVisible = true"))
@@ -359,7 +369,7 @@ final class NotchPanelViewTests: XCTestCase {
         XCTAssertTrue(source.contains("MusicStrip(appState: appState, musicArtworkNamespace: musicArtworkNamespace)"))
         XCTAssertTrue(source.contains(".zIndex(MusicArtworkTransitionID.zIndex)"))
         XCTAssertTrue(source.contains("private var expandedContentTransition: AnyTransition"))
-        XCTAssertTrue(source.contains(".blurFade.combined(with: .move(edge: .top))"))
+        XCTAssertTrue(source.contains(".expandedContent"))
         XCTAssertFalse(source.contains("private var collapsedCompactActivitySource: MusicPanelActivitySource?"))
         XCTAssertFalse(source.contains("private var shouldPreserveMusicArtworkTransition: Bool"))
         XCTAssertFalse(source.contains("let sessionSurfaceTransition: AnyTransition = shouldPreserveMusicArtworkTransition"))
@@ -380,7 +390,7 @@ final class NotchPanelViewTests: XCTestCase {
 
     func testExpandedMusicStripOrderingAndSettingsOffBoundary() throws {
         let source = try sourceFile("Sources/Bough/NotchPanelView.swift")
-        let sessionList = try XCTUnwrap(source.slice(from: "private struct SessionListView: View", to: "/// Thin overlay scrollbar"))
+        let sessionList = try XCTUnwrap(source.slice(from: "private struct SessionListView: View", to: "/// Pure-SwiftUI scroll container"))
         let airDropMusicLayout = try XCTUnwrap(source.slice(from: "private struct AirDropMusicEntryLayout: View", to: "// MARK: - Approval Bar"))
 
         XCTAssertTrue(sessionList.contains("@AppStorage(SettingsKey.showMusicControls)"))
@@ -404,23 +414,33 @@ final class NotchPanelViewTests: XCTestCase {
         XCTAssertFalse(wideBranch.contains(".padding(.leading, 6)"))
     }
 
-    func testSessionListAlwaysScrollsFullListAndThinScrollViewSelfSizes() throws {
+    func testSessionListAlwaysScrollsFullListAndSessionScrollViewSelfSizes() throws {
         let source = try sourceFile("Sources/Bough/NotchPanelView.swift")
-        let sessionList = try XCTUnwrap(source.slice(from: "private struct SessionListView: View", to: "/// Thin overlay scrollbar"))
-        let thinScroll = try XCTUnwrap(source.slice(from: "/// Thin overlay scrollbar", to: "private struct SessionIdentityLine: View"))
+        let sessionList = try XCTUnwrap(source.slice(from: "private struct SessionListView: View", to: "/// Pure-SwiftUI scroll container"))
+        let scroll = try XCTUnwrap(source.slice(from: "/// Pure-SwiftUI scroll container", to: "private struct SessionIdentityLine: View"))
 
         XCTAssertTrue(
             sessionList.contains("let needsScroll = onlySessionId == nil"),
             "Card heights vary with message content, so a session-count heuristic either clips the plain layout at the window edge or hides everything; the full list must always use the capped scroll container."
         )
         XCTAssertFalse(sessionList.contains("totalSessionCount > maxVisibleSessions"))
+        XCTAssertTrue(sessionList.contains("SessionScrollView(maxHeight: scrollMaxHeight)"))
 
         XCTAssertTrue(
-            thinScroll.contains(".frame(height: min(contentHeight, maxHeight))"),
-            "NSScrollView exposes no intrinsic height to SwiftUI, so without explicit sizing the panel's fixedSize layout collapses the session list to zero height."
+            scroll.contains(".frame(maxHeight: maxHeight)"),
+            "Inside the panel's fixedSize layout the ScrollView adopts its content's ideal height; maxHeight alone caps it."
         )
-        XCTAssertTrue(thinScroll.contains("NSView.frameDidChangeNotification"))
-        XCTAssertFalse(thinScroll.contains("heightAnchor.constraint(lessThanOrEqualToConstant"))
+        // Two mechanisms are banned here because each blanked the WHOLE panel
+        // window for 1-2 frames when inserted mid-expand on macOS 26 (the
+        // "island vanishes, then pops expanded" flicker): NSScrollView with a
+        // nested NSHostingView, and a GeometryReader + preference height
+        // feedback loop.
+        XCTAssertFalse(scroll.contains("NSScrollView()"))
+        XCTAssertFalse(scroll.contains("NSHostingView(rootView:"))
+        XCTAssertFalse(scroll.contains(": NSViewRepresentable"))
+        XCTAssertFalse(scroll.contains("GeometryReader"))
+        XCTAssertFalse(scroll.contains("onPreferenceChange"))
+        XCTAssertTrue(scroll.contains(".scrollIndicators(.never)"))
     }
 
     func testUsageStripLayoutKeepsStripOutsideScrollableSessionContent() {
@@ -517,8 +537,9 @@ final class NotchPanelViewTests: XCTestCase {
         XCTAssertTrue(transitionStack.contains("source: displaySource"))
         XCTAssertTrue(transitionStack.contains("status: displayStatus"))
         XCTAssertTrue(transitionStack.contains("compactSize: mascotSize"))
-        XCTAssertTrue(transitionStack.contains("expandedSize: 36"))
+        XCTAssertTrue(transitionStack.contains("expandedSize: mascotExpandedSize"))
         XCTAssertTrue(transitionStack.contains("phase: mascotHandoffPhase"))
+        XCTAssertTrue(leftWing.contains("let mascotExpandedSize: CGFloat"))
         XCTAssertFalse(transitionStack.contains("if displayStatus == .idle"))
         XCTAssertFalse(transitionStack.contains("switch displayStatus"))
         XCTAssertEqual(transitionStack.occurrences(of: "id: AIMascotTransitionID.mascot"), 1)
@@ -533,9 +554,19 @@ final class NotchPanelViewTests: XCTestCase {
         XCTAssertFalse(handoff.contains("NotchAnimation.close"))
         XCTAssertFalse(handoff.contains("static let halfWidth"))
         XCTAssertTrue(handoff.contains("static func size(forPhase phase: Double, compactSize: CGFloat, expandedSize: CGFloat) -> CGFloat"))
-        XCTAssertTrue(handoff.contains("clampedPhase(phase) < 0.5 ? compactSize : expandedSize"))
-        XCTAssertTrue(handoff.contains("clampedPhase(phase) < 0.5 ? 1 : 0"))
-        XCTAssertTrue(handoff.contains("clampedPhase(phase) >= 0.5 ? 1 : 0"))
+        // Continuous container size + tight SEQUENTIAL fade windows around the
+        // midpoint. The former step functions at exactly 0.5 swapped sprite
+        // AND container size in a single mid-spring frame — a per-expand
+        // flicker; a full-range overlapping crossfade double-exposes the
+        // sprites (muddy — reverted once already).
+        XCTAssertTrue(handoff.contains("compactSize + (expandedSize - compactSize) * CGFloat(progress)"))
+        XCTAssertTrue(handoff.contains("static let travelingFadeWindow = (start: 0.38, end: 0.50)"))
+        XCTAssertTrue(handoff.contains("static let brandFadeWindow = (start: 0.55, end: 0.72)"))
+        XCTAssertTrue(handoff.contains("1 - fadeProgress(clampedPhase(phase), window: travelingFadeWindow)"))
+        XCTAssertTrue(handoff.contains("fadeProgress(clampedPhase(phase), window: brandFadeWindow)"))
+        XCTAssertFalse(handoff.contains("clampedPhase(phase) < 0.5 ? compactSize : expandedSize"))
+        XCTAssertFalse(handoff.contains("clampedPhase(phase) < 0.5 ? 1 : 0"))
+        XCTAssertFalse(handoff.contains("clampedPhase(phase) >= 0.5 ? 1 : 0"))
         XCTAssertFalse(handoff.contains("compactSize + (expandedSize - compactSize) * t"))
         XCTAssertFalse(handoff.contains("midpointHandoff(forPhase: phase)"))
         XCTAssertFalse(handoff.contains("let start = 0.5 - halfWidth"))
@@ -603,7 +634,7 @@ final class NotchPanelViewTests: XCTestCase {
         XCTAssertTrue(idleBar.contains("source: settingsDefaultSource"))
         XCTAssertTrue(idleBar.contains("status: .idle"))
         XCTAssertTrue(idleBar.contains("compactSize: mascotSize"))
-        XCTAssertTrue(idleBar.contains("expandedSize: 36"))
+        XCTAssertTrue(idleBar.contains("expandedSize: min(36, notchHeight)"))
         XCTAssertTrue(idleBar.contains("phase: mascotHandoffPhase"))
         XCTAssertTrue(idleBar.contains("NotchActionButtons(includeSound: true, spacing: 4)"))
         XCTAssertTrue(idleBar.contains(".background(expanded ? Color.black : Color.clear)"))
@@ -619,7 +650,7 @@ final class NotchPanelViewTests: XCTestCase {
         let panel = try XCTUnwrap(source.slice(from: "struct NotchPanelView: View", to: "// MARK: - Compact Bar"))
         let width = try XCTUnwrap(source.slice(from: "private var panelWidth: CGFloat", to: "var body: some View"))
         let hoverHandling = try XCTUnwrap(source.slice(from: "private func handlePanelHover(_ hovering: Bool)", to: "switch appState.surface"))
-        let sessionList = try XCTUnwrap(source.slice(from: "private struct SessionListView: View", to: "/// Thin overlay scrollbar"))
+        let sessionList = try XCTUnwrap(source.slice(from: "private struct SessionListView: View", to: "/// Pure-SwiftUI scroll container"))
 
         XCTAssertTrue(panel.contains("(showBar || showProductHome || showIdleIndicator) && appState.surface.isExpanded"))
         XCTAssertTrue(width.contains("if showIdleIndicator {"))

@@ -225,7 +225,7 @@ struct MusicStrip: View {
                     )
             )
             .padding(.horizontal, 6)
-            .transition(reduceMotion ? .opacity : .blurFade.combined(with: .move(edge: .top)))
+            .transition(reduceMotion ? .opacity : .expandedContent)
         }
     }
 

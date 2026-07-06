@@ -34,6 +34,20 @@ extension AnyTransition {
             identity: BlurFadeModifier(active: false)
         )
     }
+
+    /// Below-notch expanded content. Insertion opacity/blur runs on its own
+    /// fast curve instead of the open spring: the spring starts with zero
+    /// velocity and the container clips content below its slowly-growing
+    /// height, so spring-driven opacity kept the incoming content invisible
+    /// for the first part of the expand — the panel read as "content vanishes,
+    /// then it expands". Removal stays on the ambient (close) animation.
+    static var expandedContent: AnyTransition {
+        .asymmetric(
+            insertion: AnyTransition.blurFade.animation(.easeOut(duration: 0.18))
+                .combined(with: .move(edge: .top)),
+            removal: .blurFade.combined(with: .move(edge: .top))
+        )
+    }
 }
 
 // MARK: - MorphText — blur morph on text change

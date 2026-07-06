@@ -56,14 +56,41 @@ public enum KeychainReadFailure: Error, Equatable {
 /// `.credentials.json`; helper: token mirror → `.credentials.json`), then the
 /// injected Keychain closure. The Keychain implementation lives in the app
 /// target (Security import is forbidden in BoughCore); the helper passes nil.
+///
+/// Keychain reads are prompt-minimized: a data read (`SecItemCopyMatching`
+/// with `kSecReturnData`) can show the macOS authorization dialog, so its
+/// result is cached until token expiry, and re-reads are suppressed while the
+/// item's modification date (readable WITHOUT authorization) is unchanged —
+/// an unchanged item can only return the same bytes we already saw.
 public final class ClaudeOAuthCredentialsReader: @unchecked Sendable {
     public static let keychainDenialCooldown: TimeInterval = 6 * 60 * 60
     private static let cooldownKey = "claude.keychainDenied"
 
     private let fileURLs: [URL]
     private let keychainRead: (() -> Result<Data, KeychainReadFailure>)?
+    private let keychainProbeModificationDate: (() -> Date?)?
     private let now: () -> Date
     private let gate: OAuthCooldownGate
+
+    /// Items modified less than this long ago are not recorded for
+    /// suppression: mdat has 1-second granularity, so a second same-second
+    /// write would be invisible to the probe. 2s = the mdat second has fully
+    /// elapsed, plus margin.
+    static let modificationDateSettleInterval: TimeInterval = 2
+
+    /// `stateLock` guards the four fields below; `keychainLock` serializes
+    /// data reads themselves — an authorization dialog can block for minutes,
+    /// and concurrent refreshes (timer + panel-open) would stack dialogs.
+    private let stateLock = NSLock()
+    private let keychainLock = NSLock()
+    private var cachedKeychainCredentials: ClaudeOAuthCredentials?
+    /// Set on server-side rejection (401/403). A suspect token is still
+    /// served — retried — while the Keychain item is unchanged (a transient
+    /// 401 must self-heal), but the probe runs first so a rotated item (CLI
+    /// re-login) is picked up immediately instead of at cache expiry.
+    private var cachedCredentialsSuspect = false
+    private var lastKeychainModificationDate: Date?
+    private var lastKeychainFailure: OAuthUsageError?
 
     public static func defaultCredentialsFileURL() -> URL {
         URL(fileURLWithPath: NSHomeDirectory())
@@ -73,17 +100,48 @@ public final class ClaudeOAuthCredentialsReader: @unchecked Sendable {
     public init(
         fileURLs: [URL] = [ClaudeOAuthCredentialsReader.defaultCredentialsFileURL()],
         keychainRead: (() -> Result<Data, KeychainReadFailure>)?,
+        keychainProbeModificationDate: (() -> Date?)? = nil,
         now: @escaping () -> Date = Date.init,
         gate: OAuthCooldownGate = .shared
     ) {
         self.fileURLs = fileURLs
         self.keychainRead = keychainRead
+        self.keychainProbeModificationDate = keychainProbeModificationDate
         self.now = now
         self.gate = gate
     }
 
     public func resetKeychainCooldown() {
         gate.clear(key: Self.cooldownKey)
+        stateLock.lock()
+        lastKeychainModificationDate = nil
+        lastKeychainFailure = nil
+        stateLock.unlock()
+    }
+
+    /// Called on server-side token rejection (401/403). Does NOT drop the
+    /// cached token: a transient 401 (server hiccup) must self-heal by
+    /// retrying, and re-reading an unchanged Keychain item could only return
+    /// the same bytes anyway (while prompting again). The flag makes the next
+    /// read probe the item first so a CLI re-login is picked up immediately.
+    public func markCachedCredentialsSuspect() {
+        stateLock.lock()
+        cachedCredentialsSuspect = true
+        stateLock.unlock()
+    }
+
+    private func cachedCredentialsIfFresh() -> ClaudeOAuthCredentials? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let cached = cachedKeychainCredentials,
+              !cached.isExpired(now: now()) else { return nil }
+        return cached
+    }
+
+    private func cacheIsSuspect() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return cachedCredentialsSuspect
     }
 
     /// - Throws: `OAuthUsageError.tokenExpired` when at least one source parsed
@@ -99,23 +157,77 @@ public final class ClaudeOAuthCredentialsReader: @unchecked Sendable {
         }
 
         if let keychainRead {
-            if gate.activeCooldown(key: Self.cooldownKey, now: now()) == nil {
-                switch keychainRead() {
-                case .success(let data):
-                    if let creds = ClaudeOAuthCredentials.parse(jsonData: data) {
-                        if !creds.isExpired(now: now()) { return creds }
-                        sawExpired = true
-                    }
-                case .failure(.itemNotFound):
-                    break
-                case .failure(.denied):
-                    gate.setCooldown(
-                        key: Self.cooldownKey,
-                        until: now().addingTimeInterval(Self.keychainDenialCooldown)
-                    )
-                    throw OAuthUsageError.keychainDenied
+            if !cacheIsSuspect(), let cached = cachedCredentialsIfFresh() { return cached }
+            if gate.activeCooldown(key: Self.cooldownKey, now: now()) != nil {
+                throw OAuthUsageError.keychainDenied
+            }
+
+            keychainLock.lock()
+            defer { keychainLock.unlock() }
+            // Another refresh may have completed the read — or been denied —
+            // while we waited on the lock.
+            if !cacheIsSuspect(), let cached = cachedCredentialsIfFresh() { return cached }
+            if gate.activeCooldown(key: Self.cooldownKey, now: now()) != nil {
+                throw OAuthUsageError.keychainDenied
+            }
+
+            // Attribute probe needs no authorization: unchanged item ⇒ a data
+            // read would return the same bytes ⇒ reuse the last outcome.
+            let currentModificationDate = keychainProbeModificationDate?()
+            stateLock.lock()
+            let recordedDate = lastKeychainModificationDate
+            let recordedFailure = lastKeychainFailure
+            stateLock.unlock()
+            let itemUnchanged = recordedDate != nil && currentModificationDate != nil
+                && currentModificationDate == recordedDate
+
+            if let cached = cachedCredentialsIfFresh() {
+                // Only reachable while suspect: unchanged item ⇒ retry the
+                // same token; changed ⇒ fall through and read the new one.
+                if itemUnchanged { return cached }
+            } else if itemUnchanged {
+                // File-derived expiry keeps precedence so the error kind does
+                // not flip between the recording poll and replaying polls.
+                if sawExpired { throw OAuthUsageError.tokenExpired }
+                throw recordedFailure ?? OAuthUsageError.tokenExpired
+            }
+
+            switch keychainRead() {
+            case .success(let data):
+                let parsed = ClaudeOAuthCredentials.parse(jsonData: data)
+                stateLock.lock()
+                // mdat has 1s granularity: don't record a just-written item —
+                // a second same-second write would be invisible to the probe.
+                lastKeychainModificationDate = currentModificationDate.flatMap {
+                    now().timeIntervalSince($0) >= Self.modificationDateSettleInterval ? $0 : nil
                 }
-            } else {
+                if let parsed, !parsed.isExpired(now: now()) {
+                    cachedKeychainCredentials = parsed
+                    cachedCredentialsSuspect = false
+                    lastKeychainFailure = nil
+                    stateLock.unlock()
+                    return parsed
+                }
+                cachedKeychainCredentials = nil
+                if parsed != nil {
+                    lastKeychainFailure = .tokenExpired
+                    sawExpired = true
+                } else {
+                    lastKeychainFailure = .credentialsUnavailable(
+                        reason: "No Claude Code OAuth credentials found")
+                }
+                stateLock.unlock()
+            case .failure(.itemNotFound):
+                stateLock.lock()
+                cachedKeychainCredentials = nil
+                lastKeychainModificationDate = nil
+                lastKeychainFailure = nil
+                stateLock.unlock()
+            case .failure(.denied):
+                gate.setCooldown(
+                    key: Self.cooldownKey,
+                    until: now().addingTimeInterval(Self.keychainDenialCooldown)
+                )
                 throw OAuthUsageError.keychainDenied
             }
         }
@@ -264,6 +376,10 @@ public final class ClaudeOAuthUsageClient: ClaudeUsageFetching, @unchecked Senda
             }
             return payload
         case 401, 403:
+            // Mark (don't drop) the token: after the cooldown it is retried —
+            // a transient 401 self-heals — while the suspect probe picks up a
+            // CLI re-login (rotated Keychain item) without waiting for expiry.
+            credentialsReader.markCachedCredentialsSuspect()
             gate.setCooldown(
                 key: Self.unauthorizedKey,
                 until: now().addingTimeInterval(Self.unauthorizedCooldown)

@@ -353,7 +353,6 @@ class PanelWindowController: NSObject, NSWindowDelegate {
 
         let screen = chosenScreen()
         let signature = ScreenDetector.signature(for: screen)
-
         if forceRebuild {
             rebuildForCurrentScreen(screen)
             return
