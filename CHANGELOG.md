@@ -4,6 +4,43 @@ All notable changes to Bough are documented here.
 
 ## [Unreleased]
 
+## [v1.1.1] - 2026-07-06
+
+### English
+
+Fixes the recurring Keychain authorization dialog and the notch expand flicker.
+
+**Usage — Fixed:**
+
+- The macOS Keychain dialog for "Claude Code-credentials" no longer reappears on every usage refresh. Bough now caches the token until it expires and, before reading again, checks the Keychain item's modification date — an operation that never prompts — so an unchanged item is never re-read. After a single "Allow", normal use stays prompt-free even without "Always Allow".
+- Concurrent refreshes can no longer stack multiple authorization dialogs, and denying keeps its 6-hour quiet period for reads that were already waiting.
+- A transient server-side 401 now recovers on its own: the same token is retried after the cooldown, and re-logging into Claude Code is picked up automatically with a single Keychain read.
+
+**Interface — Fixed:**
+
+- Hover-expanding the notch no longer flickers ("the island vanished for an instant, then popped open" — with every mascot). The session list's AppKit scroll container blanked the entire panel window for 1-2 frames on macOS 26 when inserted mid-animation; it is now a native SwiftUI scroll view (the scroll indicator is hidden, matching the previous thin-overlay look).
+- The pixel-mascot → Bough brand handoff now crossfades smoothly around the trajectory midpoint instead of swapping sprite and size in a single frame, and the sound/settings/quit buttons no longer jump sideways as the expansion settles.
+- Expanded content fades in on a fast curve while the panel grows (it previously stayed invisible for the first part of the spring), the divider line joins the same transition, and Reduce Motion now switches the transition to a plain fade.
+- The Bough brand mascot is no longer clipped flat at the top on notch screens.
+
+### 简体中文
+
+修复反复出现的钥匙串授权弹窗与刘海展开闪烁。
+
+**用量 — 修复：**
+
+- macOS 钥匙串"Claude Code-credentials"授权弹窗不再每次用量刷新都出现。Bough 现在缓存 token 直至过期，重新读取前先检查钥匙串条目的修改时间（该操作不会触发弹窗）——条目未变化就绝不重复读取。点一次"允许"后，即使不选"始终允许"，正常使用也不再弹窗。
+- 并发刷新不再叠加多个授权弹窗；点"拒绝"后的 6 小时静默期对已在等待的读取同样生效。
+- 服务器偶发 401 现在可自愈：冷却后自动用原 token 重试；在 Claude Code 重新登录后，仅需一次钥匙串读取即可自动换用新凭据。
+
+**界面 — 修复：**
+
+- 悬停展开刘海不再闪烁（"先消失一瞬间、然后弹出"，任何吉祥物下都会出现）。根因是会话列表的 AppKit 滚动容器在动画中途插入时，会让整个面板窗口在 macOS 26 上空白 1-2 帧；现改为原生 SwiftUI 滚动视图（滚动条隐藏，观感与原细条风格一致）。
+- 像素吉祥物与 Bough 品牌图的交接改为轨迹中点附近的平滑渐变（原为单帧内同时换图和跳尺寸的硬切）；声音/设置/退出按钮在展开收尾时不再横向跳动。
+- 展开内容随面板增长以快速曲线淡入（此前在弹簧前段完全不可见），顶部分隔线加入同一过渡；"减少动态效果"开启时过渡降级为纯淡入淡出。
+- 刘海屏上 Bough 品牌吉祥物不再被削平顶。
+
+
 ## [v1.1.0] - 2026-07-01
 
 ### English
