@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import LocalAuthentication
 import Security
@@ -11,23 +10,18 @@ import Security
 /// the CLI-owned item hangs on a dialog; the flagged read returns the data.
 /// Adapted from steipete/CodexBar (MIT). See CREDITS.md.
 enum KeychainNoUIQuery {
-    private static let uiFailPolicy = resolveUIFailPolicy()
+    /// The raw value of the deprecated `kSecUseAuthenticationUIFail`
+    /// constant. Referenced as a frozen literal instead of the symbol
+    /// (which warns at compile time) or a dynamic symbol lookup
+    /// (repo governance confines dynamic framework loading to the
+    /// music adapter layer). The value is ABI-stable; verified
+    /// silent-read behavior on the target OS.
+    private static let uiFailPolicy = "u_AuthUIF"
 
     static func apply(to query: inout [String: Any]) {
         let context = LAContext()
         context.interactionNotAllowed = true
         query[kSecUseAuthenticationContext as String] = context
         query[kSecUseAuthenticationUI as String] = uiFailPolicy as CFString
-    }
-
-    /// Resolve the deprecated kSecUseAuthenticationUIFail constant at runtime
-    /// so we keep its true value without referencing deprecated API at
-    /// compile time; fall back to the known literal.
-    private static func resolveUIFailPolicy() -> String {
-        let securityPath = "/System/Library/Frameworks/Security.framework/Security"
-        guard let handle = dlopen(securityPath, RTLD_NOW) else { return "u_AuthUIF" }
-        defer { dlclose(handle) }
-        guard let symbol = dlsym(handle, "kSecUseAuthenticationUIFail") else { return "u_AuthUIF" }
-        return (symbol.assumingMemoryBound(to: CFString?.self).pointee as String?) ?? "u_AuthUIF"
     }
 }
