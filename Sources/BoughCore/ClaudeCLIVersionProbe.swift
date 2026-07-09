@@ -15,14 +15,19 @@ public enum ClaudeCLIVersionProbe {
         return detected
     }
 
-    /// internal for tests.
-    static func detect(executableCandidates: [String]? = nil) -> String? {
+    /// Executable locations shared with the delegated-refresh touch runner.
+    public static func defaultExecutableCandidates() -> [String] {
         let home = NSHomeDirectory()
-        let candidates = executableCandidates ?? [
+        return [
             home + "/.claude/local/claude",
             "/opt/homebrew/bin/claude",
             "/usr/local/bin/claude",
         ]
+    }
+
+    /// internal for tests.
+    static func detect(executableCandidates: [String]? = nil) -> String? {
+        let candidates = executableCandidates ?? defaultExecutableCandidates()
         for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
             if let version = runVersionProbe(path: path) { return version }
         }
