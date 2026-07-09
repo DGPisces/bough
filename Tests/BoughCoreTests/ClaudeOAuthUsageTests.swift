@@ -760,10 +760,10 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         // 第一次请求 401；委托刷新成功后重试返回 200。
         // F5: distinct tokens per phase so we can assert the retry used the rotated token.
         let fixedMdat = Date(timeIntervalSince1970: 3_000_000)
-        var requests = 0
+        let requests = Counter()
         var keychainPayload = credentialsData(accessToken: "tok-old")
         var refreshCalls = 0
-        var capturedAuthHeaders: [String] = []
+        let capturedAuthHeaders = MutableBox<[String]>([])
         let now = fixedMdat.addingTimeInterval(100)
         let reader = ClaudeOAuthCredentialsReader(
             fileURLs: [],
@@ -776,9 +776,9 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let client = ClaudeOAuthUsageClient(
             credentialsReader: reader,
             transport: { request in
-                capturedAuthHeaders.append(request.value(forHTTPHeaderField: "Authorization") ?? "")
-                requests += 1
-                return requests == 1 ? DelegationFixtures.unauthorizedResponse : DelegationFixtures.usageOKResponse
+                capturedAuthHeaders.value = capturedAuthHeaders.value + [request.value(forHTTPHeaderField: "Authorization") ?? ""]
+                requests.increment()
+                return requests.value == 1 ? DelegationFixtures.unauthorizedResponse : DelegationFixtures.usageOKResponse
             },
             now: { now },
             gate: gate,
@@ -791,10 +791,10 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let payload = try client.fetchStatusLinePayload()
         XCTAssertFalse(payload.isEmpty)
         XCTAssertEqual(refreshCalls, 1)
-        XCTAssertEqual(requests, 2)
+        XCTAssertEqual(requests.value, 2)
         // F5: first request used tok-old, retry used the rotated tok-new.
-        XCTAssertEqual(capturedAuthHeaders.first, "Bearer tok-old")
-        XCTAssertEqual(capturedAuthHeaders.last, "Bearer tok-new")
+        XCTAssertEqual(capturedAuthHeaders.value.first, "Bearer tok-old")
+        XCTAssertEqual(capturedAuthHeaders.value.last, "Bearer tok-new")
         // 重试成功 → 不得武装 unauthorized 冷却。
         XCTAssertNil(gate.activeCooldown(key: "claude.unauthorized", now: now))
     }
@@ -802,7 +802,7 @@ final class ClaudeOAuthUsageTests: XCTestCase {
     func testUnauthorizedRetryFailureArmsCooldownAndThrows() {
         let fixedMdat = Date(timeIntervalSince1970: 3_000_000)
         let now = fixedMdat.addingTimeInterval(100)
-        var requests = 0
+        let requests = Counter()
         let reader = ClaudeOAuthCredentialsReader(
             fileURLs: [],
             keychainRead: { _ in .success(DelegationFixtures.freshCredentialsData) },
@@ -813,7 +813,7 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let gate = OAuthCooldownGate()
         let client = ClaudeOAuthUsageClient(
             credentialsReader: reader,
-            transport: { _ in requests += 1; return DelegationFixtures.unauthorizedResponse },
+            transport: { _ in requests.increment(); return DelegationFixtures.unauthorizedResponse },
             now: { now },
             gate: gate,
             delegatedRefresh: { true }
@@ -821,26 +821,26 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         XCTAssertThrowsError(try client.fetchStatusLinePayload()) { error in
             XCTAssertEqual(error as? OAuthUsageError, .unauthorized(statusCode: 401))
         }
-        XCTAssertEqual(requests, 2)  // 原始 + 单次重试，绝无第三次
+        XCTAssertEqual(requests.value, 2)  // 原始 + 单次重试，绝无第三次
         XCTAssertNotNil(gate.activeCooldown(key: "claude.unauthorized", now: now))
     }
 
     func testUnauthorizedWithChangedItemDoesNotDelegate() {
         // item 已变（探测返回新日期）→ 委托刷新不该被调用（下一轮 suspect 探测会拿新令牌）。
-        var probeDate = Date(timeIntervalSince1970: 3_000_000)
-        let now = probeDate.addingTimeInterval(100)
+        let probeDateBox = MutableBox(Date(timeIntervalSince1970: 3_000_000))
+        let now = probeDateBox.value.addingTimeInterval(100)
         var refreshCalls = 0
         let reader = ClaudeOAuthCredentialsReader(
             fileURLs: [],
             keychainRead: { _ in .success(DelegationFixtures.freshCredentialsData) },
-            keychainProbeModificationDate: { probeDate },
+            keychainProbeModificationDate: { probeDateBox.value },
             now: { now },
             gate: OAuthCooldownGate()
         )
         let client = ClaudeOAuthUsageClient(
             credentialsReader: reader,
             transport: { _ in
-                probeDate = probeDate.addingTimeInterval(60)  // 请求后 item 轮换
+                probeDateBox.value = probeDateBox.value.addingTimeInterval(60)  // 请求后 item 轮换
                 return DelegationFixtures.unauthorizedResponse
             },
             now: { now },
