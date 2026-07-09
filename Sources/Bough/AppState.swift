@@ -150,7 +150,8 @@ final class AppState {
                 // NOT mirror-first: the app must see rotated CLI credentials
                 // promptly (it WRITES the mirror); an unexpired stale mirror
                 // would shadow the keychain until expiry.
-                keychainRead: ClaudeKeychainReader.readCredentialsData,
+                // ponytail: mode ignored until Task 6 wires KeychainReadChain here
+                keychainRead: { _ in ClaudeKeychainReader.readCredentialsData() },
                 keychainProbeModificationDate: ClaudeKeychainReader.readModificationDate
             ),
             tokenMirrorWriter: mirrorWriter

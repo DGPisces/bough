@@ -67,7 +67,7 @@ public final class ClaudeOAuthCredentialsReader: @unchecked Sendable {
     private static let cooldownKey = "claude.keychainDenied"
 
     private let fileURLs: [URL]
-    private let keychainRead: (() -> Result<Data, KeychainReadFailure>)?
+    private let keychainRead: ((KeychainReadMode) -> Result<Data, KeychainReadFailure>)?
     private let keychainProbeModificationDate: (() -> Date?)?
     private let now: () -> Date
     private let gate: OAuthCooldownGate
@@ -91,6 +91,7 @@ public final class ClaudeOAuthCredentialsReader: @unchecked Sendable {
     private var cachedCredentialsSuspect = false
     private var lastKeychainModificationDate: Date?
     private var lastKeychainFailure: OAuthUsageError?
+    private var interactiveReadArmed = false
 
     public static func defaultCredentialsFileURL() -> URL {
         URL(fileURLWithPath: NSHomeDirectory())
@@ -99,7 +100,7 @@ public final class ClaudeOAuthCredentialsReader: @unchecked Sendable {
 
     public init(
         fileURLs: [URL] = [ClaudeOAuthCredentialsReader.defaultCredentialsFileURL()],
-        keychainRead: (() -> Result<Data, KeychainReadFailure>)?,
+        keychainRead: ((KeychainReadMode) -> Result<Data, KeychainReadFailure>)?,
         keychainProbeModificationDate: (() -> Date?)? = nil,
         now: @escaping () -> Date = Date.init,
         gate: OAuthCooldownGate = .shared
@@ -128,6 +129,27 @@ public final class ClaudeOAuthCredentialsReader: @unchecked Sendable {
         stateLock.lock()
         cachedCredentialsSuspect = true
         stateLock.unlock()
+    }
+
+    /// Arms exactly one `.interactiveAllowed` read. Called from the manual
+    /// user retry path (resetTransientGates) — CodexBar's onlyOnUserAction.
+    public func allowInteractiveReadOnce() {
+        stateLock.lock()
+        interactiveReadArmed = true
+        stateLock.unlock()
+    }
+
+    /// True when a probe is available, a data read recorded an mdat, and the
+    /// item still carries that mdat — i.e. re-reading could only return the
+    /// same bytes. Uncertainty (no probe / nothing recorded) reads as false.
+    public func keychainItemUnchangedSinceLastRead() -> Bool {
+        guard let probe = keychainProbeModificationDate else { return false }
+        let current = probe()
+        stateLock.lock()
+        let recorded = lastKeychainModificationDate
+        stateLock.unlock()
+        guard let recorded, let current else { return false }
+        return current == recorded
     }
 
     private func cachedCredentialsIfFresh() -> ClaudeOAuthCredentials? {
@@ -192,7 +214,12 @@ public final class ClaudeOAuthCredentialsReader: @unchecked Sendable {
                 throw recordedFailure ?? OAuthUsageError.tokenExpired
             }
 
-            switch keychainRead() {
+            stateLock.lock()
+            let mode: KeychainReadMode = interactiveReadArmed ? .interactiveAllowed : .silent
+            interactiveReadArmed = false
+            stateLock.unlock()
+
+            switch keychainRead(mode) {
             case .success(let data):
                 let parsed = ClaudeOAuthCredentials.parse(jsonData: data)
                 stateLock.lock()
@@ -349,6 +376,7 @@ public final class ClaudeOAuthUsageClient: ClaudeUsageFetching, @unchecked Senda
 
     public func resetTransientGates() {
         credentialsReader.resetKeychainCooldown()
+        credentialsReader.allowInteractiveReadOnce()
         gate.clear(key: Self.unauthorizedKey)
     }
 
