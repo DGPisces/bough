@@ -76,6 +76,22 @@ do {
     exit(2)
 }
 
+// Delegated refresh shares one coordinator so its cooldowns persist across
+// polls (a fresh instance per call would lose them and re-spawn claude).
+let helperClaudeFingerprint: () -> Date? = {
+    SecurityCLIKeychainReader.readModificationDate(
+        service: SecurityCLIKeychainReader.claudeService)
+}
+let helperDelegatedRefreshCoordinator = ClaudeDelegatedRefreshCoordinator(
+    touch: {
+        guard let path = ClaudeCLITouchRunner.resolvedClaudeExecutablePath() else {
+            throw ClaudeCLITouchError.claudeNotInstalled
+        }
+        try ClaudeCLITouchRunner.touchStatus(executablePath: path)
+    },
+    fingerprint: helperClaudeFingerprint
+)
+
 do {
     let store = try UsageContinuityStore(path: arguments.continuityPath)
     let runner = UsageMonitorRunner(
@@ -93,8 +109,17 @@ do {
                     ClaudeOAuthTokenMirror.fileURL(),
                     URL(fileURLWithPath: NSHomeDirectory() + "/.claude/.credentials.json"),
                 ],
-                keychainRead: nil   // helper MUST never touch the Keychain (spec §6.2)
-            )
+                // Helper reads the CLI keychain item via /usr/bin/security —
+                // silent (apple-tool partition), no Security.framework import,
+                // and it picks up rotated tokens after the mirror expires
+                // (spec 2026-07-09 §3.3; supersedes the old never-touch rule).
+                keychainRead: { _ in
+                    SecurityCLIKeychainReader.readCredentialsData(
+                        service: SecurityCLIKeychainReader.claudeService)
+                },
+                keychainProbeModificationDate: helperClaudeFingerprint
+            ),
+            delegatedRefresh: { helperDelegatedRefreshCoordinator.attempt() == .succeeded }
         ),
         codexOAuthFetcher: CodexOAuthUsageClient()
     )

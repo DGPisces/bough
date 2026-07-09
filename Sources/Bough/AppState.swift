@@ -150,11 +150,11 @@ final class AppState {
                 // NOT mirror-first: the app must see rotated CLI credentials
                 // promptly (it WRITES the mirror); an unexpired stale mirror
                 // would shadow the keychain until expiry.
-                // ponytail: mode ignored until Task 6 wires KeychainReadChain here
-                keychainRead: { _ in ClaudeKeychainReader.readCredentialsData() },
+                keychainRead: ClaudeKeychainReader.readCredentialsData,
                 keychainProbeModificationDate: ClaudeKeychainReader.readModificationDate
             ),
-            tokenMirrorWriter: mirrorWriter
+            tokenMirrorWriter: mirrorWriter,
+            delegatedRefresh: ClaudeKeychainReader.makeDelegatedRefresh()
         )
         let codex = CodexOAuthUsageClient()
         let fallback = CodexAppServerRateLimitMonitorReader(
