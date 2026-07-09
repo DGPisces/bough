@@ -66,6 +66,15 @@ final class ClaudeCLITouchRunnerTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(started), 5)
     }
 
+    func testTouchKillsMachOChildThatDoesNotSetsid() throws {
+        // /usr/bin/yes is a system Mach-O that never calls setsid(): with
+        // setpgid failing on modern Darwin, only a direct-pid kill reaches it.
+        let started = Date()
+        try ClaudeCLITouchRunner.touchStatus(
+            executablePath: "/usr/bin/yes", timeout: 0.5, inputInterval: 0.2)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+    }
+
     func testMissingBinaryThrowsLaunchFailed() {
         XCTAssertThrowsError(try ClaudeCLITouchRunner.touchStatus(
             executablePath: tempDir.appendingPathComponent("nope").path, timeout: 0.5)

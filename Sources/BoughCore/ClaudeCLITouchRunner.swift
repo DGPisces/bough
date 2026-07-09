@@ -41,18 +41,23 @@ public enum ClaudeCLITouchRunner {
         // ponytail: macOS posix_spawn + PTY causes /bin/sh to treat PTY stdin as an
         // interactive command stream and ignore the script file. Detect a shebang and
         // invoke the interpreter with the script path as an explicit file argument so
-        // non-interactive mode is preserved. Mach-O binaries (no #!) are exec'd directly.
+        // non-interactive mode is preserved. This handles wrapper-script installs
+        // (e.g. ~/.claude/local/claude is often a shell script) and test fakes;
+        // Mach-O binaries (no #!) are exec'd directly and skip this path.
         process.executableURL = URL(fileURLWithPath: executablePath)
-        if let data = FileManager.default.contents(atPath: executablePath),
-           data.count > 2, data[0] == 0x23, data[1] == 0x21,
-           let nlIdx = data.firstIndex(of: 0x0A) {
-            let interpLine = String(data: data[2..<nlIdx], encoding: .utf8)?
-                .trimmingCharacters(in: .whitespaces) ?? ""
-            let parts = interpLine.split(separator: " ", maxSplits: 1,
-                                         omittingEmptySubsequences: true).map(String.init)
-            if let interp = parts.first {
-                process.executableURL = URL(fileURLWithPath: interp)
-                process.arguments = (parts.count > 1 ? [parts[1]] : []) + [executablePath]
+        if let handle = FileHandle(forReadingAtPath: executablePath) {
+            let header = handle.readData(ofLength: 128)
+            try? handle.close()
+            if header.count > 2, header[0] == 0x23, header[1] == 0x21,
+               let nlIdx = header.firstIndex(of: 0x0A) {
+                let interpLine = String(data: header[2..<nlIdx], encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespaces) ?? ""
+                let parts = interpLine.split(separator: " ", maxSplits: 1,
+                                             omittingEmptySubsequences: true).map(String.init)
+                if let interp = parts.first {
+                    process.executableURL = URL(fileURLWithPath: interp)
+                    process.arguments = (parts.count > 1 ? [parts[1]] : []) + [executablePath]
+                }
             }
         }
         process.standardInput = slaveHandle
@@ -67,7 +72,7 @@ public enum ClaudeCLITouchRunner {
         close(slaveFD)
 
         let pid = process.processIdentifier
-        _ = setpgid(pid, pid)
+        let pgidSet = setpgid(pid, pid) == 0
         let deadline = Date().addingTimeInterval(timeout)
         var nextInputAt = Date()
         var drainBuffer = [UInt8](repeating: 0, count: 4096)
@@ -85,13 +90,15 @@ public enum ClaudeCLITouchRunner {
         }
 
         if process.isRunning {
-            kill(-pid, SIGTERM)
+            if pgidSet { kill(-pid, SIGTERM) } else { kill(pid, SIGTERM) }
             let killDeadline = Date().addingTimeInterval(0.4)
             while process.isRunning && Date() < killDeadline {
                 while read(masterFD, &drainBuffer, drainBuffer.count) > 0 {}
                 Thread.sleep(forTimeInterval: 0.05)
             }
-            if process.isRunning { kill(-pid, SIGKILL) }
+            if process.isRunning {
+                if pgidSet { kill(-pid, SIGKILL) } else { kill(pid, SIGKILL) }
+            }
         }
         process.waitUntilExit() // reap — no zombies
     }
