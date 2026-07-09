@@ -653,6 +653,140 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         XCTAssertFalse(reader.keychainItemUnchangedSinceLastRead())
     }
 
+    // MARK: - Delegated refresh triggers
+
+    /// 造一个 reader：文件源过期 → read() 抛 tokenExpired；委托刷新"成功"后
+    /// keychain 闭包给出新鲜凭据。
+    func testTokenExpiredTriggersDelegatedRefreshThenRetriesRead() throws {
+        var keychainPayload = DelegationFixtures.expiredCredentialsData
+        var refreshCalls = 0
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: { _ in .success(keychainPayload) },
+            keychainProbeModificationDate: { nil },
+            gate: OAuthCooldownGate()
+        )
+        let client = ClaudeOAuthUsageClient(
+            credentialsReader: reader,
+            transport: { _ in DelegationFixtures.usageOKResponse },
+            gate: OAuthCooldownGate(),
+            delegatedRefresh: {
+                refreshCalls += 1
+                keychainPayload = DelegationFixtures.freshCredentialsData
+                return true
+            }
+        )
+        let payload = try client.fetchStatusLinePayload()
+        XCTAssertFalse(payload.isEmpty)
+        XCTAssertEqual(refreshCalls, 1)
+    }
+
+    func testTokenExpiredWithoutDelegateRethrows() {
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: { _ in .success(DelegationFixtures.expiredCredentialsData) },
+            keychainProbeModificationDate: { nil },
+            gate: OAuthCooldownGate()
+        )
+        let client = ClaudeOAuthUsageClient(
+            credentialsReader: reader,
+            transport: { _ in DelegationFixtures.usageOKResponse },
+            gate: OAuthCooldownGate()
+        )
+        XCTAssertThrowsError(try client.fetchStatusLinePayload()) { error in
+            XCTAssertEqual(error as? OAuthUsageError, .tokenExpired)
+        }
+    }
+
+    func testUnauthorizedWithUnchangedItemDelegatesAndRetriesOnce() throws {
+        // 第一次请求 401；委托刷新成功后重试返回 200。
+        let fixedMdat = Date(timeIntervalSince1970: 3_000_000)
+        var requests = 0
+        var keychainPayload = DelegationFixtures.freshCredentialsData
+        var refreshCalls = 0
+        let now = fixedMdat.addingTimeInterval(100)
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: { _ in .success(keychainPayload) },
+            keychainProbeModificationDate: { fixedMdat },  // 永不变 → itemUnchanged = true
+            now: { now },
+            gate: OAuthCooldownGate()
+        )
+        let gate = OAuthCooldownGate()
+        let client = ClaudeOAuthUsageClient(
+            credentialsReader: reader,
+            transport: { _ in
+                requests += 1
+                return requests == 1 ? DelegationFixtures.unauthorizedResponse : DelegationFixtures.usageOKResponse
+            },
+            now: { now },
+            gate: gate,
+            delegatedRefresh: {
+                refreshCalls += 1
+                keychainPayload = DelegationFixtures.freshCredentialsData
+                return true
+            }
+        )
+        let payload = try client.fetchStatusLinePayload()
+        XCTAssertFalse(payload.isEmpty)
+        XCTAssertEqual(refreshCalls, 1)
+        XCTAssertEqual(requests, 2)
+        // 重试成功 → 不得武装 unauthorized 冷却。
+        XCTAssertNil(gate.activeCooldown(key: "claude.unauthorized", now: now))
+    }
+
+    func testUnauthorizedRetryFailureArmsCooldownAndThrows() {
+        let fixedMdat = Date(timeIntervalSince1970: 3_000_000)
+        let now = fixedMdat.addingTimeInterval(100)
+        var requests = 0
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: { _ in .success(DelegationFixtures.freshCredentialsData) },
+            keychainProbeModificationDate: { fixedMdat },
+            now: { now },
+            gate: OAuthCooldownGate()
+        )
+        let gate = OAuthCooldownGate()
+        let client = ClaudeOAuthUsageClient(
+            credentialsReader: reader,
+            transport: { _ in requests += 1; return DelegationFixtures.unauthorizedResponse },
+            now: { now },
+            gate: gate,
+            delegatedRefresh: { true }
+        )
+        XCTAssertThrowsError(try client.fetchStatusLinePayload()) { error in
+            XCTAssertEqual(error as? OAuthUsageError, .unauthorized(statusCode: 401))
+        }
+        XCTAssertEqual(requests, 2)  // 原始 + 单次重试，绝无第三次
+        XCTAssertNotNil(gate.activeCooldown(key: "claude.unauthorized", now: now))
+    }
+
+    func testUnauthorizedWithChangedItemDoesNotDelegate() {
+        // item 已变（探测返回新日期）→ 委托刷新不该被调用（下一轮 suspect 探测会拿新令牌）。
+        var probeDate = Date(timeIntervalSince1970: 3_000_000)
+        let now = probeDate.addingTimeInterval(100)
+        var refreshCalls = 0
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: { _ in .success(DelegationFixtures.freshCredentialsData) },
+            keychainProbeModificationDate: { probeDate },
+            now: { now },
+            gate: OAuthCooldownGate()
+        )
+        let client = ClaudeOAuthUsageClient(
+            credentialsReader: reader,
+            transport: { _ in
+                probeDate = probeDate.addingTimeInterval(60)  // 请求后 item 轮换
+                return DelegationFixtures.unauthorizedResponse
+            },
+            now: { now },
+            gate: OAuthCooldownGate(),
+            delegatedRefresh: { refreshCalls += 1; return true }
+        )
+        XCTAssertThrowsError(try client.fetchStatusLinePayload())
+        XCTAssertEqual(refreshCalls, 0)
+    }
+
     func testMirrorRewrittenWhenFileMissingEvenIfTokenUnchanged() throws {
         // mirrorIfNeeded 通过 $HOME 解析镜像路径——三次 fetch 都要重定向。
         setenv("HOME", tempDir.path, 1)

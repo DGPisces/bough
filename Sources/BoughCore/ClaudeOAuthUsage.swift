@@ -357,6 +357,7 @@ public final class ClaudeOAuthUsageClient: ClaudeUsageFetching, @unchecked Senda
     private let tokenMirrorWriter: ((ClaudeOAuthCredentials) -> Void)?
     private let mirrorLock = NSLock()
     private var lastMirroredToken: String?
+    private let delegatedRefresh: (() -> Bool)?
 
     public init(
         credentialsReader: ClaudeOAuthCredentialsReader,
@@ -364,7 +365,8 @@ public final class ClaudeOAuthUsageClient: ClaudeUsageFetching, @unchecked Senda
         userAgentVersion: @escaping () -> String = { ClaudeCLIVersionProbe.cachedVersion() },
         now: @escaping () -> Date = Date.init,
         gate: OAuthCooldownGate = .shared,
-        tokenMirrorWriter: ((ClaudeOAuthCredentials) -> Void)? = nil
+        tokenMirrorWriter: ((ClaudeOAuthCredentials) -> Void)? = nil,
+        delegatedRefresh: (() -> Bool)? = nil
     ) {
         self.credentialsReader = credentialsReader
         self.transport = transport
@@ -372,6 +374,7 @@ public final class ClaudeOAuthUsageClient: ClaudeUsageFetching, @unchecked Senda
         self.now = now
         self.gate = gate
         self.tokenMirrorWriter = tokenMirrorWriter
+        self.delegatedRefresh = delegatedRefresh
     }
 
     public func resetTransientGates() {
@@ -386,28 +389,38 @@ public final class ClaudeOAuthUsageClient: ClaudeUsageFetching, @unchecked Senda
                 throw OAuthUsageError.cooldownActive(until: until)
             }
         }
-        let credentials = try credentialsReader.read()
+        let credentials: ClaudeOAuthCredentials
+        do {
+            credentials = try credentialsReader.read()
+        } catch OAuthUsageError.tokenExpired {
+            // Delegated refresh (spec §3.4 trigger 1): every source is expired —
+            // ask the CLI to renew, then read the rotated item.
+            guard let delegatedRefresh, delegatedRefresh() else {
+                throw OAuthUsageError.tokenExpired
+            }
+            credentialsReader.resetKeychainCooldown()
+            credentials = try credentialsReader.read()
+        }
         mirrorIfNeeded(credentials)
 
-        var request = URLRequest(url: Self.endpoint)
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(Self.betaHeader, forHTTPHeaderField: "anthropic-beta")
-        request.setValue("claude-code/\(userAgentVersion())", forHTTPHeaderField: "User-Agent")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-        let response = try transport(request)
+        let response = try performRequest(credentials: credentials)
         switch response.statusCode {
         case 200:
-            guard let payload = ClaudeOAuthUsageMapper.statusLinePayloadData(fromOAuthBody: response.body) else {
-                throw OAuthUsageError.parseFailed
-            }
-            return payload
+            return try mapPayload(response)
         case 401, 403:
             // Mark (don't drop) the token: after the cooldown it is retried —
             // a transient 401 self-heals — while the suspect probe picks up a
             // CLI re-login (rotated Keychain item) without waiting for expiry.
             credentialsReader.markCachedCredentialsSuspect()
+            // Delegated refresh (spec §3.4 trigger 2): server rejected the
+            // token while the Keychain item is unchanged — the CLI hasn't
+            // renewed on its own; ask it to, then retry exactly once.
+            if let delegatedRefresh,
+               credentialsReader.keychainItemUnchangedSinceLastRead(),
+               delegatedRefresh() {
+                credentialsReader.resetKeychainCooldown()
+                if let retried = try? retryOnceAfterRefresh() { return retried }
+            }
             gate.setCooldown(
                 key: Self.unauthorizedKey,
                 until: now().addingTimeInterval(Self.unauthorizedCooldown)
@@ -421,6 +434,35 @@ public final class ClaudeOAuthUsageClient: ClaudeUsageFetching, @unchecked Senda
         default:
             throw OAuthUsageError.httpStatus(response.statusCode)
         }
+    }
+
+    /// One fresh read + one request after a successful delegated refresh.
+    /// No second delegation — the coordinator cooldown backstops loops anyway.
+    private func retryOnceAfterRefresh() throws -> Data {
+        let credentials = try credentialsReader.read()
+        mirrorIfNeeded(credentials)
+        let response = try performRequest(credentials: credentials)
+        guard response.statusCode == 200 else {
+            throw OAuthUsageError.httpStatus(response.statusCode)
+        }
+        return try mapPayload(response)
+    }
+
+    private func performRequest(credentials: ClaudeOAuthCredentials) throws -> OAuthHTTPResponse {
+        var request = URLRequest(url: Self.endpoint)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(Self.betaHeader, forHTTPHeaderField: "anthropic-beta")
+        request.setValue("claude-code/\(userAgentVersion())", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        return try transport(request)
+    }
+
+    private func mapPayload(_ response: OAuthHTTPResponse) throws -> Data {
+        guard let payload = ClaudeOAuthUsageMapper.statusLinePayloadData(fromOAuthBody: response.body) else {
+            throw OAuthUsageError.parseFailed
+        }
+        return payload
     }
 
     private func mirrorIfNeeded(_ credentials: ClaudeOAuthCredentials) {
