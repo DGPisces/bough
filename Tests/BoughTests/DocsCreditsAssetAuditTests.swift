@@ -116,6 +116,8 @@ final class DocsCreditsAssetAuditTests: XCTestCase {
 
         XCTAssertTrue(credits.contains("Thanks to [CodeIsland](https://github.com/wxtsky/CodeIsland) for providing the foundation."))
         XCTAssertTrue(credits.contains("Copyright (c) 2026 wxtsky"))
+        XCTAssertTrue(credits.contains("[CodexBar](https://github.com/steipete/CodexBar)"))
+        XCTAssertTrue(credits.contains("Copyright (c) 2026 Peter Steinberger"))
         XCTAssertTrue(credits.contains("Sparkle"))
         XCTAssertTrue(credits.contains("Yams"))
         XCTAssertTrue(credits.contains("TOMLKit"))
