@@ -75,6 +75,22 @@ final class ClaudeCLITouchRunnerTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(started), 5)
     }
 
+    func testTouchKillsWrapperScriptDescendants() throws {
+        // Non-interactive sh has job control off, so a backgrounded child stays
+        // in the script's process group — the group kill must reach it.
+        let childPidFile = tempDir.appendingPathComponent("child.pid").path
+        let bin = try fakeClaude(script: "sleep 60 & echo $! > '\(childPidFile)'; sleep 60")
+        try ClaudeCLITouchRunner.touchStatus(executablePath: bin, timeout: 0.5, inputInterval: 0.2)
+        let childPid = Int32(try String(contentsOfFile: childPidFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
+        XCTAssertGreaterThan(childPid, 0)
+        let deadline = Date().addingTimeInterval(2)
+        while kill(childPid, 0) == 0 && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        XCTAssertEqual(kill(childPid, 0), -1, "wrapper's background child must be terminated")
+    }
+
     func testMissingBinaryThrowsLaunchFailed() {
         XCTAssertThrowsError(try ClaudeCLITouchRunner.touchStatus(
             executablePath: tempDir.appendingPathComponent("nope").path, timeout: 0.5)

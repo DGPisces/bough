@@ -15,6 +15,7 @@ final class ClaudeKeychainReaderGovernanceTests: XCTestCase {
         XCTAssertTrue(noUI.contains("kSecUseAuthenticationContext"))
         XCTAssertTrue(noUI.contains("kSecUseAuthenticationUIFail"))
         XCTAssertTrue(noUI.contains(#"u_AuthUIF"#))  // 冻结字面量，动态查找被治理测试禁止
+        XCTAssertTrue(noUI.contains("query[kSecUseAuthenticationUI as String]"))
         XCTAssertTrue(noUI.contains("Adapted from steipete/CodexBar"))
     }
 

@@ -90,16 +90,32 @@ public enum ClaudeCLITouchRunner {
         }
 
         if process.isRunning {
-            if pgidSet { kill(-pid, SIGTERM) } else { kill(pid, SIGTERM) }
+            signalChild(pid: pid, pgidSet: pgidSet, signal: SIGTERM)
             let killDeadline = Date().addingTimeInterval(0.4)
             while process.isRunning && Date() < killDeadline {
                 while read(masterFD, &drainBuffer, drainBuffer.count) > 0 {}
                 Thread.sleep(forTimeInterval: 0.05)
             }
             if process.isRunning {
-                if pgidSet { kill(-pid, SIGKILL) } else { kill(pid, SIGKILL) }
+                signalChild(pid: pid, pgidSet: pgidSet, signal: SIGKILL)
             }
         }
         process.waitUntilExit() // reap — no zombies
+    }
+
+    /// Sends `signal` to the child's process group when one is available and
+    /// distinct from ours (wrapper script that spawns children without exec),
+    /// otherwise falls back to the individual pid.
+    private static func signalChild(pid: pid_t, pgidSet: Bool, signal: Int32) {
+        if pgidSet {
+            kill(-pid, signal)
+            return
+        }
+        let childPgid = getpgid(pid)
+        if childPgid > 0 && childPgid != getpgid(0) {
+            kill(-childPgid, signal) // wrapper's own group covers its background children
+        } else {
+            kill(pid, signal)
+        }
     }
 }

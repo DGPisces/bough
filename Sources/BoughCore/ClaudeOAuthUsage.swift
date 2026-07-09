@@ -170,6 +170,14 @@ public final class ClaudeOAuthCredentialsReader: @unchecked Sendable {
     ///   but every parsed token is expired; `.keychainDenied` on ACL denial
     ///   (with a 6h gate); `.credentialsUnavailable` otherwise.
     public func read() throws -> ClaudeOAuthCredentials {
+        // F1: snapshot-and-clear at the TOP so the arm is spent by this call
+        // whether or not execution reaches the keychain closure — background
+        // polls that short-circuit via file/cache/mdat can never inherit it.
+        stateLock.lock()
+        let interactiveArmedForThisRead = interactiveReadArmed
+        interactiveReadArmed = false
+        stateLock.unlock()
+
         var sawExpired = false
         for url in fileURLs {
             guard let data = try? Data(contentsOf: url),
@@ -214,10 +222,7 @@ public final class ClaudeOAuthCredentialsReader: @unchecked Sendable {
                 throw recordedFailure ?? OAuthUsageError.tokenExpired
             }
 
-            stateLock.lock()
-            let mode: KeychainReadMode = interactiveReadArmed ? .interactiveAllowed : .silent
-            interactiveReadArmed = false
-            stateLock.unlock()
+            let mode: KeychainReadMode = interactiveArmedForThisRead ? .interactiveAllowed : .silent
 
             switch keychainRead(mode) {
             case .success(let data):
@@ -251,10 +256,16 @@ public final class ClaudeOAuthCredentialsReader: @unchecked Sendable {
                 lastKeychainFailure = nil
                 stateLock.unlock()
             case .failure(.denied):
-                gate.setCooldown(
-                    key: Self.cooldownKey,
-                    until: now().addingTimeInterval(Self.keychainDenialCooldown)
-                )
+                // F3: arm the 6h cooldown only when this read was interactive.
+                // Silent denials (errSecInteractionNotAllowed, CLI timeout) are
+                // transient process failures — retrying them each poll is harmless
+                // and poisoning the gate for 6h would mask a fixable condition.
+                if interactiveArmedForThisRead {
+                    gate.setCooldown(
+                        key: Self.cooldownKey,
+                        until: now().addingTimeInterval(Self.keychainDenialCooldown)
+                    )
+                }
                 throw OAuthUsageError.keychainDenied
             }
         }

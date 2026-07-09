@@ -102,6 +102,8 @@ final class ClaudeOAuthUsageTests: XCTestCase {
             now: { nowBox.value },
             gate: OAuthCooldownGate()
         )
+        // F3: cooldown only arms on interactive denial; arm before the first read.
+        reader.allowInteractiveReadOnce()
         XCTAssertThrowsError(try reader.read()) { error in
             XCTAssertEqual(error as? OAuthUsageError, .keychainDenied)
         }
@@ -262,6 +264,9 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let secondDone = expectation(description: "second read")
         let firstError = MutableBox<Error?>(nil)
         let secondError = MutableBox<Error?>(nil)
+        // F3: arm interactive so the first (dialog-capable) denial arms the gate;
+        // the second read observes keychainDenied via the gate without a second closure call.
+        reader.allowInteractiveReadOnce()
         DispatchQueue.global().async {
             if case .failure(let error) = Result(catching: { try reader.read() }) {
                 firstError.value = error
@@ -634,6 +639,54 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         XCTAssertEqual(seenModes, [.interactiveAllowed, .silent])
     }
 
+    // F1: arm consumed by the read() call it was intended for, even when that
+    // call never reaches the keychain (file source satisfies it earlier).
+    func testInteractiveArmSpentByFileSatisfiedRead() throws {
+        var seenModes: [KeychainReadMode] = []
+        let credFile = tempDir.appendingPathComponent("creds.json")
+        try DelegationFixtures.freshCredentialsData.write(to: credFile)
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [credFile],
+            keychainRead: { mode in
+                seenModes.append(mode)
+                // Return itemNotFound so the second read throws without caching,
+                // allowing us to confirm the mode without complicating the assertion.
+                return .failure(.itemNotFound)
+            },
+            gate: OAuthCooldownGate()
+        )
+        // First read: file source succeeds; keychain closure never called.
+        reader.allowInteractiveReadOnce()
+        _ = try reader.read()
+        XCTAssertTrue(seenModes.isEmpty, "keychain should not have been called")
+        // Second read: arm is spent; file is gone so keychain is reached → must be .silent.
+        try FileManager.default.removeItem(at: credFile)
+        XCTAssertThrowsError(try reader.read()) // credentialsUnavailable; we care about mode
+        XCTAssertEqual(seenModes, [.silent], "spent arm must not carry over to later reads")
+    }
+
+    // F3: silent denial does not arm the 6h cooldown.
+    func testSilentDenialDoesNotArmCooldown() {
+        let keychainCalls = Counter()
+        let gate = OAuthCooldownGate()
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: { _ in keychainCalls.increment(); return .failure(.denied(status: -25308)) },
+            now: { Date(timeIntervalSince1970: 5000) },
+            gate: gate
+        )
+        // Silent denial (no allowInteractiveReadOnce) throws keychainDenied but must NOT arm gate.
+        XCTAssertThrowsError(try reader.read()) { error in
+            XCTAssertEqual(error as? OAuthUsageError, .keychainDenied)
+        }
+        XCTAssertEqual(keychainCalls.value, 1)
+        // Second read must also reach the closure (no cooldown blocked it).
+        XCTAssertThrowsError(try reader.read()) { error in
+            XCTAssertEqual(error as? OAuthUsageError, .keychainDenied)
+        }
+        XCTAssertEqual(keychainCalls.value, 2)
+    }
+
     func testItemUnchangedSinceLastReadTracksProbe() throws {
         let fixedDate = Date(timeIntervalSince1970: 1_000_000)
         var probeDate = fixedDate
@@ -698,12 +751,19 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         }
     }
 
+    private func credentialsData(accessToken: String, expiresIn: TimeInterval = 3600) -> Data {
+        let millis = (Date().timeIntervalSince1970 + expiresIn) * 1000
+        return Data(#"{"claudeAiOauth":{"accessToken":"\#(accessToken)","expiresAt":\#(millis)}}"#.utf8)
+    }
+
     func testUnauthorizedWithUnchangedItemDelegatesAndRetriesOnce() throws {
         // 第一次请求 401；委托刷新成功后重试返回 200。
+        // F5: distinct tokens per phase so we can assert the retry used the rotated token.
         let fixedMdat = Date(timeIntervalSince1970: 3_000_000)
         var requests = 0
-        var keychainPayload = DelegationFixtures.freshCredentialsData
+        var keychainPayload = credentialsData(accessToken: "tok-old")
         var refreshCalls = 0
+        var capturedAuthHeaders: [String] = []
         let now = fixedMdat.addingTimeInterval(100)
         let reader = ClaudeOAuthCredentialsReader(
             fileURLs: [],
@@ -715,7 +775,8 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let gate = OAuthCooldownGate()
         let client = ClaudeOAuthUsageClient(
             credentialsReader: reader,
-            transport: { _ in
+            transport: { request in
+                capturedAuthHeaders.append(request.value(forHTTPHeaderField: "Authorization") ?? "")
                 requests += 1
                 return requests == 1 ? DelegationFixtures.unauthorizedResponse : DelegationFixtures.usageOKResponse
             },
@@ -723,7 +784,7 @@ final class ClaudeOAuthUsageTests: XCTestCase {
             gate: gate,
             delegatedRefresh: {
                 refreshCalls += 1
-                keychainPayload = DelegationFixtures.freshCredentialsData
+                keychainPayload = self.credentialsData(accessToken: "tok-new")
                 return true
             }
         )
@@ -731,6 +792,9 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         XCTAssertFalse(payload.isEmpty)
         XCTAssertEqual(refreshCalls, 1)
         XCTAssertEqual(requests, 2)
+        // F5: first request used tok-old, retry used the rotated tok-new.
+        XCTAssertEqual(capturedAuthHeaders.first, "Bearer tok-old")
+        XCTAssertEqual(capturedAuthHeaders.last, "Bearer tok-new")
         // 重试成功 → 不得武装 unauthorized 冷却。
         XCTAssertNil(gate.activeCooldown(key: "claude.unauthorized", now: now))
     }
