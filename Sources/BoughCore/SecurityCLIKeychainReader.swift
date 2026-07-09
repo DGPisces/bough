@@ -87,18 +87,20 @@ public enum SecurityCLIKeychainReader {
         do { try process.run() } catch { return nil }
 
         let pid = process.processIdentifier
-        _ = setpgid(pid, pid) // own process group so cleanup kills descendants
+        let pgidSet = setpgid(pid, pid) == 0  // own process group so cleanup kills descendants
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning && Date() < deadline {
             Thread.sleep(forTimeInterval: 0.02)
         }
         if process.isRunning {
-            kill(-pid, SIGTERM)
+            if pgidSet { kill(-pid, SIGTERM) } else { kill(pid, SIGTERM) }
             let killDeadline = Date().addingTimeInterval(0.4)
             while process.isRunning && Date() < killDeadline {
                 Thread.sleep(forTimeInterval: 0.05)
             }
-            if process.isRunning { kill(-pid, SIGKILL) }
+            if process.isRunning {
+                if pgidSet { kill(-pid, SIGKILL) } else { kill(pid, SIGKILL) }
+            }
             process.waitUntilExit() // reap
             return nil
         }

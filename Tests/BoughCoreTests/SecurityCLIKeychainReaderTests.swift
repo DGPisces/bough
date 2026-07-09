@@ -85,4 +85,15 @@ final class SecurityCLIKeychainReaderTests: XCTestCase {
         let bin = try fakeBinary(script: "echo no-attrs-here")
         XCTAssertNil(SecurityCLIKeychainReader.readModificationDate(service: "svc", binaryPath: bin))
     }
+
+    func testTimeoutKillsMachOChildThatDoesNotSetsid() {
+        // /usr/bin/yes never calls setsid(): if setpgid failed, only a
+        // direct-pid kill reaches it — a group-only kill would leave
+        // waitUntilExit() blocked forever while the caller holds keychainLock.
+        let started = Date()
+        let result = SecurityCLIKeychainReader.readCredentialsData(
+            service: "svc", binaryPath: "/usr/bin/yes", timeout: 0.3)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+        XCTAssertEqual(result, .failure(.denied(status: -1)))
+    }
 }
