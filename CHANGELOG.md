@@ -4,6 +4,23 @@ All notable changes to Bough are documented here.
 
 ## [Unreleased]
 
+### Usage
+
+- **Fixed**: Eliminated recurring macOS Keychain authorization dialogs for the
+  Claude usage channel. Keychain reads now use a non-interactive authorization
+  context with a silent `/usr/bin/security` fallback (adapted from CodexBar);
+  background polls can no longer prompt.
+- **Added**: Delegated token refresh — when the Claude CLI token expires while
+  the CLI is idle, Bough briefly launches `claude` so the CLI renews its own
+  credentials. The background usage monitor now also reads rotated tokens
+  after its mirror expires.
+- **修复**：彻底消除 Claude 用量通道反复弹出的 macOS 钥匙串授权对话框。
+  钥匙串读取改用非交互授权上下文，并以静默的 `/usr/bin/security` 兜底
+  （移植自 CodexBar）；后台轮询不再可能触发弹窗。
+- **新增**：委托令牌刷新——Claude CLI 令牌过期且 CLI 空闲时，Bough 会短暂
+  启动 `claude` 让 CLI 自行续期。后台用量监控在镜像过期后也能读到轮换后的
+  新令牌。
+
 ## [v1.1.1] - 2026-07-06
 
 ### English

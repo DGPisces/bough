@@ -1,6 +1,27 @@
 import XCTest
 @testable import BoughCore
 
+/// Fixtures for the KeychainReadMode / delegated-refresh tests (this plan).
+/// Expiry is relative to the REAL clock so they read correctly both under
+/// injected fixed `now` values (epoch-era) and the default Date.init.
+private enum DelegationFixtures {
+    static func credentialsData(expiresIn: TimeInterval) -> Data {
+        let millis = (Date().timeIntervalSince1970 + expiresIn) * 1000
+        return Data(
+            #"{"claudeAiOauth":{"accessToken":"tok-fixture","expiresAt":\#(millis)}}"#.utf8)
+    }
+    static var freshCredentialsData: Data { credentialsData(expiresIn: 3600) }
+    static var expiredCredentialsData: Data { credentialsData(expiresIn: -3600) }
+    static var usageOKResponse: OAuthHTTPResponse {
+        OAuthHTTPResponse(
+            statusCode: 200, headers: [:],
+            body: Data(#"{"five_hour":{"utilization":42.0,"resets_at":"2026-07-09T12:00:00Z"}}"#.utf8))
+    }
+    static var unauthorizedResponse: OAuthHTTPResponse {
+        OAuthHTTPResponse(statusCode: 401, headers: [:], body: Data())
+    }
+}
+
 final class ClaudeOAuthUsageTests: XCTestCase {
     private var tempDir: URL!
 
@@ -61,7 +82,7 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let keychainCalls = Counter()
         let reader = ClaudeOAuthCredentialsReader(
             fileURLs: [noOauth],
-            keychainRead: {
+            keychainRead: { _ in
                 keychainCalls.increment()
                 return .success(#"{"claudeAiOauth":{"accessToken":"kc","expiresAt":9000000000000}}"#.data(using: .utf8)!)
             },
@@ -77,10 +98,12 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let nowBox = MutableBox(Date(timeIntervalSince1970: 5000))
         let reader = ClaudeOAuthCredentialsReader(
             fileURLs: [tempDir.appendingPathComponent("absent.json")],
-            keychainRead: { keychainCalls.increment(); return .failure(.denied(status: -25293)) },
+            keychainRead: { _ in keychainCalls.increment(); return .failure(.denied(status: -25293)) },
             now: { nowBox.value },
             gate: OAuthCooldownGate()
         )
+        // F3: cooldown only arms on interactive denial; arm before the first read.
+        reader.allowInteractiveReadOnce()
         XCTAssertThrowsError(try reader.read()) { error in
             XCTAssertEqual(error as? OAuthUsageError, .keychainDenied)
         }
@@ -98,7 +121,7 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let keychainCalls = Counter()
         let reader = ClaudeOAuthCredentialsReader(
             fileURLs: [],
-            keychainRead: { keychainCalls.increment(); return .failure(.itemNotFound) },
+            keychainRead: { _ in keychainCalls.increment(); return .failure(.itemNotFound) },
             now: { Date(timeIntervalSince1970: 5000) },
             gate: OAuthCooldownGate()
         )
@@ -121,7 +144,7 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let tokenBox = MutableBox(#"{"claudeAiOauth":{"accessToken":"kc1","expiresAt":8000000}}"#)
         let reader = ClaudeOAuthCredentialsReader(
             fileURLs: [],
-            keychainRead: {
+            keychainRead: { _ in
                 keychainCalls.increment()
                 return .success(tokenBox.value.data(using: .utf8)!)
             },
@@ -150,7 +173,7 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let tokenBox = MutableBox(#"{"claudeAiOauth":{"accessToken":"old","expiresAt":1000}}"#)
         let reader = ClaudeOAuthCredentialsReader(
             fileURLs: [],
-            keychainRead: {
+            keychainRead: { _ in
                 keychainCalls.increment()
                 return .success(tokenBox.value.data(using: .utf8)!)
             },
@@ -181,7 +204,7 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let nowBox = MutableBox(Date(timeIntervalSince1970: 5000))
         let reader = ClaudeOAuthCredentialsReader(
             fileURLs: [],
-            keychainRead: {
+            keychainRead: { _ in
                 keychainCalls.increment()
                 return .success(#"{"claudeAiOauth":{"accessToken":"kc","expiresAt":8000000}}"#.data(using: .utf8)!)
             },
@@ -202,7 +225,7 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let keychainCalls = Counter()
         let reader = ClaudeOAuthCredentialsReader(
             fileURLs: [],
-            keychainRead: {
+            keychainRead: { _ in
                 keychainCalls.increment()
                 return .success(#"{"claudeAiOauth":{"accessToken":"old","expiresAt":1000}}"#.data(using: .utf8)!)
             },
@@ -227,7 +250,7 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let denyClicked = DispatchSemaphore(value: 0)
         let reader = ClaudeOAuthCredentialsReader(
             fileURLs: [],
-            keychainRead: {
+            keychainRead: { _ in
                 keychainCalls.increment()
                 readStarted.signal()
                 denyClicked.wait()
@@ -241,6 +264,9 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let secondDone = expectation(description: "second read")
         let firstError = MutableBox<Error?>(nil)
         let secondError = MutableBox<Error?>(nil)
+        // F3: arm interactive so the first (dialog-capable) denial arms the gate;
+        // the second read observes keychainDenied via the gate without a second closure call.
+        reader.allowInteractiveReadOnce()
         DispatchQueue.global().async {
             if case .failure(let error) = Result(catching: { try reader.read() }) {
                 firstError.value = error
@@ -274,7 +300,7 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let authHeaders = MutableBox<[String]>([])
         let reader = ClaudeOAuthCredentialsReader(
             fileURLs: [],
-            keychainRead: {
+            keychainRead: { _ in
                 keychainCalls.increment()
                 return .success(tokenBox.value.data(using: .utf8)!)
             },
@@ -326,7 +352,7 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let responses = MutableBox([401, 200])
         let reader = ClaudeOAuthCredentialsReader(
             fileURLs: [],
-            keychainRead: {
+            keychainRead: { _ in
                 .success(#"{"claudeAiOauth":{"accessToken":"tok","expiresAt":9000000000000}}"#.data(using: .utf8)!)
             },
             keychainProbeModificationDate: { Date(timeIntervalSince1970: 100) },
@@ -362,7 +388,7 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let keychainCalls = Counter()
         let reader = ClaudeOAuthCredentialsReader(
             fileURLs: [expired],
-            keychainRead: {
+            keychainRead: { _ in
                 keychainCalls.increment()
                 return .success(#"{"not-oauth":{}}"#.data(using: .utf8)!)
             },
@@ -388,7 +414,7 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         let mdatBox = MutableBox(Date(timeIntervalSince1970: 4999))  // 1s 前，热写
         let reader = ClaudeOAuthCredentialsReader(
             fileURLs: [],
-            keychainRead: {
+            keychainRead: { _ in
                 keychainCalls.increment()
                 return .success(#"{"claudeAiOauth":{"accessToken":"old","expiresAt":1000}}"#.data(using: .utf8)!)
             },
@@ -577,6 +603,252 @@ final class ClaudeOAuthUsageTests: XCTestCase {
         XCTAssertEqual(parsed?.expiresAt, Date(timeIntervalSince1970: 4242))
         ClaudeOAuthTokenMirror.delete()
         XCTAssertFalse(FileManager.default.fileExists(atPath: mirrorURL.path))
+    }
+
+    // MARK: - KeychainReadMode plumbing
+
+    func testKeychainReadDefaultsToSilentMode() throws {
+        var seenModes: [KeychainReadMode] = []
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: { mode in
+                seenModes.append(mode)
+                return .success(DelegationFixtures.freshCredentialsData)
+            },
+            gate: OAuthCooldownGate()
+        )
+        _ = try reader.read()
+        XCTAssertEqual(seenModes, [.silent])
+    }
+
+    func testAllowInteractiveReadOnceArmsExactlyOneRead() throws {
+        var seenModes: [KeychainReadMode] = []
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: { mode in
+                seenModes.append(mode)
+                // 返回过期凭据，避免缓存吞掉后续读取。
+                return .success(DelegationFixtures.expiredCredentialsData)
+            },
+            keychainProbeModificationDate: { nil },  // 无 mdat → 每次都真实读取
+            gate: OAuthCooldownGate()
+        )
+        reader.allowInteractiveReadOnce()
+        XCTAssertThrowsError(try reader.read())
+        XCTAssertThrowsError(try reader.read())
+        XCTAssertEqual(seenModes, [.interactiveAllowed, .silent])
+    }
+
+    // F1: arm consumed by the read() call it was intended for, even when that
+    // call never reaches the keychain (file source satisfies it earlier).
+    func testInteractiveArmSpentByFileSatisfiedRead() throws {
+        var seenModes: [KeychainReadMode] = []
+        let credFile = tempDir.appendingPathComponent("creds.json")
+        try DelegationFixtures.freshCredentialsData.write(to: credFile)
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [credFile],
+            keychainRead: { mode in
+                seenModes.append(mode)
+                // Return itemNotFound so the second read throws without caching,
+                // allowing us to confirm the mode without complicating the assertion.
+                return .failure(.itemNotFound)
+            },
+            gate: OAuthCooldownGate()
+        )
+        // First read: file source succeeds; keychain closure never called.
+        reader.allowInteractiveReadOnce()
+        _ = try reader.read()
+        XCTAssertTrue(seenModes.isEmpty, "keychain should not have been called")
+        // Second read: arm is spent; file is gone so keychain is reached → must be .silent.
+        try FileManager.default.removeItem(at: credFile)
+        XCTAssertThrowsError(try reader.read()) // credentialsUnavailable; we care about mode
+        XCTAssertEqual(seenModes, [.silent], "spent arm must not carry over to later reads")
+    }
+
+    // F3: silent denial does not arm the 6h cooldown.
+    func testSilentDenialDoesNotArmCooldown() {
+        let keychainCalls = Counter()
+        let gate = OAuthCooldownGate()
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: { _ in keychainCalls.increment(); return .failure(.denied(status: -25308)) },
+            now: { Date(timeIntervalSince1970: 5000) },
+            gate: gate
+        )
+        // Silent denial (no allowInteractiveReadOnce) throws keychainDenied but must NOT arm gate.
+        XCTAssertThrowsError(try reader.read()) { error in
+            XCTAssertEqual(error as? OAuthUsageError, .keychainDenied)
+        }
+        XCTAssertEqual(keychainCalls.value, 1)
+        // Second read must also reach the closure (no cooldown blocked it).
+        XCTAssertThrowsError(try reader.read()) { error in
+            XCTAssertEqual(error as? OAuthUsageError, .keychainDenied)
+        }
+        XCTAssertEqual(keychainCalls.value, 2)
+    }
+
+    func testItemUnchangedSinceLastReadTracksProbe() throws {
+        let fixedDate = Date(timeIntervalSince1970: 1_000_000)
+        var probeDate = fixedDate
+        let now = fixedDate.addingTimeInterval(10) // settle interval 已过
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: { _ in .success(DelegationFixtures.freshCredentialsData) },
+            keychainProbeModificationDate: { probeDate },
+            now: { now },
+            gate: OAuthCooldownGate()
+        )
+        // 尚无记录 → 视为已变化（不确定 ≠ 未变）
+        XCTAssertFalse(reader.keychainItemUnchangedSinceLastRead())
+        _ = try reader.read() // 记录 mdat
+        XCTAssertTrue(reader.keychainItemUnchangedSinceLastRead())
+        probeDate = fixedDate.addingTimeInterval(60) // item 轮换
+        XCTAssertFalse(reader.keychainItemUnchangedSinceLastRead())
+    }
+
+    // MARK: - Delegated refresh triggers
+
+    /// 造一个 reader：文件源过期 → read() 抛 tokenExpired；委托刷新"成功"后
+    /// keychain 闭包给出新鲜凭据。
+    func testTokenExpiredTriggersDelegatedRefreshThenRetriesRead() throws {
+        var keychainPayload = DelegationFixtures.expiredCredentialsData
+        var refreshCalls = 0
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: { _ in .success(keychainPayload) },
+            keychainProbeModificationDate: { nil },
+            gate: OAuthCooldownGate()
+        )
+        let client = ClaudeOAuthUsageClient(
+            credentialsReader: reader,
+            transport: { _ in DelegationFixtures.usageOKResponse },
+            gate: OAuthCooldownGate(),
+            delegatedRefresh: {
+                refreshCalls += 1
+                keychainPayload = DelegationFixtures.freshCredentialsData
+                return true
+            }
+        )
+        let payload = try client.fetchStatusLinePayload()
+        XCTAssertFalse(payload.isEmpty)
+        XCTAssertEqual(refreshCalls, 1)
+    }
+
+    func testTokenExpiredWithoutDelegateRethrows() {
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: { _ in .success(DelegationFixtures.expiredCredentialsData) },
+            keychainProbeModificationDate: { nil },
+            gate: OAuthCooldownGate()
+        )
+        let client = ClaudeOAuthUsageClient(
+            credentialsReader: reader,
+            transport: { _ in DelegationFixtures.usageOKResponse },
+            gate: OAuthCooldownGate()
+        )
+        XCTAssertThrowsError(try client.fetchStatusLinePayload()) { error in
+            XCTAssertEqual(error as? OAuthUsageError, .tokenExpired)
+        }
+    }
+
+    private func credentialsData(accessToken: String, expiresIn: TimeInterval = 3600) -> Data {
+        let millis = (Date().timeIntervalSince1970 + expiresIn) * 1000
+        return Data(#"{"claudeAiOauth":{"accessToken":"\#(accessToken)","expiresAt":\#(millis)}}"#.utf8)
+    }
+
+    func testUnauthorizedWithUnchangedItemDelegatesAndRetriesOnce() throws {
+        // 第一次请求 401；委托刷新成功后重试返回 200。
+        // F5: distinct tokens per phase so we can assert the retry used the rotated token.
+        let fixedMdat = Date(timeIntervalSince1970: 3_000_000)
+        let requests = Counter()
+        var keychainPayload = credentialsData(accessToken: "tok-old")
+        var refreshCalls = 0
+        let capturedAuthHeaders = MutableBox<[String]>([])
+        let now = fixedMdat.addingTimeInterval(100)
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: { _ in .success(keychainPayload) },
+            keychainProbeModificationDate: { fixedMdat },  // 永不变 → itemUnchanged = true
+            now: { now },
+            gate: OAuthCooldownGate()
+        )
+        let gate = OAuthCooldownGate()
+        let client = ClaudeOAuthUsageClient(
+            credentialsReader: reader,
+            transport: { request in
+                capturedAuthHeaders.value = capturedAuthHeaders.value + [request.value(forHTTPHeaderField: "Authorization") ?? ""]
+                requests.increment()
+                return requests.value == 1 ? DelegationFixtures.unauthorizedResponse : DelegationFixtures.usageOKResponse
+            },
+            now: { now },
+            gate: gate,
+            delegatedRefresh: {
+                refreshCalls += 1
+                keychainPayload = self.credentialsData(accessToken: "tok-new")
+                return true
+            }
+        )
+        let payload = try client.fetchStatusLinePayload()
+        XCTAssertFalse(payload.isEmpty)
+        XCTAssertEqual(refreshCalls, 1)
+        XCTAssertEqual(requests.value, 2)
+        // F5: first request used tok-old, retry used the rotated tok-new.
+        XCTAssertEqual(capturedAuthHeaders.value.first, "Bearer tok-old")
+        XCTAssertEqual(capturedAuthHeaders.value.last, "Bearer tok-new")
+        // 重试成功 → 不得武装 unauthorized 冷却。
+        XCTAssertNil(gate.activeCooldown(key: "claude.unauthorized", now: now))
+    }
+
+    func testUnauthorizedRetryFailureArmsCooldownAndThrows() {
+        let fixedMdat = Date(timeIntervalSince1970: 3_000_000)
+        let now = fixedMdat.addingTimeInterval(100)
+        let requests = Counter()
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: { _ in .success(DelegationFixtures.freshCredentialsData) },
+            keychainProbeModificationDate: { fixedMdat },
+            now: { now },
+            gate: OAuthCooldownGate()
+        )
+        let gate = OAuthCooldownGate()
+        let client = ClaudeOAuthUsageClient(
+            credentialsReader: reader,
+            transport: { _ in requests.increment(); return DelegationFixtures.unauthorizedResponse },
+            now: { now },
+            gate: gate,
+            delegatedRefresh: { true }
+        )
+        XCTAssertThrowsError(try client.fetchStatusLinePayload()) { error in
+            XCTAssertEqual(error as? OAuthUsageError, .unauthorized(statusCode: 401))
+        }
+        XCTAssertEqual(requests.value, 2)  // 原始 + 单次重试，绝无第三次
+        XCTAssertNotNil(gate.activeCooldown(key: "claude.unauthorized", now: now))
+    }
+
+    func testUnauthorizedWithChangedItemDoesNotDelegate() {
+        // item 已变（探测返回新日期）→ 委托刷新不该被调用（下一轮 suspect 探测会拿新令牌）。
+        let probeDateBox = MutableBox(Date(timeIntervalSince1970: 3_000_000))
+        let now = probeDateBox.value.addingTimeInterval(100)
+        var refreshCalls = 0
+        let reader = ClaudeOAuthCredentialsReader(
+            fileURLs: [],
+            keychainRead: { _ in .success(DelegationFixtures.freshCredentialsData) },
+            keychainProbeModificationDate: { probeDateBox.value },
+            now: { now },
+            gate: OAuthCooldownGate()
+        )
+        let client = ClaudeOAuthUsageClient(
+            credentialsReader: reader,
+            transport: { _ in
+                probeDateBox.value = probeDateBox.value.addingTimeInterval(60)  // 请求后 item 轮换
+                return DelegationFixtures.unauthorizedResponse
+            },
+            now: { now },
+            gate: OAuthCooldownGate(),
+            delegatedRefresh: { refreshCalls += 1; return true }
+        )
+        XCTAssertThrowsError(try client.fetchStatusLinePayload())
+        XCTAssertEqual(refreshCalls, 0)
     }
 
     func testMirrorRewrittenWhenFileMissingEvenIfTokenUnchanged() throws {

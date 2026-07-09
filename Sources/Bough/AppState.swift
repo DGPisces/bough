@@ -153,7 +153,8 @@ final class AppState {
                 keychainRead: ClaudeKeychainReader.readCredentialsData,
                 keychainProbeModificationDate: ClaudeKeychainReader.readModificationDate
             ),
-            tokenMirrorWriter: mirrorWriter
+            tokenMirrorWriter: mirrorWriter,
+            delegatedRefresh: ClaudeKeychainReader.makeDelegatedRefresh()
         )
         let codex = CodexOAuthUsageClient()
         let fallback = CodexAppServerRateLimitMonitorReader(
