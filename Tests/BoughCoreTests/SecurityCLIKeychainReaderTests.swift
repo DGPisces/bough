@@ -31,20 +31,20 @@ final class SecurityCLIKeychainReaderTests: XCTestCase {
 
     func testSuccessTrimsTrailingNewlines() throws {
         let bin = try fakeBinary(script: #"printf '{"k":"v"}\n'"#)
-        let result = SecurityCLIKeychainReader.readCredentialsData(service: "svc", binaryPath: bin)
+        let result = SecurityCLIKeychainReader.readCredentialsData(service: "svc", binaryPath: bin, timeout: 10)
         XCTAssertEqual(result, .success(Data(#"{"k":"v"}"#.utf8)))
     }
 
     func testItemNotFoundExitCodeMapsToItemNotFound() throws {
         // security find-generic-password 未找到 item 时退出码 44（errSecItemNotFound 的 CLI 映射）。
         let bin = try fakeBinary(script: "exit 44")
-        let result = SecurityCLIKeychainReader.readCredentialsData(service: "svc", binaryPath: bin)
+        let result = SecurityCLIKeychainReader.readCredentialsData(service: "svc", binaryPath: bin, timeout: 10)
         XCTAssertEqual(result, .failure(.itemNotFound))
     }
 
     func testOtherNonZeroExitMapsToDeniedWithStatus() throws {
         let bin = try fakeBinary(script: "exit 51")
-        let result = SecurityCLIKeychainReader.readCredentialsData(service: "svc", binaryPath: bin)
+        let result = SecurityCLIKeychainReader.readCredentialsData(service: "svc", binaryPath: bin, timeout: 10)
         XCTAssertEqual(result, .failure(.denied(status: 51)))
     }
 
@@ -59,7 +59,7 @@ final class SecurityCLIKeychainReaderTests: XCTestCase {
 
     func testEmptyOutputMapsToDenied() throws {
         let bin = try fakeBinary(script: "exit 0")
-        let result = SecurityCLIKeychainReader.readCredentialsData(service: "svc", binaryPath: bin)
+        let result = SecurityCLIKeychainReader.readCredentialsData(service: "svc", binaryPath: bin, timeout: 10)
         XCTAssertEqual(result, .failure(.denied(status: -1)))
     }
 
@@ -73,7 +73,7 @@ final class SecurityCLIKeychainReaderTests: XCTestCase {
             "svce"<blob>="Claude Code-credentials"
         EOF
         """)
-        let date = SecurityCLIKeychainReader.readModificationDate(service: "svc", binaryPath: bin)
+        let date = SecurityCLIKeychainReader.readModificationDate(service: "svc", binaryPath: bin, timeout: 10)
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
         let expected = calendar.date(from: DateComponents(
@@ -83,7 +83,7 @@ final class SecurityCLIKeychainReaderTests: XCTestCase {
 
     func testReadModificationDateReturnsNilWithoutMdat() throws {
         let bin = try fakeBinary(script: "echo no-attrs-here")
-        XCTAssertNil(SecurityCLIKeychainReader.readModificationDate(service: "svc", binaryPath: bin))
+        XCTAssertNil(SecurityCLIKeychainReader.readModificationDate(service: "svc", binaryPath: bin, timeout: 10))
     }
 
     func testTimeoutKillsMachOChildThatDoesNotSetsid() {
