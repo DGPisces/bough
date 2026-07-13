@@ -2,24 +2,35 @@
 
 All notable changes to Bough are documented here.
 
-## [Unreleased]
+## [v1.2.0] - 2026-07-13
 
-### Usage
+### English
 
-- **Fixed**: Eliminated recurring macOS Keychain authorization dialogs for the
-  Claude usage channel. Keychain reads now use a non-interactive authorization
-  context with a silent `/usr/bin/security` fallback (adapted from CodexBar);
-  background polls can no longer prompt.
-- **Added**: Delegated token refresh — when the Claude CLI token expires while
-  the CLI is idle, Bough briefly launches `claude` so the CLI renews its own
-  credentials. The background usage monitor now also reads rotated tokens
-  after its mirror expires.
-- **修复**：彻底消除 Claude 用量通道反复弹出的 macOS 钥匙串授权对话框。
-  钥匙串读取改用非交互授权上下文，并以静默的 `/usr/bin/security` 兜底
-  （移植自 CodexBar）；后台轮询不再可能触发弹窗。
-- **新增**：委托令牌刷新——Claude CLI 令牌过期且 CLI 空闲时，Bough 会短暂
-  启动 `claude` 让 CLI 自行续期。后台用量监控在镜像过期后也能读到轮换后的
-  新令牌。
+Zero-prompt Keychain access for the Claude usage channel, plus delegated token refresh.
+
+**Usage — Fixed:**
+
+- The macOS Keychain authorization dialog for "Claude Code-credentials" is gone for good. The Claude CLI stores its credentials with a partition list that third-party apps can never satisfy, so any in-process read prompted on every token rotation — even after "Always Allow". Keychain reads now use a non-interactive authorization context and fall back to a silent `/usr/bin/security` read (approach adapted from [CodexBar](https://github.com/steipete/CodexBar)); background refreshes can no longer show a dialog at all.
+- A transient Keychain read failure no longer silences the usage channel for 6 hours: the quiet period now applies only when a real authorization dialog is actually denied.
+
+**Usage — Added:**
+
+- Delegated token refresh: when the Claude CLI token expires while the CLI is idle, Bough briefly launches `claude` so the CLI renews its own credentials — verified via the Keychain item fingerprint and rate-limited with cooldowns. Usage data now self-heals instead of going stale until your next Claude session.
+- The background usage monitor reads rotated tokens itself after its token mirror expires, so background-only operation (app closed) keeps working across token rotations.
+
+### 简体中文
+
+Claude 用量通道钥匙串访问零弹窗，并新增委托令牌刷新。
+
+**用量 — 修复：**
+
+- "Claude Code-credentials" 的 macOS 钥匙串授权弹窗彻底消失。Claude CLI 写入凭据时的分区表第三方应用永远无法命中，因此进程内读取在每次令牌轮换时都会弹窗——即使点过"始终允许"。钥匙串读取现改用非交互授权上下文，并以静默的 `/usr/bin/security` 读取兜底（方案移植自 [CodexBar](https://github.com/steipete/CodexBar)）；后台刷新从此不可能再弹出对话框。
+- 钥匙串读取的瞬时失败不再让用量通道静默 6 小时：静默期现在只在真实授权弹窗被拒绝时生效。
+
+**用量 — 新增：**
+
+- 委托令牌刷新：Claude CLI 令牌过期且 CLI 空闲时，Bough 会短暂启动 `claude` 让 CLI 自行续期——以钥匙串条目指纹变化为成功判据，并有冷却限速。用量数据从此自愈，不再"等你下次用 Claude 才恢复"。
+- 后台用量监控在令牌镜像过期后可自行读取轮换后的新令牌，App 关闭时的纯后台运行跨令牌轮换持续工作。
 
 ## [v1.1.1] - 2026-07-06
 
