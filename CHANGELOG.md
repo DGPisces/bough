@@ -2,6 +2,26 @@
 
 All notable changes to Bough are documented here.
 
+## [v1.2.1] - 2026-07-14
+
+### English
+
+Actually eliminates the Claude keychain authorization dialog — the v1.2.0 fix did not work.
+
+**Usage — Fixed:**
+
+- The "Bough wants to access key Claude Code-credentials" dialog is gone for real. v1.2.0's non-interactive read did not suppress the legacy authorization dialog — it blocked on the dialog instead of failing silently, and because it ran first, the reliably-silent `/usr/bin/security` read never got a chance. The silent path now goes straight through `/usr/bin/security` (which the item's ACL trusts, so it never prompts); an in-process read that can prompt is used only when you explicitly retry from Settings.
+- Verified on a signed build: usage refreshes silently on every poll with no dialog.
+
+### 简体中文
+
+真正消除 Claude 钥匙串授权弹窗——v1.2.0 的修复实际无效。
+
+**用量 — 修复：**
+
+- "Bough 想访问钥匙串 Claude Code-credentials"弹窗这次真的消失了。v1.2.0 的非交互读取并不能压制旧式授权对话框——它会**卡在弹窗上**而不是静默失败，且因为排在最前，那个真正静默的 `/usr/bin/security` 读取永远没机会执行。现在静默路径直接走 `/usr/bin/security`（该条目 ACL 信任它，永不弹窗）；会弹窗的进程内读取只在你从设置里主动重试时才使用。
+- 已在签名构建上验证：每个轮询周期都静默刷新用量，无任何弹窗。
+
 ## [v1.2.0] - 2026-07-13
 
 ### English
