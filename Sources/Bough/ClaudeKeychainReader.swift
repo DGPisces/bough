@@ -4,21 +4,23 @@ import BoughCore
 
 /// App-target Keychain closures injected into BoughCore's
 /// `ClaudeOAuthCredentialsReader` (the core target may not import Security —
-/// ArchitectureBoundaryTests). Reads run the three-layer chain (spec §3.1):
-/// no-UI framework read → security-CLI fallback → interactive read (armed
-/// only by an explicit user retry). Background polls can no longer show the
-/// macOS authorization dialog.
+/// ArchitectureBoundaryTests). The silent read goes through
+/// `/usr/bin/security` (which the item's ACL/partition trusts, so it never
+/// prompts); the prompt-capable in-process read is used only when an
+/// explicit user retry has armed `.interactiveAllowed`, so background polls
+/// can never show the macOS authorization dialog.
 enum ClaudeKeychainReader {
     static let service = SecurityCLIKeychainReader.claudeService
 
+    /// Attribute-only read (no `kSecReturnData`): decrypts nothing, so it
+    /// never triggers an authorization dialog — safe on the silent path.
     static let readModificationDate: () -> Date? = {
-        var query: [String: Any] = [
+        let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecReturnAttributes as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
-        KeychainNoUIQuery.apply(to: &query)
         var item: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
               let attributes = item as? [String: Any] else { return nil }
@@ -28,9 +30,8 @@ enum ClaudeKeychainReader {
     static let readCredentialsData: (KeychainReadMode) -> Result<Data, KeychainReadFailure> = { mode in
         KeychainReadChain.run(
             mode: mode,
-            noUIRead: { frameworkDataRead(noUI: true) },
-            cliRead: { SecurityCLIKeychainReader.readCredentialsData(service: service) },
-            interactiveRead: { frameworkDataRead(noUI: false) }
+            silentRead: { SecurityCLIKeychainReader.readCredentialsData(service: service) },
+            interactiveRead: { frameworkDataRead() }
         )
     }
 
@@ -48,14 +49,17 @@ enum ClaudeKeychainReader {
         return { coordinator.attempt() == .succeeded }
     }
 
-    private static func frameworkDataRead(noUI: Bool) -> Result<Data, KeychainReadFailure> {
-        var query: [String: Any] = [
+    /// Prompt-capable in-process read. Reached only via the chain's
+    /// `.interactiveAllowed` escalation (an explicit user retry), where the
+    /// authorization dialog is exactly what we want — it lets the user pick
+    /// "Always Allow".
+    private static func frameworkDataRead() -> Result<Data, KeychainReadFailure> {
+        let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
-        if noUI { KeychainNoUIQuery.apply(to: &query) }
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         switch status {
@@ -65,8 +69,8 @@ enum ClaudeKeychainReader {
         case errSecItemNotFound:
             return .failure(.itemNotFound)
         default:
-            // errSecInteractionNotAllowed / errSecAuthFailed / errSecUserCanceled:
-            // denial semantics — the chain (or the 6h gate) decides what's next.
+            // errSecAuthFailed / errSecUserCanceled: user denied — the 6h gate
+            // (armed only for interactive reads) decides what happens next.
             return .failure(.denied(status: status))
         }
     }

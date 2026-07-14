@@ -32,8 +32,8 @@ SOFTWARE.
 
 ## CodexBar Notice
 
-The usage-channel keychain access strategy (no-UI queries, security-CLI
-fallback, delegated CLI refresh) is adapted from
+The usage-channel keychain access strategy (silent `/usr/bin/security`
+reads, delegated CLI refresh) is adapted from
 [CodexBar](https://github.com/steipete/CodexBar).
 
 CodexBar is MIT licensed.
