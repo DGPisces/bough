@@ -28,6 +28,16 @@ final class KeychainReadChainTests: XCTestCase {
         XCTAssertEqual(result, .failure(.denied(status: -25308)))
     }
 
+    func testInteractiveAllowedSilentSuccessDoesNotPrompt() {
+        // A manual refresh arms .interactiveAllowed, but if the silent read
+        // succeeds the interactive (prompt-capable) read must NOT run.
+        let result = KeychainReadChain.run(
+            mode: .interactiveAllowed,
+            silentRead: { .success(self.data) },
+            interactiveRead: { XCTFail("must not run when silent read succeeds"); return .failure(.denied(status: -1)) })
+        XCTAssertEqual(result, .success(data))
+    }
+
     func testInteractiveAllowedEscalatesOnlyOnDenial() {
         var order: [String] = []
         let result = KeychainReadChain.run(
