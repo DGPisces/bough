@@ -137,7 +137,7 @@ final class AppStateCodexAppServerTests: XCTestCase {
         state.codexAppServerTransportFactory = { _ in transport }
         state.codexAppServerExecutablePath = "/bin/echo"
         state.startCodexAppServerClientIfPossibleForTesting()
-        await Task.yield()
+        try await TestHelpers.waitUntil { state.codexAppServerService != nil }
         let service = try XCTUnwrap(state.codexAppServerService)
         let exitExpectation = expectation(description: "service exit callback invoked")
         let priorOnExit = service.onExit
@@ -151,7 +151,10 @@ final class AppStateCodexAppServerTests: XCTestCase {
         transport.exit(status: 0)
         await fulfillment(of: [exitExpectation], timeout: 1)
 
-        XCTAssertNil(state.codexAppServerService)
+        // The exit callback fulfills the expectation, but the service/session
+        // teardown it triggers hops to the MainActor and may not have landed
+        // on this frame — poll instead of asserting immediately (macos26 flake).
+        try await TestHelpers.waitUntil { state.codexAppServerService == nil }
         XCTAssertNil(state.sessions["codexapp:thread-1"])
         XCTAssertNotNil(state.sessions["other:thread"])
         XCTAssertEqual(callbackCount, 1)
