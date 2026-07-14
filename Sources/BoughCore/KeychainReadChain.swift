@@ -8,35 +8,29 @@ public enum KeychainReadMode: Sendable {
     case interactiveAllowed
 }
 
-/// The three-layer read chain (spec §3.1): no-UI framework read →
-/// security-CLI fallback → (user-action only) interactive read.
-/// Pure function over injected closures so the ordering semantics are unit
-/// tested without a real Keychain.
+/// Two-layer read chain: a silent read that can never prompt (the
+/// `/usr/bin/security` subprocess, which sits in the item's ACL/partition)
+/// followed — only on an explicit user retry — by a prompt-capable
+/// interactive read that lets the user grant "Always Allow".
+///
+/// An in-process `SecItemCopyMatching` data read is NOT used on the silent
+/// path: `kSecUseAuthenticationUIFail` + `LAContext.interactionNotAllowed`
+/// do not reliably suppress the legacy ACL authorization dialog — the read
+/// blocks on the dialog instead of failing closed, which is exactly the
+/// prompt we must avoid. Pure function so the ordering is unit-tested
+/// without a real Keychain.
 public enum KeychainReadChain {
     public static func run(
         mode: KeychainReadMode,
-        noUIRead: () -> Result<Data, KeychainReadFailure>,
-        cliRead: () -> Result<Data, KeychainReadFailure>,
+        silentRead: () -> Result<Data, KeychainReadFailure>,
         interactiveRead: () -> Result<Data, KeychainReadFailure>
     ) -> Result<Data, KeychainReadFailure> {
-        let noUIResult = noUIRead()
-        switch noUIResult {
-        case .success:
-            return noUIResult
-        case .failure(.itemNotFound):
-            // A no-UI query resolves existence without authorization; a
-            // missing item is trustworthy — don't spawn the CLI for it.
-            return noUIResult
+        let result = silentRead()
+        switch result {
+        case .success, .failure(.itemNotFound):
+            return result
         case .failure(.denied):
-            break
-        }
-        switch cliRead() {
-        case .success(let data):
-            return .success(data)
-        case .failure(.itemNotFound):
-            return .failure(.itemNotFound)
-        case .failure(.denied):
-            guard mode == .interactiveAllowed else { return noUIResult }
+            guard mode == .interactiveAllowed else { return result }
             return interactiveRead()
         }
     }
