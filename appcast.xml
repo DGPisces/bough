@@ -8,16 +8,16 @@
     <description>Stable Bough updates</description>
     <language>en</language>
     <item>
-      <title>Version 1.2.1</title>
-      <link>https://github.com/DGPisces/bough/releases/tag/v1.2.1</link>
-      <sparkle:version>11</sparkle:version>
-      <sparkle:shortVersionString>1.2.1</sparkle:shortVersionString>
+      <title>Version 1.2.2</title>
+      <link>https://github.com/DGPisces/bough/releases/tag/v1.2.2</link>
+      <sparkle:version>12</sparkle:version>
+      <sparkle:shortVersionString>1.2.2</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-      <pubDate>Tue, 14 Jul 2026 08:50:21 +0000</pubDate>
+      <pubDate>Fri, 17 Jul 2026 03:27:37 +0000</pubDate>
       <enclosure
-        url="https://github.com/DGPisces/bough/releases/download/v1.2.1/Bough-v1.2.1.dmg"
-        sparkle:edSignature="xdvZxGGE4596xB2MFVAOpaAqswcjmO8oxr9mWYU99MqzMoOfQALgCaoxfXxU+jkRJvA779QfLQq2M/piduTfAg=="
-        length="14519647"
+        url="https://github.com/DGPisces/bough/releases/download/v1.2.2/Bough-v1.2.2.dmg"
+        sparkle:edSignature="/+WDC2cXqXQVIcdHHoJpy55S/EyHMojeuzMZartYUDBTIE47KoNkVCPavfk59FIoVcke1/MIds3pnMnLd0iFCA=="
+        length="14514226"
         type="application/octet-stream" />
     </item>
   </channel>
