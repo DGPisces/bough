@@ -1387,6 +1387,10 @@ extension ConfigInstaller {
         return codexAutoReviewEnabled(in: contents)
     }
 
+    static func codexReviewerUsesAutoReview(_ value: String?) -> Bool {
+        value == "auto_review" || value == "guardian_subagent"
+    }
+
     static func codexAutoReviewEnabled(in contents: String) -> Bool {
         guard codexConfigHasValidTableHeaders(contents) else { return false }
 
@@ -1415,7 +1419,7 @@ extension ConfigInstaller {
             }
         }
 
-        return approvalsReviewer == "auto_review" && approvalPolicy != "never"
+        return codexReviewerUsesAutoReview(approvalsReviewer) && approvalPolicy != "never"
     }
 
     static func codexDeprecatedHooksKeyPresent(fm: FileManager) -> Bool {

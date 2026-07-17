@@ -2,6 +2,24 @@
 
 All notable changes to Bough are documented here.
 
+## [v1.2.2] - 2026-07-17
+
+### English
+
+Fixes Codex "Approve for me" so Codex reviews requests before Bough asks for human approval.
+
+**Approvals — Fixed:**
+
+- Bough now recognizes Codex's compatible `guardian_subagent` reviewer value as auto-review, alongside `auto_review`. Permission requests are deferred to Codex's native reviewer instead of opening Bough's human approval prompt first.
+
+### 简体中文
+
+修复 Codex“Approve for me”：现在由 Codex 先审批，不再由 Bough 先弹出人工审批。
+
+**审批 — 修复：**
+
+- Bough 现在将 Codex 的兼容值 `guardian_subagent` 与 `auto_review` 一样识别为自动审批。权限请求会交回 Codex 原生审批器，不再先打开 Bough 人工审批弹窗。
+
 ## [v1.2.1] - 2026-07-14
 
 ### English

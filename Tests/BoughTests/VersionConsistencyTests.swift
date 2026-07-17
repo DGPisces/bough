@@ -118,7 +118,7 @@ final class VersionConsistencyTests: XCTestCase {
     }
 
     func testReleaseLabelUsesStablePublicVersion() throws {
-        XCTAssertEqual(try Self.plistExtract("BoughReleaseLabel"), "1.2.1")
+        XCTAssertEqual(try Self.plistExtract("BoughReleaseLabel"), "1.2.2")
     }
 
     // MARK: - Helpers
