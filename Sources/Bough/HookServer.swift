@@ -339,7 +339,7 @@ class HookServer {
             )
             guard approvalPolicy != "never" else { continue }
 
-            if firstString(
+            if ConfigInstaller.codexReviewerUsesAutoReview(firstString(
                 in: container,
                 keys: [
                     "approvals_reviewer",
@@ -349,7 +349,7 @@ class HookServer {
                     "_approvals_reviewer",
                     "_codex_approvals_reviewer",
                 ]
-            ) == "auto_review" {
+            )) {
                 return true
             }
         }

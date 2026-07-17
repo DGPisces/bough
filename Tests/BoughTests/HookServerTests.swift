@@ -88,6 +88,22 @@ final class HookServerTests: XCTestCase {
         }
     }
 
+    func testCodexGuardianSubagentConfigDefersToNativeReviewer() throws {
+        try withTemporaryCodexHome { _, config in
+            try write(
+                """
+                approval_policy = "on-request"
+                approvals_reviewer = "guardian_subagent"
+                """,
+                to: config
+            )
+
+            let event = try makePermissionRequestEvent(source: "codex", toolName: "Bash")
+
+            XCTAssertTrue(HookServer.shouldDeferCodexPermissionToAutoReview(event))
+        }
+    }
+
     func testCodexAutoReviewDeferRequiresCodexSource() throws {
         try withTemporaryCodexHome { _, config in
             try write(
@@ -142,6 +158,18 @@ final class HookServerTests: XCTestCase {
                 source: "codex",
                 toolName: "Bash",
                 extra: ["approvals_reviewer": "auto_review"]
+            )
+
+            XCTAssertTrue(HookServer.shouldDeferCodexPermissionToAutoReview(event))
+        }
+    }
+
+    func testCodexGuardianSubagentRuntimePayloadDefersToNativeReviewer() throws {
+        try withTemporaryCodexHome { _, _ in
+            let event = try makePermissionRequestEvent(
+                source: "codex",
+                toolName: "Bash",
+                extra: ["approvals_reviewer": "guardian_subagent"]
             )
 
             XCTAssertTrue(HookServer.shouldDeferCodexPermissionToAutoReview(event))
