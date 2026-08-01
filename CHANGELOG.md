@@ -2,6 +2,32 @@
 
 All notable changes to Bough are documented here.
 
+## [v1.2.3] - 2026-08-01
+
+### English
+
+Bough approvals can now be disabled in favor of native CLI approval, and long approval details no longer hide the action buttons.
+
+**Approvals — Added:**
+
+- A new setting lets you turn Bough approval prompts on or off. When off, Codex and Claude Code use their own approval interface; existing behavior remains the default.
+
+**Approvals — Fixed:**
+
+- Long commands and approval details now scroll within the approval card, keeping Deny, Dismiss, Allow Once, and Always visible and usable.
+
+### 简体中文
+
+Bough 审批现在可以关闭并回退到 CLI 原生审批，超长审批内容也不再遮挡操作按钮。
+
+**审批 — 新增：**
+
+- 新增 Bough 审批开关。关闭后，Codex 和 Claude Code 使用各自的原生审批界面；默认仍保持现有 Bough 审批行为。
+
+**审批 — 修复：**
+
+- 长命令和审批详情现在可在审批卡片内滚动，拒绝、忽略、允许一次和始终允许按钮始终可见并可操作。
+
 ## [v1.2.2] - 2026-07-17
 
 ### English

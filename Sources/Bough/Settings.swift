@@ -15,7 +15,7 @@ enum SettingsNotification {
 
 enum AppVersion {
     /// Update this each release. Used as fallback when Info.plist is unavailable (debug builds).
-    static let fallback = "1.2.2"
+    static let fallback = "1.2.3"
 
     static var current: String {
         if let releaseLabel = Bundle.main.infoDictionary?["BoughReleaseLabel"] as? String {
@@ -87,6 +87,7 @@ enum CompactBarPriority: String, CaseIterable, Identifiable {
 enum SettingsKey {
     // Product mode
     static let codingSessionsEnabled = "codingSessionsEnabled"
+    static let boughApprovalEnabled = "boughApprovalEnabled"
     static let welcomeGuideCompletedVersion = "welcomeGuideCompletedVersion"
     static let welcomeGuideCompletedAt = "welcomeGuideCompletedAt"
     static let welcomeGuideAutoOpenConsumed = "welcomeGuideAutoOpenConsumed"
@@ -206,6 +207,7 @@ enum SettingsKey {
 
 struct SettingsDefaults {
     static let codingSessionsEnabled = true
+    static let boughApprovalEnabled = true
 
     static let displayChoice = "auto"
     static let allowHorizontalDrag = false
@@ -300,6 +302,19 @@ enum CodingSessionsSettings {
     }
 }
 
+enum BoughApprovalSettings {
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        guard defaults.object(forKey: SettingsKey.boughApprovalEnabled) != nil else {
+            return SettingsDefaults.boughApprovalEnabled
+        }
+        return defaults.bool(forKey: SettingsKey.boughApprovalEnabled)
+    }
+
+    static func setEnabled(_ isEnabled: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(isEnabled, forKey: SettingsKey.boughApprovalEnabled)
+    }
+}
+
 enum AirDropSettings {
     static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
         guard defaults.object(forKey: SettingsKey.airDropEnabled) != nil else {
@@ -319,6 +334,7 @@ class SettingsManager {
         PhysicalBuddyDefaultsCleanup.runIfNeeded(defaults: defaults)
         defaults.register(defaults: [
             SettingsKey.codingSessionsEnabled: SettingsDefaults.codingSessionsEnabled,
+            SettingsKey.boughApprovalEnabled: SettingsDefaults.boughApprovalEnabled,
             SettingsKey.displayChoice: SettingsDefaults.displayChoice,
             SettingsKey.allowHorizontalDrag: SettingsDefaults.allowHorizontalDrag,
             SettingsKey.panelHorizontalOffset: SettingsDefaults.panelHorizontalOffset,

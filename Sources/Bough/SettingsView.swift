@@ -1557,6 +1557,7 @@ private struct AdvancedPage: View {
     let highlightedTargetID: SettingsTargetID?
 
     @AppStorage(SettingsKey.autoApproveTools) private var autoApproveRaw: String = SettingsDefaults.autoApproveTools
+    @AppStorage(SettingsKey.boughApprovalEnabled) private var boughApprovalEnabled = SettingsDefaults.boughApprovalEnabled
     @AppStorage(SettingsKey.excludedHookCwdSubstrings) private var excludedHookCwdSubstrings: String = SettingsDefaults.excludedHookCwdSubstrings
     @AppStorage(SettingsKey.sessionTimeout) private var sessionTimeout = SettingsDefaults.sessionTimeout
     @AppStorage(SettingsKey.rotationInterval) private var rotationInterval = SettingsDefaults.rotationInterval
@@ -1581,6 +1582,15 @@ private struct AdvancedPage: View {
                 targetID: .advancedAutomation,
                 highlightedTargetID: highlightedTargetID
             ) {
+                Toggle(isOn: $boughApprovalEnabled) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(l10n["bough_approval_enabled"])
+                        Text(l10n["bough_approval_enabled_desc"])
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Divider()
                 Text(l10n["auto_approve_tools_desc"])
                     .font(.caption)
                     .foregroundStyle(.secondary)

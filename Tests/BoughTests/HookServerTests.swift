@@ -50,6 +50,26 @@ final class HookServerTests: XCTestCase {
         XCTAssertNotNil(snapshot.today)
     }
 
+    func testBoughApprovalIsEnabledByDefault() {
+        XCTAssertTrue(BoughApprovalSettings.isEnabled(defaults: defaults))
+    }
+
+    func testDisabledBoughApprovalDefersCodexAndClaudePermissionsToNativeUI() throws {
+        BoughApprovalSettings.setEnabled(false, defaults: defaults)
+
+        for source in ["codex", "claude"] {
+            let event = try makePermissionRequestEvent(source: source, toolName: "Bash")
+            XCTAssertTrue(HookServer.shouldDeferPermissionToNativeUI(event, defaults: defaults))
+        }
+    }
+
+    func testDisabledBoughApprovalKeepsAskUserQuestionInBough() throws {
+        BoughApprovalSettings.setEnabled(false, defaults: defaults)
+        let event = try makePermissionRequestEvent(source: "claude", toolName: "AskUserQuestion")
+
+        XCTAssertFalse(HookServer.shouldDeferPermissionToNativeUI(event, defaults: defaults))
+    }
+
     func testCodexAutoReviewPermissionRequestsDeferToNativeReviewer() throws {
         try withTemporaryCodexHome { _, config in
             try write(

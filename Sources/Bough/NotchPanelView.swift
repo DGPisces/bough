@@ -11,6 +11,13 @@ enum NotchPanelLayoutMetrics {
     static let usageStripReservedHeight: CGFloat = 58
     static let auxiliaryRowReservedHeight: CGFloat = 112
 
+    static func approvalDetailMaxHeight(
+        availablePanelHeight: CGFloat,
+        notchHeight: CGFloat
+    ) -> CGFloat {
+        max(80, availablePanelHeight - notchHeight - 110)
+    }
+
     static func sessionScrollMaxHeight(
         maxVisibleSessions: Int,
         availablePanelHeight: CGFloat,
@@ -223,6 +230,10 @@ struct NotchPanelView: View {
                                 ApprovalBar(
                                     tool: pending.event.toolName ?? "Unknown",
                                     toolInput: pending.event.toolInput,
+                                    maxDetailHeight: NotchPanelLayoutMetrics.approvalDetailMaxHeight(
+                                        availablePanelHeight: availablePanelHeight,
+                                        notchHeight: notchHeight
+                                    ),
                                     queuePosition: 1,
                                     queueTotal: appState.permissionQueue.count,
                                     session: session,
@@ -239,6 +250,10 @@ struct NotchPanelView: View {
                                 ApprovalBar(
                                     tool: preview.toolName ?? "Unknown",
                                     toolInput: preview.toolInput,
+                                    maxDetailHeight: NotchPanelLayoutMetrics.approvalDetailMaxHeight(
+                                        availablePanelHeight: availablePanelHeight,
+                                        notchHeight: notchHeight
+                                    ),
                                     queuePosition: 1,
                                     queueTotal: 1,
                                     session: session,
@@ -1447,6 +1462,7 @@ private struct ApprovalToolDetailView: View {
 private struct ApprovalBar: View {
     let tool: String
     let toolInput: [String: Any]?
+    let maxDetailHeight: CGFloat
     let queuePosition: Int
     let queueTotal: Int
     let session: SessionSnapshot?
@@ -1512,13 +1528,17 @@ private struct ApprovalBar: View {
 
             // Tool-specific detail view
             if toolInput != nil {
-                ApprovalToolDetailView(tool: tool, toolInput: toolInput)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.white.opacity(0.04))
-                    .contentShape(Rectangle())
-                    .onTapGesture { handleCardClick() }
+                ScrollView(.vertical, showsIndicators: true) {
+                    ApprovalToolDetailView(tool: tool, toolInput: toolInput)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxHeight: maxDetailHeight)
+                .background(Color.white.opacity(0.04))
+                .contentShape(Rectangle())
+                .onTapGesture { handleCardClick() }
             }
 
             // Pixel-style buttons

@@ -160,6 +160,28 @@ final class NotchPanelViewTests: XCTestCase {
         XCTAssertTrue(UsageStripModel.shouldShow(surface: .completionCard(sessionId: "s1"), onlySessionId: nil))
     }
 
+    func testApprovalDetailsScrollWithoutHidingActionButtons() throws {
+        XCTAssertEqual(
+            NotchPanelLayoutMetrics.approvalDetailMaxHeight(
+                availablePanelHeight: 300,
+                notchHeight: 32
+            ),
+            158
+        )
+
+        let source = try sourceFile("Sources/Bough/NotchPanelView.swift")
+        let approvalBar = try XCTUnwrap(source.slice(
+            from: "private struct ApprovalBar: View",
+            to: "// MARK: - Click-to-jump handling"
+        ))
+        let scroll = try XCTUnwrap(approvalBar.range(of: "ScrollView(.vertical"))
+        let buttons = try XCTUnwrap(approvalBar.range(of: "// Pixel-style buttons"))
+
+        XCTAssertLessThan(scroll.lowerBound, buttons.lowerBound)
+        XCTAssertTrue(approvalBar.contains(".frame(maxHeight: maxDetailHeight)"))
+        XCTAssertTrue(approvalBar.contains("showsIndicators: true"))
+    }
+
     func testMusicActivityPolicySourceIsUsedByNotchPanelView() throws {
         let source = try sourceFile("Sources/Bough/NotchPanelView.swift")
 
