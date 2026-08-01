@@ -292,6 +292,8 @@ final class L10n: ObservableObject {
         // Auto-approve tools
         "auto_approve_tools": "Auto-approve Tools",
         "auto_approve_tools_desc": "These internal tools are auto-approved without showing a confirmation dialog. Disable tools you want to review manually.",
+        "bough_approval_enabled": "Use Bough for approvals",
+        "bough_approval_enabled_desc": "When off, Codex and Claude Code handle permission approvals in their own interface.",
         "auto_approve_TaskCreate": "Create a new task",
         "auto_approve_TaskUpdate": "Update an existing task",
         "auto_approve_TaskGet": "Get task details",
@@ -956,6 +958,8 @@ final class L10n: ObservableObject {
         // Auto-approve tools
         "auto_approve_tools": "自动批准工具",
         "auto_approve_tools_desc": "这些内部工具会自动批准，无需弹出确认对话框。关闭你想要手动审核的工具。",
+        "bough_approval_enabled": "使用 Bough 进行审批",
+        "bough_approval_enabled_desc": "关闭后，Codex 和 Claude Code 将在各自界面中处理权限审批。",
         "auto_approve_TaskCreate": "创建新任务",
         "auto_approve_TaskUpdate": "更新已有任务",
         "auto_approve_TaskGet": "获取任务详情",

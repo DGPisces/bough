@@ -280,6 +280,15 @@ class HookServer {
         return .event
     }
 
+    nonisolated static func shouldDeferPermissionToNativeUI(
+        _ event: HookEvent,
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        EventNormalizer.normalize(event.eventName) == "PermissionRequest"
+            && event.toolName != "AskUserQuestion"
+            && !BoughApprovalSettings.isEnabled(defaults: defaults)
+    }
+
     static func shouldDeferCodexPermissionToAutoReview(
         _ event: HookEvent,
         fm: FileManager = .default,
@@ -583,6 +592,11 @@ class HookServer {
 
         switch Self.routeKind(for: event) {
         case .permission:
+            if Self.shouldDeferPermissionToNativeUI(event) {
+                sendResponse(connection: connection, data: Data("{}".utf8))
+                return
+            }
+
             let sessionId = event.sessionId ?? "default"
 
             // Codex's built-in auto-review replaces the manual sandbox approval
